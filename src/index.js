@@ -248,29 +248,32 @@ class NightscoutMentraApp extends AppServer {
     }
 
     /**
-     * 🆕 AI TOOLS para Mira (AÑADIDO)
+     * 🆕 AI TOOLS para Mira (CORREGIDO para estructura MentraOS)
      */
-    async onToolCall(toolCall, userId) {
-        const { toolName, parameters } = toolCall;
+    async onToolCall(data) {
+        // MentraOS pasa los datos en una estructura específica
+        const toolId = data.toolId || data.toolName;
+        const userId = data.userId;
+        const activeSession = data.activeSession;
         
-        console.log(`🤖 AI Tool called: ${toolName} for user ${userId}`);
+        console.log(`🤖 AI Tool called: ${toolId} for user ${userId}`);
         
         try {
-            switch (toolName) {
+            switch (toolId) {
                 // Comandos en inglés
                 case 'get_glucose':
                 case 'check_glucose':
-                    return await this.handleGetGlucoseForMira(userId, 'en');
+                    return await this.handleGetGlucoseForMira(userId, activeSession, 'en');
                     
                 // Comandos en español
                 case 'obtener_glucosa':
                 case 'revisar_glucosa':
-                    return await this.handleGetGlucoseForMira(userId, 'es');
+                    return await this.handleGetGlucoseForMira(userId, activeSession, 'es');
                     
                 default:
                     return {
                         success: false,
-                        error: `Unknown tool: ${toolName}`
+                        error: `Unknown tool: ${toolId}`
                     };
             }
         } catch (error) {
@@ -283,19 +286,31 @@ class NightscoutMentraApp extends AppServer {
     }
 
     /**
-     * 🆕 Manejar petición de glucosa desde Mira
+     * 🆕 Manejar petición de glucosa desde Mira (CORREGIDO)
      */
-    async handleGetGlucoseForMira(userId, lang) {
+    async handleGetGlucoseForMira(userId, activeSession, lang) {
         try {
-            // Buscar sesión activa del usuario para obtener sus settings
-            let userSettings = null;
-            let activeSession = null;
+            console.log(`📋 Processing glucose request for ${userId} in ${lang}`);
             
-            for (const [sessionId, sessionData] of this.activeSessions) {
-                if (sessionData.userId === userId) {
-                    userSettings = await this.getUserSettings(sessionData.session);
-                    activeSession = { sessionId, session: sessionData.session };
-                    break;
+            // Obtener settings desde la sesión activa
+            let userSettings = null;
+            let sessionForDisplay = null;
+            
+            // Intentar obtener settings desde activeSession si está disponible
+            if (activeSession && activeSession.settings && activeSession.settings.settings) {
+                const settingsArray = activeSession.settings.settings;
+                userSettings = this.parseSettingsFromArray(settingsArray);
+                sessionForDisplay = activeSession;
+                console.log('✅ Settings obtenidos desde activeSession');
+            } else {
+                // Fallback: buscar en sesiones activas
+                for (const [sessionId, sessionData] of this.activeSessions) {
+                    if (sessionData.userId === userId) {
+                        userSettings = await this.getUserSettings(sessionData.session);
+                        sessionForDisplay = sessionData.session;
+                        console.log('✅ Settings obtenidos desde sesión activa');
+                        break;
+                    }
                 }
             }
 
@@ -303,34 +318,49 @@ class NightscoutMentraApp extends AppServer {
                 const errorMsg = lang === 'es' ? 
                     "Nightscout no está configurado. Configura la URL y token en los ajustes de la aplicación." :
                     "Nightscout is not configured. Configure URL and token in app settings.";
+                    
+                console.log('❌ Settings no disponibles');
                 return {
                     success: false,
                     error: errorMsg
                 };
             }
 
+            // Obtener datos de glucosa
+            console.log('📡 Obteniendo datos de Nightscout...');
             const glucoseData = await this.getGlucoseData(userSettings);
             
             if (!glucoseData) {
                 const errorMsg = lang === 'es' ?
                     "No hay datos de glucosa disponibles." :
                     "No glucose data available.";
+                    
+                console.log('❌ No hay datos de glucosa');
                 return {
                     success: false,
                     error: errorMsg
                 };
             }
 
-            // 🆕 Mostrar en las gafas también
-            if (activeSession) {
+            console.log(`✅ Datos obtenidos: ${glucoseData.sgv} mg/dL`);
+
+            // 🆕 Mostrar en las gafas también si hay sesión disponible
+            if (sessionForDisplay) {
                 try {
                     const displayText = this.formatForG1(glucoseData, userSettings);
-                    activeSession.session.layouts.showTextWall(displayText);
                     
-                    // Ocultar después de 10 segundos
-                    setTimeout(() => {
-                        this.hideDisplay(activeSession.session, activeSession.sessionId);
-                    }, 10000);
+                    if (sessionForDisplay.layouts) {
+                        sessionForDisplay.layouts.showTextWall(displayText);
+                        console.log('📱 Glucosa mostrada en gafas por Mira');
+                        
+                        // Ocultar después de 10 segundos
+                        setTimeout(() => {
+                            if (sessionForDisplay.layouts) {
+                                sessionForDisplay.layouts.showTextWall("");
+                                console.log('🙈 Display ocultado después de Mira');
+                            }
+                        }, 10000);
+                    }
                     
                 } catch (displayError) {
                     console.error('Error mostrando en gafas:', displayError);
@@ -345,6 +375,8 @@ class NightscoutMentraApp extends AppServer {
                 `Tu glucosa está en ${glucoseData.sgv} mg/dL ${trend}. Estado: ${status}.` :
                 `Your glucose is ${glucoseData.sgv} mg/dL ${trend}. Status: ${status}.`;
 
+            console.log(`🤖 Respuesta para Mira: ${message}`);
+
             return {
                 success: true,
                 data: {
@@ -356,6 +388,7 @@ class NightscoutMentraApp extends AppServer {
             };
 
         } catch (error) {
+            console.error('❌ Error en handleGetGlucoseForMira:', error);
             const errorMsg = lang === 'es' ?
                 `Error obteniendo glucosa: ${error.message}` :
                 `Error getting glucose: ${error.message}`;
@@ -364,6 +397,28 @@ class NightscoutMentraApp extends AppServer {
                 error: errorMsg
             };
         }
+    }
+
+    /**
+     * 🆕 Parsear settings desde array de MentraOS
+     */
+    parseSettingsFromArray(settingsArray) {
+        const settings = {};
+        
+        for (const setting of settingsArray) {
+            settings[setting.key] = setting.value;
+        }
+        
+        return {
+            nightscoutUrl: settings.nightscout_url?.trim(),
+            nightscoutToken: settings.nightscout_token?.trim(),
+            updateInterval: parseInt(settings.update_interval) || 5,
+            lowAlert: parseInt(settings.critical_low) || 70,
+            highAlert: parseInt(settings.critical_high) || 180,
+            alertsEnabled: settings.alerts_enabled === 'true' || settings.alerts_enabled === true,
+            language: settings.language || 'en',
+            timezone: settings.timezone || null
+        };
     }
 
     /**
