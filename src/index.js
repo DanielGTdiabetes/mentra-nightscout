@@ -248,7 +248,7 @@ class NightscoutMentraApp extends AppServer {
     }
 
     /**
-     * 🆕 AI TOOLS para Mira (CORREGIDO para estructura MentraOS)
+     * 🆕 AI TOOLS para Mira (CORREGIDO para detectar idioma automáticamente)
      */
     async onToolCall(data) {
         // MentraOS pasa los datos en una estructura específica
@@ -259,22 +259,39 @@ class NightscoutMentraApp extends AppServer {
         console.log(`🤖 AI Tool called: ${toolId} for user ${userId}`);
         
         try {
+            // 🆕 DETECTAR IDIOMA DESDE SETTINGS automáticamente
+            let detectedLang = 'en'; // Default
+            
+            if (activeSession && activeSession.settings && activeSession.settings.settings) {
+                const languageSetting = activeSession.settings.settings.find(s => s.key === 'language');
+                if (languageSetting && languageSetting.value === 'es') {
+                    detectedLang = 'es';
+                }
+                console.log(`🌍 Idioma detectado desde settings: ${detectedLang}`);
+            }
+            
             switch (toolId) {
                 // Comandos en inglés
                 case 'get_glucose':
                 case 'check_glucose':
-                    return await this.handleGetGlucoseForMira(userId, activeSession, 'en');
+                case 'glucose_level':
+                case 'blood_sugar':
+                    // Si el usuario tiene configurado idioma español, responder en español aunque el tool sea en inglés
+                    const langForEnglishTool = detectedLang === 'es' ? 'es' : 'en';
+                    console.log(`🔧 Tool inglés pero respondiendo en: ${langForEnglishTool}`);
+                    return await this.handleGetGlucoseForMira(userId, activeSession, langForEnglishTool);
                     
                 // Comandos en español
                 case 'obtener_glucosa':
                 case 'revisar_glucosa':
+                case 'nivel_glucosa':
+                case 'mi_glucosa':
                     return await this.handleGetGlucoseForMira(userId, activeSession, 'es');
                     
                 default:
-                    return {
-                        success: false,
-                        error: `Unknown tool: ${toolId}`
-                    };
+                    console.log(`⚠️ Unknown AI tool: ${toolId} - usando idioma detectado: ${detectedLang}`);
+                    // Si no reconoce el tool, usar el idioma detectado desde settings
+                    return await this.handleGetGlucoseForMira(userId, activeSession, detectedLang);
             }
         } catch (error) {
             console.error('Error in AI Tool:', error);
