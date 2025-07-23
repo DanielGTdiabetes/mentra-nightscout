@@ -1,0 +1,14 @@
+{
+  "name": "nightscout-mentraos",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "node src/index.js",
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "@mentra/sdk": "^2.1.13",
+    "axios": "^1.10.0",
+    "dotenv": "^16.6.1",
+    "node-fetch": "^2.7.0"
+  }
+}

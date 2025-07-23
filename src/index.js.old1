@@ -1,0 +1,443 @@
+// src/index.js - Nightscout usando el sistema OFICIAL de Settings de MentraOS
+const { AppServer } = require('@mentra/sdk');
+const axios = require('axios');
+require('dotenv').config();
+
+// Configuración básica del servidor
+const PACKAGE_NAME = process.env.PACKAGE_NAME || "com.tucompania.nightscout-glucose";
+const PORT = parseInt(process.env.PORT || "3000");
+const MENTRAOS_API_KEY = process.env.MENTRAOS_API_KEY;
+
+if (!MENTRAOS_API_KEY) {
+    console.error("❌ MENTRAOS_API_KEY environment variable is required");
+    process.exit(1);
+}
+
+/**
+ * OfficialNightscoutApp - Usando SISTEMA OFICIAL de Settings de MentraOS
+ * Configuración vía MentraOS Developer Console + session.settings API
+ */
+class OfficialNightscoutApp extends AppServer {
+    constructor(options) {
+        super(options);
+        this.activeSessions = new Map();
+        this.alertHistory = new Map();
+        
+        // Valores por defecto si no hay settings configurados
+        this.defaultSettings = {
+            nightscoutUrl: '',
+            nightscoutToken: '',
+            criticalLow: 60,
+            criticalHigh: 250,
+            alertsEnabled: true,
+            updateInterval: 5, // minutos
+            language: 'en' // Fallback temporal hasta que se arregle el Select
+        };
+    }
+
+    async onSession(session, sessionId, userId) {
+        session.logger.info(`Nueva sesión oficial: ${sessionId} para ${userId}`);
+
+        try {
+            // DIAGNÓSTICO: Probar todos los settings individualmente
+            session.logger.info('=== DIAGNÓSTICO DE SETTINGS ===');
+            
+            try {
+                const url = await session.settings.get('nightscout_url');
+                session.logger.info(`URL setting: "${url}" (type: ${typeof url})`);
+            } catch (e) {
+                session.logger.error('Error getting URL setting:', e);
+            }
+            
+            try {
+                const token = await session.settings.get('nightscout_token');
+                session.logger.info(`Token setting: "${token ? token.substring(0, 8) + '***' : null}" (type: ${typeof token})`);
+            } catch (e) {
+                session.logger.error('Error getting token setting:', e);
+            }
+            
+            try {
+                const lang = await session.settings.get('language');
+                session.logger.info(`Language setting: "${lang}" (type: ${typeof lang})`);
+            } catch (e) {
+                session.logger.error('Error getting language setting:', e);
+            }
+            
+            session.logger.info('=== FIN DIAGNÓSTICO ===');
+
+            // PASO 1: Obtener configuración del usuario usando API OFICIAL
+            const userSettings = await this.getUserSettings(session);
+            session.logger.info('Settings finales obtenidos:', {
+                hasUrl: !!userSettings.nightscoutUrl,
+                hasToken: !!userSettings.nightscoutToken,
+                language: userSettings.language
+            });
+
+            // PASO 2: Validar configuración esencial
+            if (!userSettings.nightscoutUrl || !userSettings.nightscoutToken) {
+                await this.showConfigurationNeeded(session, userSettings);
+                return;
+            }
+
+            // PASO 3: Iniciar operación normal con settings oficiales
+            await this.startNormalOperation(session, sessionId, userId, userSettings);
+
+            // PASO 4: Escuchar cambios de configuración EN TIEMPO REAL
+            this.setupSettingsListener(session, sessionId, userId);
+
+        } catch (error) {
+            session.logger.error(`Error en sesión: ${error.message}`);
+            session.layouts.showTextWall("Error: Check app settings\nin MentraOS app");
+        }
+    }
+
+    /**
+     * OBTENER CONFIGURACIÓN usando API OFICIAL de MentraOS
+     */
+    async getUserSettings(session) {
+        try {
+            // Usar la API OFICIAL de MentraOS para obtener settings
+            const settings = {
+                // Settings definidos en MentraOS Developer Console
+                nightscoutUrl: await session.settings.get('nightscout_url') || this.defaultSettings.nightscoutUrl,
+                nightscoutToken: await session.settings.get('nightscout_token') || this.defaultSettings.nightscoutToken,
+                criticalLow: await session.settings.get('critical_low') || this.defaultSettings.criticalLow,
+                criticalHigh: await session.settings.get('critical_high') || this.defaultSettings.criticalHigh,
+                alertsEnabled: await session.settings.get('alerts_enabled') !== false, // default true
+                updateInterval: await session.settings.get('update_interval') || this.defaultSettings.updateInterval,
+                language: await session.settings.get('language') || this.defaultSettings.language,
+                displayBrightness: await session.settings.get('display_brightness') || 100,
+                soundAlerts: await session.settings.get('sound_alerts') || false,
+                nightMode: await session.settings.get('night_mode') || false
+            };
+
+            // Debug: Mostrar qué settings se están obteniendo
+            session.logger.info('Settings debug:', {
+                hasUrl: !!settings.nightscoutUrl,
+                hasToken: !!settings.nightscoutToken,
+                tokenLength: settings.nightscoutToken ? settings.nightscoutToken.length : 0,
+                language: settings.language,
+                criticalLow: settings.criticalLow,
+                criticalHigh: settings.criticalHigh
+            });
+
+            return settings;
+
+        } catch (error) {
+            session.logger.error('Error obteniendo settings:', error);
+            return this.defaultSettings;
+        }
+    }
+
+    /**
+     * ESCUCHAR CAMBIOS EN TIEMPO REAL usando API OFICIAL
+     */
+    setupSettingsListener(session, sessionId, userId) {
+        // API OFICIAL para escuchar cambios de configuración
+        session.settings.onValueChange(async (settingKey, newValue) => {
+            session.logger.info(`Setting changed: ${settingKey} = ${newValue}`);
+
+            try {
+                // Reaccionar a cambios específicos
+                switch (settingKey) {
+                    case 'nightscout_url':
+                    case 'nightscout_token':
+                        // Reconectar con nuevas credenciales
+                        await this.reconnectWithNewSettings(session, sessionId, userId);
+                        break;
+                        
+                    case 'critical_low':
+                    case 'critical_high':
+                        // Actualizar umbrales de alertas
+                        await this.updateAlertThresholds(session, settingKey, newValue);
+                        break;
+                        
+                    case 'update_interval':
+                        // Cambiar frecuencia de actualización
+                        await this.updateRefreshInterval(session, sessionId, newValue);
+                        break;
+                        
+                    case 'language':
+                        // Cambiar idioma de la interfaz
+                        await this.updateLanguage(session, newValue);
+                        break;
+                        
+                    case 'alerts_enabled':
+                        // Activar/desactivar alertas
+                        const status = newValue ? 'enabled' : 'disabled';
+                        const msg = newValue ? 'Alerts enabled' : 'Alerts disabled';
+                        session.layouts.showTextWall(`⚙️ ${msg}\nSettings updated`);
+                        break;
+                }
+
+            } catch (error) {
+                session.logger.error(`Error processing setting change: ${error.message}`);
+            }
+        });
+    }
+
+    /**
+     * MOSTRAR QUE NECESITA CONFIGURACIÓN
+     */
+    async showConfigurationNeeded(session, currentSettings) {
+        const lang = currentSettings.language || 'en';
+        
+        // Mostrar estado detallado de configuración
+        const urlStatus = currentSettings.nightscoutUrl ? '✅' : '❌';
+        const tokenStatus = currentSettings.nightscoutToken ? '✅' : '❌';
+        
+        const configMsg = lang === 'es' ?
+            `⚙️ CONFIGURACION\n\nURL: ${urlStatus} ${currentSettings.nightscoutUrl ? 'OK' : 'FALTA'}\nToken: ${tokenStatus} ${currentSettings.nightscoutToken ? 'OK' : 'FALTA'}\n\nAbre ajustes en MentraOS\ny configura los valores` :
+            `⚙️ CONFIGURATION\n\nURL: ${urlStatus} ${currentSettings.nightscoutUrl ? 'OK' : 'MISSING'}\nToken: ${tokenStatus} ${currentSettings.nightscoutToken ? 'OK' : 'MISSING'}\n\nOpen settings in MentraOS\nand configure values`;
+            
+        session.layouts.showTextWall(configMsg);
+        
+        // También mostrar en logs para debug
+        session.logger.warn('Configuration status:', {
+            hasUrl: !!currentSettings.nightscoutUrl,
+            urlValue: currentSettings.nightscoutUrl,
+            hasToken: !!currentSettings.nightscoutToken,
+            tokenLength: currentSettings.nightscoutToken ? currentSettings.nightscoutToken.length : 0,
+            language: currentSettings.language
+        });
+    }
+
+    /**
+     * RECONECTAR CON NUEVAS CONFIGURACIONES
+     */
+    async reconnectWithNewSettings(session, sessionId, userId) {
+        session.layouts.showTextWall("⚙️ Reconnecting...\nNew settings detected");
+        
+        // Obtener nuevas configuraciones
+        const newSettings = await this.getUserSettings(session);
+        
+        // Validar y reconectar
+        if (newSettings.nightscoutUrl && newSettings.nightscoutToken) {
+            await this.startNormalOperation(session, sessionId, userId, newSettings);
+        } else {
+            await this.showConfigurationNeeded(session, newSettings);
+        }
+    }
+
+    /**
+     * ACTUALIZAR UMBRALES DE ALERTAS
+     */
+    async updateAlertThresholds(session, settingKey, newValue) {
+        const thresholdName = settingKey === 'critical_low' ? 'Low' : 'High';
+        const msg = `⚙️ Alert updated\n${thresholdName}: ${newValue} mg/dL\nSettings saved`;
+        
+        session.layouts.showTextWall(msg);
+        session.logger.info(`Alert threshold updated: ${settingKey} = ${newValue}`);
+    }
+
+    /**
+     * ACTUALIZAR INTERVALO DE REFRESCO
+     */
+    async updateRefreshInterval(session, sessionId, newValue) {
+        // Limpiar intervalo anterior
+        const userSession = this.activeSessions.get(sessionId);
+        if (userSession && userSession.updateInterval) {
+            clearInterval(userSession.updateInterval);
+        }
+
+        // Crear nuevo intervalo
+        const intervalMs = newValue * 60 * 1000; // convertir minutos a ms
+        const newInterval = setInterval(async () => {
+            const settings = await this.getUserSettings(session);
+            await this.updateGlucoseDisplay(session, settings);
+        }, intervalMs);
+
+        // Guardar nuevo intervalo
+        if (userSession) {
+            userSession.updateInterval = newInterval;
+        }
+
+        session.layouts.showTextWall(`⚙️ Update interval\nChanged to ${newValue} min\nSettings saved`);
+        session.logger.info(`Update interval changed to ${newValue} minutes`);
+    }
+
+    /**
+     * ACTUALIZAR IDIOMA
+     */
+    async updateLanguage(session, newLanguage) {
+        const msg = newLanguage === 'es' ?
+            `⚙️ Idioma cambiado\na Español\nConfiguracion guardada` :
+            `⚙️ Language changed\nto English\nSettings saved`;
+            
+        session.layouts.showTextWall(msg);
+        session.logger.info(`Language changed to: ${newLanguage}`);
+    }
+
+    /**
+     * OPERACIÓN NORMAL (adaptada para usar settings oficiales)
+     */
+    async startNormalOperation(session, sessionId, userId, settings) {
+        session.logger.info(`Iniciando con settings oficiales para ${userId}`);
+        
+        // Almacenar sesión
+        this.activeSessions.set(sessionId, { session, userId, settings });
+
+        try {
+            // Mostrar datos iniciales
+            const glucoseData = await this.getGlucoseData(settings);
+            const displayText = this.formatForG1(glucoseData, settings);
+            session.layouts.showTextWall(displayText);
+            
+            // Configurar updates automáticos basados en settings
+            const intervalMs = settings.updateInterval * 60 * 1000;
+            const updateInterval = setInterval(async () => {
+                try {
+                    // Obtener settings actualizados en cada update
+                    const currentSettings = await this.getUserSettings(session);
+                    const newData = await this.getGlucoseData(currentSettings);
+                    const newDisplay = this.formatForG1(newData, currentSettings);
+                    session.layouts.showTextWall(newDisplay);
+                    
+                    // Revisar alertas si están habilitadas
+                    if (currentSettings.alertsEnabled) {
+                        await this.checkAlerts(session, sessionId, newData, currentSettings);
+                    }
+                    
+                } catch (error) {
+                    session.logger.error('Error en update automático:', error);
+                }
+            }, intervalMs);
+
+            // Guardar intervalo para cleanup
+            const userSession = this.activeSessions.get(sessionId);
+            if (userSession) {
+                userSession.updateInterval = updateInterval;
+            }
+
+            // Cleanup al desconectar
+            session.events.onDisconnected(() => {
+                session.logger.info(`Sesión ${sessionId} desconectada`);
+                if (updateInterval) clearInterval(updateInterval);
+                this.activeSessions.delete(sessionId);
+                this.alertHistory.delete(sessionId);
+            });
+
+        } catch (error) {
+            session.logger.error('Error iniciando operación:', error);
+            session.layouts.showTextWall("Error: Check Nightscout\nconnection in settings");
+        }
+    }
+
+    /**
+     * OBTENER DATOS (usa settings oficiales)
+     */
+    async getGlucoseData(settings) {
+        try {
+            const response = await axios.get(`${settings.nightscoutUrl}/api/v1/entries/current.json`, {
+                params: { token: settings.nightscoutToken },
+                timeout: 10000,
+                headers: { 'User-Agent': 'MentraOS-Nightscout-Official/1.0' }
+            });
+
+            const data = response.data;
+            const reading = Array.isArray(data) ? data[0] : data;
+
+            if (!reading || !reading.sgv) {
+                return null;
+            }
+
+            return reading;
+        } catch (error) {
+            console.error('Error obteniendo datos:', error.message);
+            throw error;
+        }
+    }
+
+    /**
+     * SISTEMA DE ALERTAS (usa umbrales de settings oficiales)
+     */
+    async checkAlerts(session, sessionId, glucoseData, settings) {
+        const glucose = glucoseData.sgv;
+        const now = Date.now();
+        
+        const sessionAlerts = this.alertHistory.get(sessionId) || {};
+        
+        // Usar umbrales de settings oficiales
+        if (glucose <= settings.criticalLow) {
+            if (!sessionAlerts.criticalLow || (now - sessionAlerts.criticalLow) > 300000) {
+                const alertMsg = settings.language === 'es' ?
+                    `!!! HIPO ${glucose} mg/dL\nACTUA AHORA - Azucar` :
+                    `!!! HYPO ${glucose} mg/dL\nACT NOW - Take sugar`;
+                    
+                session.layouts.showTextWall(alertMsg);
+                sessionAlerts.criticalLow = now;
+                session.logger.error(`ALERTA CRÍTICA: Hipoglucemia ${glucose} mg/dL`);
+            }
+        }
+        else if (glucose >= settings.criticalHigh) {
+            if (!sessionAlerts.criticalHigh || (now - sessionAlerts.criticalHigh) > 600000) {
+                const alertMsg = settings.language === 'es' ?
+                    `^^^ HIPER ${glucose} mg/dL\nREVISA CETONAS` :
+                    `^^^ HYPER ${glucose} mg/dL\nCHECK KETONES`;
+                    
+                session.layouts.showTextWall(alertMsg);
+                sessionAlerts.criticalHigh = now;
+                session.logger.warn(`ALERTA: Hiperglucemia ${glucose} mg/dL`);
+            }
+        }
+        
+        this.alertHistory.set(sessionId, sessionAlerts);
+    }
+
+    /**
+     * FORMATEO (adaptado para usar settings de idioma)
+     */
+    formatForG1(glucoseData, settings) {
+        const glucoseValue = glucoseData.sgv;
+        const time = new Date().toLocaleTimeString(settings.language === 'es' ? 'es-ES' : 'en-US', { 
+            hour: '2-digit', minute: '2-digit' 
+        });
+
+        let symbol = 'OK';
+        if (glucoseValue < settings.criticalLow) symbol = '!!!';
+        else if (glucoseValue < settings.criticalLow + 10) symbol = '!!';
+        else if (glucoseValue > settings.criticalHigh) symbol = '^^^';
+        else if (glucoseValue > settings.criticalHigh - 50) symbol = '^^';
+        else if (glucoseValue > 180) symbol = '^';
+
+        const trendSymbols = {
+            'DoubleUp': '^^', 'SingleUp': '^', 'FortyFiveUp': '/',
+            'Flat': '->', 'FortyFiveDown': '\\', 'SingleDown': 'v',
+            'DoubleDown': 'vv', 'NONE': '-', '': '-'
+        };
+        const trend = trendSymbols[glucoseData.direction] || '->';
+
+        let deltaText = '';
+        if (glucoseData.delta && Math.abs(glucoseData.delta) >= 5) {
+            const deltaRounded = Math.round(glucoseData.delta);
+            deltaText = ` (${deltaRounded > 0 ? '+' : ''}${deltaRounded})`;
+        }
+
+        return `${symbol} ${glucoseValue}${deltaText} mg/dL ${trend}\n${time}`;
+    }
+}
+
+// Crear servidor con metadata mejorada
+const server = new OfficialNightscoutApp({
+    packageName: PACKAGE_NAME,
+    apiKey: MENTRAOS_API_KEY,
+    port: PORT,
+    metadata: {
+        displayName: "Nightscout Official",
+        description: "Glucose monitoring with official MentraOS settings",
+        keywords: ["glucose", "diabetes", "nightscout", "health", "monitoring"],
+        category: "Health",
+        version: "3.0.0"
+    }
+});
+
+server.start().catch(err => {
+    console.error("❌ Error iniciando servidor:", err);
+    process.exit(1);
+});
+
+console.log(`🚀 Nightscout Official Settings iniciando...`);
+console.log(`📱 Package: ${PACKAGE_NAME}`);
+console.log(`⚙️ Usando MentraOS Settings API oficial`);
+console.log(`🔄 Configuración en tiempo real habilitada`);
+console.log(`🥽 Optimizado para Even Realities G1`);

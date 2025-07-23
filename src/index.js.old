@@ -1,0 +1,182 @@
+// src/index.js - Implementación oficial según documentación MentraOS (MEJORADA CONSERVADORAMENTE)
+const { AppServer } = require('@mentra/sdk');
+const axios = require('axios');
+require('dotenv').config();
+
+// Configuración desde variables de entorno
+const PACKAGE_NAME = process.env.PACKAGE_NAME || "com.tucompania.nightscout-glucose";
+const PORT = parseInt(process.env.PORT || "3000");
+const MENTRAOS_API_KEY = process.env.MENTRAOS_API_KEY;
+const NIGHTSCOUT_URL = process.env.DEFAULT_NIGHTSCOUT_URL;
+const TOKEN = process.env.DEFAULT_TOKEN;
+
+if (!MENTRAOS_API_KEY) {
+    console.error("❌ MENTRAOS_API_KEY environment variable is required");
+    process.exit(1);
+}
+
+if (!NIGHTSCOUT_URL || !TOKEN) {
+    console.error("❌ Nightscout URL and TOKEN are required");
+    process.exit(1);
+}
+
+/**
+ * NightscoutMentraApp - Aplicación MentraOS para mostrar datos de glucosa
+ * Extiende AppServer según documentación oficial
+ */
+class NightscoutMentraApp extends AppServer {
+    constructor(options) {
+        super(options);
+        this.activeSessions = new Map();
+    }
+
+    /**
+     * Método onSession requerido según documentación oficial
+     * Se ejecuta automáticamente cuando un usuario activa la app
+     */
+    async onSession(session, sessionId, userId) {
+        session.logger.info(`🎯 Nueva sesión Nightscout: ${sessionId} para usuario ${userId}`);
+
+        try {
+            // Obtener datos iniciales de glucosa
+            const glucoseData = await this.getGlucoseFromNightscout();
+            
+            // Formatear para Even Realities G1 (display monocromático verde)
+            const displayText = this.formatForG1(glucoseData);
+            
+            // Usar LayoutManager oficial según documentación
+            session.layouts.showTextWall(displayText);
+            
+            session.logger.info(`✅ Datos mostrados en G1: ${displayText.replace('\n', ' | ')}`);
+
+            // Almacenar sesión para actualizaciones
+            this.activeSessions.set(sessionId, { session, userId });
+
+            // Configurar actualizaciones automáticas cada 5 minutos
+            const updateInterval = setInterval(async () => {
+                try {
+                    const newGlucoseData = await this.getGlucoseFromNightscout();
+                    const newDisplayText = this.formatForG1(newGlucoseData);
+                    
+                    // Actualizar display usando el método oficial
+                    session.layouts.showTextWall(newDisplayText);
+                    session.logger.info(`🔄 Actualización: ${newDisplayText.replace('\n', ' | ')}`);
+                    
+                } catch (error) {
+                    session.logger.error(`❌ Error actualizando: ${error.message}`);
+                    // En caso de error, mostrar mensaje simple
+                    session.layouts.showTextWall("Error: Sin conexion\nReintentando...");
+                }
+            }, 300000); // 5 minutos
+
+            // Manejar desconexión según documentación oficial
+            session.events.onDisconnected(() => {
+                session.logger.info(`👋 Sesión ${sessionId} desconectada`);
+                clearInterval(updateInterval);
+                this.activeSessions.delete(sessionId);
+            });
+
+        } catch (error) {
+            session.logger.error(`❌ Error en nueva sesión: ${error.message}`);
+            // Mensaje de error simple que sabemos que funciona
+            session.layouts.showTextWall(`Error: Sin datos\nVerifica conexion`);
+        }
+    }
+
+    /**
+     * Obtener datos de glucosa desde Nightscout
+     */
+    async getGlucoseFromNightscout() {
+        try {
+            const response = await axios.get(`${NIGHTSCOUT_URL}/api/v1/entries/current.json`, {
+                params: { token: TOKEN },
+                timeout: 10000,
+                headers: { 'User-Agent': 'MentraOS-Nightscout/1.0' }
+            });
+
+            const data = response.data;
+            const reading = Array.isArray(data) ? data[0] : data;
+
+            if (!reading || !reading.sgv) {
+                throw new Error('No se encontraron datos válidos de glucosa');
+            }
+
+            return reading;
+        } catch (error) {
+            console.error('❌ Error obteniendo datos de Nightscout:', error.message);
+            throw error;
+        }
+    }
+
+    /**
+     * Formatear datos para Even Realities G1
+     * Optimizado para display monocromático verde de 640×200 píxeles
+     * MEJORADO CONSERVADORAMENTE - mantiene formato que funciona
+     */
+    formatForG1(glucoseData) {
+        const glucoseValue = glucoseData.sgv;
+        const time = new Date().toLocaleTimeString('es-ES', { 
+            hour: '2-digit', minute: '2-digit' 
+        });
+
+        // Símbolos mejorados pero simples para display monocromático
+        let symbol = 'OK';
+        if (glucoseValue < 60) symbol = '!!!';      // Crítico bajo
+        else if (glucoseValue < 70) symbol = '!!';  // Bajo
+        else if (glucoseValue < 80) symbol = '!';   // Bajando
+        else if (glucoseValue > 250) symbol = '^^^'; // Crítico alto
+        else if (glucoseValue > 200) symbol = '^^';  // Alto
+        else if (glucoseValue > 180) symbol = '^';   // Elevado
+
+        // Tendencias mejoradas pero simples
+        const trendSymbols = {
+            'DoubleUp': '^^',
+            'SingleUp': '^',
+            'FortyFiveUp': '/',
+            'Flat': '->',
+            'FortyFiveDown': '\\',
+            'SingleDown': 'v',
+            'DoubleDown': 'vv',
+            'NONE': '-',
+            '': '-'
+        };
+        const trend = trendSymbols[glucoseData.direction] || '->';
+
+        // Delta opcional (solo si existe y es significativo)
+        let deltaText = '';
+        if (glucoseData.delta && Math.abs(glucoseData.delta) >= 5) {
+            const deltaRounded = Math.round(glucoseData.delta);
+            deltaText = ` (${deltaRounded > 0 ? '+' : ''}${deltaRounded})`;
+        }
+
+        // Formato manteniendo la estructura exacta que funciona: 2 líneas máximo
+        return `${symbol} ${glucoseValue}${deltaText} mg/dL ${trend}\n${time}`;
+    }
+}
+
+// Crear y iniciar el servidor según documentación oficial
+const server = new NightscoutMentraApp({
+    packageName: PACKAGE_NAME,
+    apiKey: MENTRAOS_API_KEY,
+    port: PORT,
+    // Metadatos mejorados para integración con Mira
+    metadata: {
+        displayName: "Nightscout Glucose",
+        description: "Monitor de glucosa en tiempo real",
+        keywords: ["glucose", "glucosa", "diabetes", "nightscout", "azucar", "blood sugar"],
+        category: "Health",
+        version: "1.0.0"
+    }
+});
+
+// Iniciar servidor
+server.start().catch(err => {
+    console.error("❌ Error iniciando servidor:", err);
+    process.exit(1);
+});
+
+console.log(`🚀 Nightscout MentraOS App iniciando...`);
+console.log(`📱 Package: ${PACKAGE_NAME}`);
+console.log(`🔌 Puerto: ${PORT}`);
+console.log(`🥽 Optimizado para Even Realities G1`);
+console.log(`✨ Versión mejorada conservadoramente`);
