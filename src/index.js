@@ -1,4 +1,13 @@
-// src/index.js - Aplicación Nightscout MentraOS Completa con Correcciones + MEJORAS MÍNIMAS + ALERTAS CONFIGURABLES
+// 🆕 Limpiar polling de settings si existe
+            if (sessionData && sessionData.settingsPolling) {
+                clearInterval(sessionData.settingsPolling);
+            }                        // 🆕 Limpiar polling de settings si existe
+                        if (userSession && userSession.settingsPolling) {
+                            clearInterval(userSession.settingsPolling);
+                        }                        // 🆕 Limpiar polling de settings si existe
+                        if (userSession && userSession.settingsPolling) {
+                            clearInterval(userSession.settingsPolling);
+                        }// src/index.js - Aplicación Nightscout MentraOS Completa con Correcciones + MEJORAS MÍNIMAS + ALERTAS CONFIGURABLES
 const { AppServer } = require('@mentra/sdk');
 const axios = require('axios');
 require('dotenv').config();
