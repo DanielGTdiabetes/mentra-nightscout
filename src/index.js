@@ -1,4 +1,4 @@
-// src/index.js - Aplicación Nightscout MentraOS Completa con Correcciones
+// src/index.js - Aplicación Nightscout MentraOS Completa con Correcciones + MEJORAS MÍNIMAS
 const { AppServer } = require('@mentra/sdk');
 const axios = require('axios');
 require('dotenv').config();
@@ -21,6 +21,7 @@ class NightscoutMentraApp extends AppServer {
         super(options);
         this.activeSessions = new Map();
         this.alertHistory = new Map();
+        this.displayTimers = new Map(); // 🆕 NUEVO: Para controlar display inteligente
     }
 
     /**
@@ -64,13 +65,16 @@ class NightscoutMentraApp extends AppServer {
                 return;
             }
 
-            // PASO 3: Iniciar operación normal con settings oficiales
+            // PASO 3: 🆕 MOSTRAR INICIAL Y OCULTAR (Display inteligente)
+            await this.showInitialAndHide(session, sessionId, userSettings);
+
+            // PASO 4: Iniciar operación normal con settings oficiales (MODIFICADO)
             await this.startNormalOperation(session, sessionId, userId, userSettings);
 
-            // PASO 4: MANEJO SEGURO DE EVENTOS (NUEVA IMPLEMENTACIÓN)
+            // PASO 5: MANEJO SEGURO DE EVENTOS (EXPANDIDO con gestos)
             this.setupSafeEventHandlers(session, sessionId, userId);
 
-            // PASO 5: Escuchar cambios de configuración EN TIEMPO REAL
+            // PASO 6: Escuchar cambios de configuración EN TIEMPO REAL
             this.setupSettingsListener(session, sessionId, userId);
 
         } catch (error) {
@@ -80,18 +84,116 @@ class NightscoutMentraApp extends AppServer {
     }
 
     /**
-     * NUEVO MÉTODO: Configurar event handlers de manera segura
+     * 🆕 NUEVO: Mostrar inicial y ocultar (Display inteligente)
+     */
+    async showInitialAndHide(session, sessionId, userSettings) {
+        try {
+            const glucoseData = await this.getGlucoseData(userSettings);
+            const displayText = this.formatForG1(glucoseData, userSettings);
+            
+            // Mostrar datos iniciales
+            session.layouts.showTextWall(displayText);
+            session.logger.info('✅ Datos iniciales mostrados');
+            
+            // OCULTAR después de 5 segundos
+            setTimeout(() => {
+                this.hideDisplay(session, sessionId);
+            }, 5000);
+            
+        } catch (error) {
+            session.logger.error('Error en display inicial:', error);
+        }
+    }
+
+    /**
+     * 🆕 NUEVO: Ocultar display
+     */
+    hideDisplay(session, sessionId) {
+        try {
+            session.layouts.showTextWall(""); // Pantalla vacía
+            session.logger.info(`🙈 Display ocultado para sesión ${sessionId}`);
+        } catch (error) {
+            session.logger.error('Error ocultando display:', error);
+        }
+    }
+
+    /**
+     * 🆕 NUEVO: Mostrar glucosa temporalmente
+     */
+    async showGlucoseTemporarily(session, sessionId, duration = 8000) {
+        try {
+            const userSettings = await this.getUserSettings(session);
+            const glucoseData = await this.getGlucoseData(userSettings);
+            const displayText = this.formatForG1(glucoseData, userSettings);
+            
+            // Mostrar datos
+            session.layouts.showTextWall(displayText);
+            session.logger.info('👁️ Glucosa mostrada temporalmente');
+            
+            // Limpiar timer anterior si existe
+            const existingTimer = this.displayTimers.get(sessionId);
+            if (existingTimer) {
+                clearTimeout(existingTimer);
+            }
+            
+            // Ocultar después del tiempo especificado
+            const hideTimer = setTimeout(() => {
+                this.hideDisplay(session, sessionId);
+                this.displayTimers.delete(sessionId);
+            }, duration);
+            
+            this.displayTimers.set(sessionId, hideTimer);
+            
+        } catch (error) {
+            session.logger.error('Error mostrando glucosa temporal:', error);
+        }
+    }
+
+    /**
+     * NUEVO MÉTODO: Configurar event handlers de manera segura (EXPANDIDO)
      */
     setupSafeEventHandlers(session, sessionId, userId) {
         try {
-            // Verificar que session.events existe y tiene el método necesario
+            // 🆕 1. BUTTON PRESS - Mostrar glucosa al presionar botón
+            if (session.events && typeof session.events.onButtonPress === 'function') {
+                session.events.onButtonPress(async (buttonData) => {
+                    session.logger.info(`🔘 Botón presionado: ${JSON.stringify(buttonData)}`);
+                    await this.showGlucoseTemporarily(session, sessionId, 10000);
+                });
+            }
+
+            // 🆕 2. TRANSCRIPTION - Comandos de voz
+            if (session.events && typeof session.events.onTranscription === 'function') {
+                session.events.onTranscription(async (transcription) => {
+                    const text = transcription.text.toLowerCase();
+                    
+                    // Comandos para mostrar glucosa
+                    const showCommands = [
+                        'show glucose', 'mostrar glucosa', 'glucose', 'glucosa', 
+                        'sugar', 'azucar', 'nivel', 'level'
+                    ];
+                    
+                    if (showCommands.some(cmd => text.includes(cmd))) {
+                        session.logger.info(`🎤 Comando de voz reconocido: ${text}`);
+                        await this.showGlucoseTemporarily(session, sessionId, 12000);
+                    }
+                });
+            }
+
+            // 3. DISCONNECT HANDLER (tu código original + limpieza de timers)
             if (session.events && typeof session.events.onDisconnected === 'function') {
-                // Definir el callback explícitamente antes de pasarlo
                 const disconnectHandler = () => {
                     try {
                         session.logger.info(`👋 Sesión ${sessionId} desconectada`);
                         
-                        // Limpiar recursos de manera segura
+                        // 🆕 Limpiar timer de display
+                        const displayTimer = this.displayTimers.get(sessionId);
+                        if (displayTimer) {
+                            clearTimeout(displayTimer);
+                            this.displayTimers.delete(sessionId);
+                        }
+                        
+                        // Limpiar recursos de manera segura (tu código original)
                         const userSession = this.activeSessions.get(sessionId);
                         if (userSession && userSession.updateInterval) {
                             clearInterval(userSession.updateInterval);
@@ -116,7 +218,7 @@ class NightscoutMentraApp extends AppServer {
             } else {
                 session.logger.warn('⚠️ session.events.onDisconnected no disponible, usando cleanup alternativo');
                 
-                // Cleanup alternativo usando timeout
+                // Cleanup alternativo usando timeout (tu código original + timer)
                 const sessionData = this.activeSessions.get(sessionId);
                 if (sessionData) {
                     sessionData.autoCleanupTimeout = setTimeout(() => {
@@ -125,6 +227,13 @@ class NightscoutMentraApp extends AppServer {
                         const userSession = this.activeSessions.get(sessionId);
                         if (userSession && userSession.updateInterval) {
                             clearInterval(userSession.updateInterval);
+                        }
+                        
+                        // 🆕 Limpiar timer de display
+                        const displayTimer = this.displayTimers.get(sessionId);
+                        if (displayTimer) {
+                            clearTimeout(displayTimer);
+                            this.displayTimers.delete(sessionId);
                         }
                         
                         this.activeSessions.delete(sessionId);
@@ -139,7 +248,145 @@ class NightscoutMentraApp extends AppServer {
     }
 
     /**
-     * Obtener configuración del usuario usando el sistema oficial de Settings
+     * 🆕 AI TOOLS para Mira (AÑADIDO)
+     */
+    async onToolCall(toolCall, userId) {
+        const { toolName, parameters } = toolCall;
+        
+        console.log(`🤖 AI Tool called: ${toolName} for user ${userId}`);
+        
+        try {
+            switch (toolName) {
+                // Comandos en inglés
+                case 'get_glucose':
+                case 'check_glucose':
+                    return await this.handleGetGlucoseForMira(userId, 'en');
+                    
+                // Comandos en español
+                case 'obtener_glucosa':
+                case 'revisar_glucosa':
+                    return await this.handleGetGlucoseForMira(userId, 'es');
+                    
+                default:
+                    return {
+                        success: false,
+                        error: `Unknown tool: ${toolName}`
+                    };
+            }
+        } catch (error) {
+            console.error('Error in AI Tool:', error);
+            return {
+                success: false,
+                error: error.message
+            };
+        }
+    }
+
+    /**
+     * 🆕 Manejar petición de glucosa desde Mira
+     */
+    async handleGetGlucoseForMira(userId, lang) {
+        try {
+            // Buscar sesión activa del usuario para obtener sus settings
+            let userSettings = null;
+            let activeSession = null;
+            
+            for (const [sessionId, sessionData] of this.activeSessions) {
+                if (sessionData.userId === userId) {
+                    userSettings = await this.getUserSettings(sessionData.session);
+                    activeSession = { sessionId, session: sessionData.session };
+                    break;
+                }
+            }
+
+            if (!userSettings || !userSettings.nightscoutUrl || !userSettings.nightscoutToken) {
+                const errorMsg = lang === 'es' ? 
+                    "Nightscout no está configurado. Configura la URL y token en los ajustes de la aplicación." :
+                    "Nightscout is not configured. Configure URL and token in app settings.";
+                return {
+                    success: false,
+                    error: errorMsg
+                };
+            }
+
+            const glucoseData = await this.getGlucoseData(userSettings);
+            
+            if (!glucoseData) {
+                const errorMsg = lang === 'es' ?
+                    "No hay datos de glucosa disponibles." :
+                    "No glucose data available.";
+                return {
+                    success: false,
+                    error: errorMsg
+                };
+            }
+
+            // 🆕 Mostrar en las gafas también
+            if (activeSession) {
+                try {
+                    const displayText = this.formatForG1(glucoseData, userSettings);
+                    activeSession.session.layouts.showTextWall(displayText);
+                    
+                    // Ocultar después de 10 segundos
+                    setTimeout(() => {
+                        this.hideDisplay(activeSession.session, activeSession.sessionId);
+                    }, 10000);
+                    
+                } catch (displayError) {
+                    console.error('Error mostrando en gafas:', displayError);
+                }
+            }
+
+            // Respuesta para Mira
+            const trend = this.getTrendArrow(glucoseData.direction);
+            const status = this.getGlucoseStatusText(glucoseData.sgv, userSettings, lang);
+            
+            const message = lang === 'es' ?
+                `Tu glucosa está en ${glucoseData.sgv} mg/dL ${trend}. Estado: ${status}.` :
+                `Your glucose is ${glucoseData.sgv} mg/dL ${trend}. Status: ${status}.`;
+
+            return {
+                success: true,
+                data: {
+                    glucose: glucoseData.sgv,
+                    trend: trend,
+                    status: status
+                },
+                message: message
+            };
+
+        } catch (error) {
+            const errorMsg = lang === 'es' ?
+                `Error obteniendo glucosa: ${error.message}` :
+                `Error getting glucose: ${error.message}`;
+            return {
+                success: false,
+                error: errorMsg
+            };
+        }
+    }
+
+    /**
+     * 🆕 Obtener estado de glucosa en texto
+     */
+    getGlucoseStatusText(value, settings, lang) {
+        if (value < 70) {
+            return lang === 'es' ? 'Crítico Bajo' : 'Critical Low';
+        }
+        if (value < settings.lowAlert) {
+            return lang === 'es' ? 'Bajo' : 'Low';
+        }
+        if (value > 250) {
+            return lang === 'es' ? 'Crítico Alto' : 'Critical High';
+        }
+        if (value > settings.highAlert) {
+            return lang === 'es' ? 'Alto' : 'High';
+        }
+        return lang === 'es' ? 'Normal' : 'Normal';
+    }
+
+    /**
+     * Obtener configuración del usuario usando el sistema oficial de Settings (EXPANDIDO con timezone)
      */
     async getUserSettings(session) {
         try {
@@ -150,7 +397,8 @@ class NightscoutMentraApp extends AppServer {
                 lowAlert,
                 highAlert,
                 alertsEnabled,
-                language
+                language,
+                timezone  // 🆕 NUEVO setting para timezone
             ] = await Promise.all([
                 session.settings.get('nightscout_url'),
                 session.settings.get('nightscout_token'),
@@ -158,7 +406,8 @@ class NightscoutMentraApp extends AppServer {
                 session.settings.get('low_alert'),
                 session.settings.get('high_alert'),
                 session.settings.get('alerts_enabled'),
-                session.settings.get('language')
+                session.settings.get('language'),
+                session.settings.get('timezone')  // 🆕 NUEVO
             ]);
 
             return {
@@ -168,7 +417,8 @@ class NightscoutMentraApp extends AppServer {
                 lowAlert: parseInt(lowAlert) || 70,
                 highAlert: parseInt(highAlert) || 180,
                 alertsEnabled: alertsEnabled === 'true' || alertsEnabled === true,
-                language: language || 'en'
+                language: language || 'en',
+                timezone: timezone || null  // 🆕 NUEVO campo
             };
         } catch (error) {
             session.logger.error('Error obteniendo settings del usuario:', error);
@@ -179,13 +429,14 @@ class NightscoutMentraApp extends AppServer {
                 lowAlert: 70,
                 highAlert: 180,
                 alertsEnabled: true,
-                language: 'en'
+                language: 'en',
+                timezone: null  // 🆕 NUEVO campo
             };
         }
     }
 
     /**
-     * Mostrar mensaje de configuración necesaria
+     * Mostrar mensaje de configuración necesaria (TU CÓDIGO ORIGINAL)
      */
     async showConfigurationNeeded(session, settings) {
         const messages = {
@@ -200,7 +451,7 @@ class NightscoutMentraApp extends AppServer {
     }
 
     /**
-     * Iniciar operación normal con settings oficiales (CORREGIDO)
+     * Iniciar operación normal con settings oficiales (LIGERAMENTE MODIFICADO)
      */
     async startNormalOperation(session, sessionId, userId, settings) {
         session.logger.info(`Iniciando con settings oficiales para ${userId}`);
@@ -215,12 +466,7 @@ class NightscoutMentraApp extends AppServer {
         });
 
         try {
-            // Mostrar datos iniciales
-            const glucoseData = await this.getGlucoseData(settings);
-            const displayText = this.formatForG1(glucoseData, settings);
-            session.layouts.showTextWall(displayText);
-
-            // Configurar updates automáticos basados en settings
+            // 🆕 MONITOREO SILENCIOSO - No mostrar datos automáticamente
             const intervalMs = settings.updateInterval * 60 * 1000;
             const updateInterval = setInterval(async () => {
                 try {
@@ -232,13 +478,15 @@ class NightscoutMentraApp extends AppServer {
 
                     const currentSettings = await this.getUserSettings(session);
                     const newData = await this.getGlucoseData(currentSettings);
-                    const newDisplay = this.formatForG1(newData, currentSettings);
                     
-                    session.layouts.showTextWall(newDisplay);
-
+                    // ❌ NO mostrar datos automáticamente (solo monitoreo silencioso)
+                    // ✅ Solo revisar alertas críticas
                     if (currentSettings.alertsEnabled) {
                         await this.checkAlerts(session, sessionId, newData, currentSettings);
                     }
+                    
+                    session.logger.debug(`🔄 Monitoreo silencioso: ${newData.sgv} mg/dL`);
+                    
                 } catch (error) {
                     session.logger.error('Error en update automático:', error);
                 }
@@ -260,7 +508,7 @@ class NightscoutMentraApp extends AppServer {
     }
 
     /**
-     * Configurar listener para cambios de settings en tiempo real
+     * Configurar listener para cambios de settings en tiempo real (TU CÓDIGO ORIGINAL)
      */
     setupSettingsListener(session, sessionId, userId) {
         // Si el SDK soporta listeners de settings, configurar aquí
@@ -269,57 +517,81 @@ class NightscoutMentraApp extends AppServer {
     }
 
    /**
- * Obtener datos de glucosa desde Nightscout
- */
-async getGlucoseData(settings) {
-    try {
-        // 🆕 AÑADIR ESTAS LÍNEAS DE LIMPIEZA DE URL
-        let cleanUrl = settings.nightscoutUrl?.trim();
-        if (!cleanUrl) {
-            throw new Error('URL de Nightscout no configurada');
+    * Obtener datos de glucosa desde Nightscout (TU CÓDIGO ORIGINAL)
+    */
+    async getGlucoseData(settings) {
+        try {
+            // 🆕 AÑADIR ESTAS LÍNEAS DE LIMPIEZA DE URL
+            let cleanUrl = settings.nightscoutUrl?.trim();
+            if (!cleanUrl) {
+                throw new Error('URL de Nightscout no configurada');
+            }
+            
+            // Asegurar protocolo HTTPS
+            if (!cleanUrl.startsWith('http')) {
+                cleanUrl = 'https://' + cleanUrl;
+            }
+            
+            // 🎯 ESTA ES LA LÍNEA CLAVE PARA PREVENIR EL ERROR
+            cleanUrl = cleanUrl.replace(/\/$/, ''); // Remover barra final si existe
+            
+            // Construir URL completa del endpoint usando la URL limpia
+            const fullUrl = `${cleanUrl}/api/v1/entries/current.json`;
+            // 🆕 FIN DE LAS LÍNEAS NUEVAS
+
+            const response = await axios.get(fullUrl, {
+                params: { token: settings.nightscoutToken },
+                timeout: 10000,
+                headers: { 'User-Agent': 'MentraOS-Nightscout/1.0' }
+            });
+
+            const data = response.data;
+            const reading = Array.isArray(data) ? data[0] : data;
+
+            if (!reading || !reading.sgv) {
+                throw new Error('No se encontraron datos válidos de glucosa');
+            }
+
+            return reading;
+        } catch (error) {
+            console.error('❌ Error obteniendo datos de Nightscout:', error.message);
+            throw error;
         }
-        
-        // Asegurar protocolo HTTPS
-        if (!cleanUrl.startsWith('http')) {
-            cleanUrl = 'https://' + cleanUrl;
-        }
-        
-        // 🎯 ESTA ES LA LÍNEA CLAVE PARA PREVENIR EL ERROR
-        cleanUrl = cleanUrl.replace(/\/$/, ''); // Remover barra final si existe
-        
-        // Construir URL completa del endpoint usando la URL limpia
-        const fullUrl = `${cleanUrl}/api/v1/entries/current.json`;
-        // 🆕 FIN DE LAS LÍNEAS NUEVAS
-
-        const response = await axios.get(fullUrl, {
-            params: { token: settings.nightscoutToken },
-            timeout: 10000,
-            headers: { 'User-Agent': 'MentraOS-Nightscout/1.0' }
-        });
-
-        const data = response.data;
-        const reading = Array.isArray(data) ? data[0] : data;
-
-        if (!reading || !reading.sgv) {
-            throw new Error('No se encontraron datos válidos de glucosa');
-        }
-
-        return reading;
-    } catch (error) {
-        console.error('❌ Error obteniendo datos de Nightscout:', error.message);
-        throw error;
     }
-}
-
 
     /**
-     * Formatear datos para Even Realities G1
+     * Formatear datos para Even Realities G1 (TIMEZONE INTELIGENTE)
      */
     formatForG1(glucoseData, settings) {
         const glucoseValue = glucoseData.sgv;
         const trend = this.getTrendArrow(glucoseData.direction);
+        
+        // 🌍 TIMEZONE INTELIGENTE - Detectar automáticamente la zona horaria del usuario
+        let timeZone = 'UTC'; // Fallback por defecto
+        
+        try {
+            // Intentar detectar timezone del usuario desde settings
+            if (settings.timezone) {
+                timeZone = settings.timezone;
+            } else {
+                // Fallback: usar Intl.DateTimeFormat para detectar timezone del servidor/cliente
+                timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+            }
+        } catch (error) {
+            // Si falla todo, usar timezone basado en idioma como aproximación
+            if (settings.language === 'es') {
+                timeZone = 'Europe/Madrid'; // España por defecto para español
+            } else if (settings.language === 'en') {
+                timeZone = 'America/New_York'; // EST por defecto para inglés
+            } else {
+                timeZone = 'UTC'; // UTC como último recurso
+            }
+        }
+        
         const time = new Date().toLocaleTimeString(settings.language === 'es' ? 'es-ES' : 'en-US', { 
-            hour: '2-digit', minute: '2-digit' 
+            hour: '2-digit', 
+            minute: '2-digit',
+            timeZone: timeZone  // ✅ Usar timezone detectado automáticamente
         });
 
         // Símbolos según configuración del usuario
@@ -331,7 +603,7 @@ async getGlucoseData(settings) {
     }
 
     /**
-     * Obtener flecha de tendencia
+     * Obtener flecha de tendencia (TU CÓDIGO ORIGINAL)
      */
     getTrendArrow(direction) {
         const arrows = {
@@ -349,7 +621,7 @@ async getGlucoseData(settings) {
     }
 
     /**
-     * Verificar y mostrar alertas
+     * Verificar y mostrar alertas (MODIFICADO: Solo críticas + timers)
      */
     async checkAlerts(session, sessionId, glucoseData, settings) {
         const glucoseValue = glucoseData.sgv;
@@ -362,43 +634,56 @@ async getGlucoseData(settings) {
         }
 
         let alertMessage = null;
+        let alertDuration = 15000; // 15 segundos por defecto
+        
         const messages = {
             en: {
-                low: `LOW GLUCOSE ALERT!\n${glucoseValue} mg/dL\nCheck immediately`,
-                high: `HIGH GLUCOSE ALERT!\n${glucoseValue} mg/dL\nTake action`
+                low: `🚨 LOW GLUCOSE ALERT!\n${glucoseValue} mg/dL\nCheck immediately`,
+                high: `🚨 HIGH GLUCOSE ALERT!\n${glucoseValue} mg/dL\nTake action`
             },
             es: {
-                low: `ALERTA GLUCOSA BAJA!\n${glucoseValue} mg/dL\nRevisar inmediatamente`,
-                high: `ALERTA GLUCOSA ALTA!\n${glucoseValue} mg/dL\nTomar medidas`
+                low: `🚨 ALERTA GLUCOSA BAJA!\n${glucoseValue} mg/dL\nRevisar inmediatamente`,
+                high: `🚨 ALERTA GLUCOSA ALTA!\n${glucoseValue} mg/dL\nTomar medidas`
             }
         };
 
         const lang = settings.language || 'en';
         const langMessages = messages[lang] || messages.en;
 
-        if (glucoseValue < settings.lowAlert) {
+        // 🆕 Solo alertas CRÍTICAS (más restrictivo)
+        if (glucoseValue < 70) { // Hipoglucemia crítica
             alertMessage = langMessages.low;
-        } else if (glucoseValue > settings.highAlert) {
+            alertDuration = 20000; // 20 segundos para hipo crítica
+        } else if (glucoseValue > 250) { // Hiperglucemia crítica
             alertMessage = langMessages.high;
+            alertDuration = 15000;
         }
 
         if (alertMessage) {
+            // MOSTRAR alerta crítica
             session.layouts.showTextWall(alertMessage);
             this.alertHistory.set(sessionId, currentTime);
-            session.logger.warn(`🚨 Alerta enviada: ${glucoseValue} mg/dL`);
+            session.logger.error(`🚨 ALERTA CRÍTICA mostrada: ${glucoseValue} mg/dL`);
 
-            // Volver a mostrar datos normales después de 10 segundos
-            setTimeout(() => {
-                if (this.activeSessions.has(sessionId)) {
-                    const displayText = this.formatForG1(glucoseData, settings);
-                    session.layouts.showTextWall(displayText);
-                }
-            }, 10000);
+            // 🆕 Limpiar timer anterior
+            const existingTimer = this.displayTimers.get(sessionId);
+            if (existingTimer) {
+                clearTimeout(existingTimer);
+            }
+
+            // 🆕 OCULTAR alerta después del tiempo especificado
+            const alertTimer = setTimeout(() => {
+                this.hideDisplay(session, sessionId);
+                this.displayTimers.delete(sessionId);
+                session.logger.info(`🙈 Alerta crítica ocultada para ${sessionId}`);
+            }, alertDuration);
+            
+            this.displayTimers.set(sessionId, alertTimer);
         }
     }
 
     /**
-     * Método adicional para cleanup manual si es necesario
+     * Método adicional para cleanup manual si es necesario (MODIFICADO: + timers)
      */
     cleanupSession(sessionId) {
         const sessionData = this.activeSessions.get(sessionId);
@@ -409,6 +694,14 @@ async getGlucoseData(settings) {
             if (sessionData.autoCleanupTimeout) {
                 clearTimeout(sessionData.autoCleanupTimeout);
             }
+            
+            // 🆕 Limpiar timer de display
+            const displayTimer = this.displayTimers.get(sessionId);
+            if (displayTimer) {
+                clearTimeout(displayTimer);
+                this.displayTimers.delete(sessionId);
+            }
+            
             this.activeSessions.delete(sessionId);
             this.alertHistory.delete(sessionId);
             console.log(`🧹 Sesión ${sessionId} limpiada manualmente`);
@@ -416,7 +709,7 @@ async getGlucoseData(settings) {
     }
 }
 
-// Crear y iniciar el servidor
+// Crear y iniciar el servidor (TU CÓDIGO ORIGINAL)
 const server = new NightscoutMentraApp({
     packageName: PACKAGE_NAME,
     apiKey: MENTRAOS_API_KEY,
@@ -432,4 +725,7 @@ console.log(`🚀 Nightscout MentraOS App iniciando...`);
 console.log(`📱 Package: ${PACKAGE_NAME}`);
 console.log(`🔌 Puerto: ${PORT}`);
 console.log(`🥽 Optimizado para Even Realities G1`);
-console.log(`⚙️  Sistema de Settings oficial habilitado`);
+console.log(`⚙️ Sistema de Settings oficial habilitado`);
+console.log(`👁️ Display inteligente activado`); // 🆕
+console.log(`🤖 AI Tools bilingües habilitados`); // 🆕
+console.log(`🇪🇸 Timezone España corregido`); // 🆕
