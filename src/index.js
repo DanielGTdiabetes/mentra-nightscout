@@ -507,7 +507,7 @@ class NightscoutMentraApp extends AppServer {
                 highAlert,
                 alertsEnabled,
                 language,
-                timezone // 🆕 NUEVO setting para timezone
+                timezone
             ] = await Promise.all([
                 session.settings.get('nightscout_url'),
                 session.settings.get('nightscout_token'),
@@ -516,7 +516,7 @@ class NightscoutMentraApp extends AppServer {
                 session.settings.get('high_alert'),
                 session.settings.get('alerts_enabled'),
                 session.settings.get('language'),
-                session.settings.get('timezone') // 🆕 NUEVO
+                session.settings.get('timezone')
             ]);
 
             const settings = {
@@ -527,10 +527,9 @@ class NightscoutMentraApp extends AppServer {
                 highAlert: parseInt(highAlert) || 180,
                 alertsEnabled: alertsEnabled === 'true' || alertsEnabled === true,
                 language: language || 'en',
-                timezone: timezone || null // 🆕 NUEVO campo
+                timezone: timezone || null
             };
 
-            // 🆕 APLICAR VALIDACIÓN DE RANGOS
             return this.validateAlertRanges(settings);
 
         } catch (error) {
@@ -543,7 +542,7 @@ class NightscoutMentraApp extends AppServer {
                 highAlert: 180,
                 alertsEnabled: true,
                 language: 'en',
-                timezone: null // 🆕 NUEVO campo
+                timezone: null
             };
         }
     }
