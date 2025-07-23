@@ -1,13 +1,5 @@
-// 🆕 Limpiar polling de settings si existe
-            if (sessionData && sessionData.settingsPolling) {
-                clearInterval(sessionData.settingsPolling);
-            }                        // 🆕 Limpiar polling de settings si existe
-                        if (userSession && userSession.settingsPolling) {
-                            clearInterval(userSession.settingsPolling);
-                        }                        // 🆕 Limpiar polling de settings si existe
-                        if (userSession && userSession.settingsPolling) {
-                            clearInterval(userSession.settingsPolling);
-                        }// src/index.js - Aplicación Nightscout MentraOS Completa con Correcciones + MEJORAS MÍNIMAS + ALERTAS CONFIGURABLES
+// src/index.js - Aplicación Nightscout MentraOS Completa con Correcciones + MEJORAS MÍNIMAS + ALERTAS CONFIGURABLES
+
 const { AppServer } = require('@mentra/sdk');
 const axios = require('axios');
 require('dotenv').config();
@@ -40,7 +32,179 @@ class NightscoutMentraApp extends AppServer {
         session.logger.info(`Nueva sesión oficial: ${sessionId} para ${userId}`);
         
         try {
-            // DIAGNÓSTICO: Probar todos los settings individualmente
+            // 🌍 TIMEZONE INTELIGENTE - Detectar automáticamente la zona horaria del usuario
+        let timeZone = 'UTC'; // Fallback por defecto
+
+        try {
+            // Intentar detectar timezone del usuario desde settings
+            if (settings.timezone) {
+                timeZone = settings.timezone;
+            } else {
+                // Fallback: usar Intl.DateTimeFormat para detectar timezone del servidor/cliente
+                timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+            }
+        } catch (error) {
+            // Si falla todo, usar timezone basado en idioma como aproximación
+            if (settings.language === 'es') {
+                timeZone = 'Europe/Madrid'; // España por defecto para español
+            } else if (settings.language === 'en') {
+                timeZone = 'America/New_York'; // EST por defecto para inglés
+            } else {
+                timeZone = 'UTC'; // UTC como último recurso
+            }
+        }
+
+        const time = new Date().toLocaleTimeString(settings.language === 'es' ? 'es-ES' : 'en-US', {
+            hour: '2-digit',
+            minute: '2-digit',
+            timeZone: timeZone // ✅ Usar timezone detectado automáticamente
+        });
+
+        // Símbolos según configuración del usuario
+        let symbol = '*';
+        if (glucoseValue < settings.lowAlert) symbol = '!';
+        else if (glucoseValue > settings.highAlert) symbol = '^';
+
+        return `${symbol} ${glucoseValue} mg/dL ${trend}\n${time}`;
+    }
+
+    /**
+     * Obtener flecha de tendencia (TU CÓDIGO ORIGINAL)
+     */
+    getTrendArrow(direction) {
+        const arrows = {
+            'DoubleUp': '^^',
+            'SingleUp': '^',
+            'FortyFiveUp': '/',
+            'Flat': '->',
+            'FortyFiveDown': '\\',
+            'SingleDown': 'v',
+            'DoubleDown': 'vv',
+            'NONE': '-',
+            'NOT COMPUTABLE': '?'
+        };
+        return arrows[direction] || '->';
+    }
+
+    /**
+     * ✅ FUNCIÓN MODIFICADA: Verificar y mostrar alertas CON CONFIGURACIÓN PERSONALIZADA
+     */
+    async checkAlerts(session, sessionId, glucoseData, settings) {
+        const glucoseValue = glucoseData.sgv;
+        const currentTime = Date.now();
+
+        // Evitar spam de alertas (máximo una cada 10 minutos)
+        const lastAlert = this.alertHistory.get(sessionId);
+        if (lastAlert && (currentTime - lastAlert) < 600000) {
+            return;
+        }
+
+        let alertMessage = null;
+        let alertDuration = 15000; // 15 segundos por defecto
+
+        const messages = {
+            en: {
+                low: `🚨 LOW GLUCOSE ALERT!\n${glucoseValue} mg/dL\nCheck immediately`,
+                high: `🚨 HIGH GLUCOSE ALERT!\n${glucoseValue} mg/dL\nTake action`
+            },
+            es: {
+                low: `🚨 ALERTA GLUCOSA BAJA!\n${glucoseValue} mg/dL\nRevisar inmediatamente`,
+                high: `🚨 ALERTA GLUCOSA ALTA!\n${glucoseValue} mg/dL\nTomar medidas`
+            }
+        };
+
+        const lang = settings.language || 'en';
+        const langMessages = messages[lang] || messages.en;
+
+        // 🆕 USAR CONFIGURACIÓN PERSONALIZADA DEL USUARIO (en lugar de valores hardcodeados)
+        if (glucoseValue < settings.lowAlert) { // Usar tu configuración (ej: 70)
+            alertMessage = langMessages.low;
+            alertDuration = 20000; // 20 segundos para alerta baja
+            session.logger.warn(`🔔 Alerta baja activada: ${glucoseValue} < ${settings.lowAlert}`);
+        } else if (glucoseValue > settings.highAlert) { // Usar tu configuración (ej: 180)
+            alertMessage = langMessages.high;
+            alertDuration = 15000;
+            session.logger.warn(`🔔 Alerta alta activada: ${glucoseValue} > ${settings.highAlert}`);
+        }
+
+        if (alertMessage) {
+            // MOSTRAR alerta personalizada
+            session.layouts.showTextWall(alertMessage);
+            this.alertHistory.set(sessionId, currentTime);
+            session.logger.error(`🚨 ALERTA PERSONALIZADA mostrada: ${glucoseValue} mg/dL (límites: ${settings.lowAlert}-${settings.highAlert})`);
+
+            // 🆕 Limpiar timer anterior
+            const existingTimer = this.displayTimers.get(sessionId);
+            if (existingTimer) {
+                clearTimeout(existingTimer);
+            }
+
+            // 🆕 OCULTAR alerta después del tiempo especificado
+            const alertTimer = setTimeout(() => {
+                this.hideDisplay(session, sessionId);
+                this.displayTimers.delete(sessionId);
+                session.logger.info(`🙈 Alerta personalizada ocultada para ${sessionId}`);
+            }, alertDuration);
+
+            this.displayTimers.set(sessionId, alertTimer);
+        }
+    }
+
+    /**
+     * Método adicional para cleanup manual si es necesario (MODIFICADO: + timers)
+     */
+    cleanupSession(sessionId) {
+        const sessionData = this.activeSessions.get(sessionId);
+        if (sessionData) {
+            if (sessionData.updateInterval) {
+                clearInterval(sessionData.updateInterval);
+            }
+
+            if (sessionData.autoCleanupTimeout) {
+                clearTimeout(sessionData.autoCleanupTimeout);
+            }
+
+            // 🆕 Limpiar polling de settings si existe
+            if (sessionData && sessionData.settingsPolling) {
+                clearInterval(sessionData.settingsPolling);
+            }
+
+            // 🆕 Limpiar timer de display
+            const displayTimer = this.displayTimers.get(sessionId);
+            if (displayTimer) {
+                clearTimeout(displayTimer);
+                this.displayTimers.delete(sessionId);
+            }
+
+            this.activeSessions.delete(sessionId);
+            this.alertHistory.delete(sessionId);
+            console.log(`🧹 Sesión ${sessionId} limpiada manualmente`);
+        }
+    }
+}
+
+// Crear y iniciar el servidor (TU CÓDIGO ORIGINAL)
+const server = new NightscoutMentraApp({
+    packageName: PACKAGE_NAME,
+    apiKey: MENTRAOS_API_KEY,
+    port: PORT
+});
+
+server.start().catch(err => {
+    console.error("❌ Error iniciando servidor:", err);
+    process.exit(1);
+});
+
+console.log(`🚀 Nightscout MentraOS App iniciando...`);
+console.log(`📱 Package: ${PACKAGE_NAME}`);
+console.log(`🔌 Puerto: ${PORT}`);
+console.log(`🥽 Optimizado para Even Realities G1`);
+console.log(`⚙️ Sistema de Settings oficial habilitado`);
+console.log(`👁️ Display inteligente activado`); // 🆕
+console.log(`🤖 AI Tools bilingües habilitados`); // 🆕
+console.log(`🇪🇸 Timezone España corregido`); // 🆕
+console.log(`🔔 Alertas configurables implementadas`); // 🆕 NUEVO
+console.log(`🔄 Settings reactivos habilitados`); // 🆕 NUEVODIAGNÓSTICO: Probar todos los settings individualmente
             session.logger.info('=== DIAGNÓSTICO DE SETTINGS ===');
             try {
                 const url = await session.settings.get('nightscout_url');
@@ -136,20 +300,17 @@ class NightscoutMentraApp extends AppServer {
     }
 
     /**
-     * 🆕 NUEVO: Mostrar glucosa temporalmente (MEJORADO - usa settings actuales)
+     * 🆕 NUEVO: Mostrar glucosa temporalmente
      */
     async showGlucoseTemporarily(session, sessionId, duration = 8000) {
         try {
-            // 🆕 USAR SETTINGS ACTUALES de la sesión (no recargar cada vez)
-            const sessionData = this.activeSessions.get(sessionId);
-            const userSettings = sessionData ? sessionData.settings : await this.getUserSettings(session);
-            
+            const userSettings = await this.getUserSettings(session);
             const glucoseData = await this.getGlucoseData(userSettings);
             const displayText = this.formatForG1(glucoseData, userSettings);
             
             // Mostrar datos
             session.layouts.showTextWall(displayText);
-            session.logger.info(`👁️ Glucosa mostrada temporalmente (idioma: ${userSettings.language}, timezone: ${userSettings.timezone})`);
+            session.logger.info('👁️ Glucosa mostrada temporalmente');
             
             // Limpiar timer anterior si existe
             const existingTimer = this.displayTimers.get(sessionId);
@@ -642,82 +803,110 @@ class NightscoutMentraApp extends AppServer {
     }
 
     /**
-     * 🆕 CONFIGURAR LISTENER REACTIVO para cambios de settings EN TIEMPO REAL
+     * 🆕 MEJORADO: Configurar listener para cambios de settings en tiempo real
      */
     setupSettingsListener(session, sessionId, userId) {
         try {
-            // 🆕 LISTENER REACTIVO - Detecta cambios de settings inmediatamente
-            if (session.settings && typeof session.settings.onChange === 'function') {
-                session.settings.onChange(async (changedSetting) => {
-                    try {
-                        session.logger.info(`⚙️ Setting cambiado: ${changedSetting.key} = ${changedSetting.value}`);
-                        
-                        // Actualizar settings en la sesión activa inmediatamente
-                        const sessionData = this.activeSessions.get(sessionId);
-                        if (sessionData) {
-                            // Recargar TODOS los settings frescos
-                            const updatedSettings = await this.getUserSettings(session);
-                            sessionData.settings = updatedSettings;
-                            
-                            session.logger.info(`🔄 Settings actualizados para sesión ${sessionId}:`, {
-                                language: updatedSettings.language,
-                                timezone: updatedSettings.timezone,
-                                lowAlert: updatedSettings.lowAlert,
-                                highAlert: updatedSettings.highAlert
-                            });
-                            
-                            // Si el usuario está viendo la pantalla, actualizar inmediatamente
-                            if (changedSetting.key === 'language' || changedSetting.key === 'timezone') {
-                                // Mostrar datos actualizados brevemente para confirmar el cambio
-                                await this.showGlucoseTemporarily(session, sessionId, 6000);
-                            }
-                        }
-                    } catch (error) {
-                        session.logger.error('Error actualizando settings:', error);
+            // 🆕 Polling cada 30 segundos para detectar cambios de settings
+            session.logger.info('⚙️ Configurando polling de settings cada 30s...');
+            
+            const settingsPolling = setInterval(async () => {
+                try {
+                    if (!this.activeSessions.has(sessionId)) {
+                        clearInterval(settingsPolling);
+                        return;
                     }
-                });
-                
-                session.logger.info('✅ Listener reactivo de settings configurado');
-                
-            } else if (session.settings && typeof session.settings.on === 'function') {
-                // Método alternativo si onChange no existe
-                session.settings.on('change', async (changedSetting) => {
-                    session.logger.info(`⚙️ Setting cambiado (método alternativo): ${changedSetting.key}`);
+                    
                     const sessionData = this.activeSessions.get(sessionId);
                     if (sessionData) {
-                        sessionData.settings = await this.getUserSettings(session);
-                    }
-                });
-                
-                session.logger.info('✅ Listener alternativo de settings configurado');
-                
-            } else {
-                session.logger.warn('⚠️ Settings onChange no disponible - usando polling cada 30s');
-                
-                // 🆕 FALLBACK: Polling cada 30 segundos para detectar cambios
-                const settingsPolling = setInterval(async () => {
-                    try {
-                        if (!this.activeSessions.has(sessionId)) {
-                            clearInterval(settingsPolling);
-                            return;
-                        }
+                        const currentSettings = sessionData.settings;
+                        const newSettings = await this.getUserSettings(session);
                         
-                        const sessionData = this.activeSessions.get(sessionId);
-                        if (sessionData) {
-                            const currentSettings = sessionData.settings;
-                            const newSettings = await this.getUserSettings(session);
+                        // Comparar settings importantes
+                        if (currentSettings.language !== newSettings.language ||
+                            currentSettings.timezone !== newSettings.timezone ||
+                            currentSettings.lowAlert !== newSettings.lowAlert ||
+                            currentSettings.highAlert !== newSettings.highAlert) {
                             
-                            // Comparar settings importantes
-                            if (currentSettings.language !== newSettings.language ||
-                                currentSettings.timezone !== newSettings.timezone ||
-                                currentSettings.lowAlert !== newSettings.lowAlert ||
-                                currentSettings.highAlert !== newSettings.highAlert) {
-                                
-                                session.logger.info('🔄 Cambios detectados en settings por polling');
-                                sessionData.settings = newSettings;
-                                
-                                // Mostrar cambio brevemente
-                                await this.showGlucoseTemporarily(session, sessionId, 5000);
-                            }
+                            session.logger.info('🔄 Cambios detectados en settings por polling:', {
+                                language: `${currentSettings.language} → ${newSettings.language}`,
+                                timezone: `${currentSettings.timezone} → ${newSettings.timezone}`,
+                                lowAlert: `${currentSettings.lowAlert} → ${newSettings.lowAlert}`,
+                                highAlert: `${currentSettings.highAlert} → ${newSettings.highAlert}`
+                            });
+                            
+                            sessionData.settings = newSettings;
+                            
+                            // Mostrar cambio brevemente
+                            await this.showGlucoseTemporarily(session, sessionId, 5000);
                         }
-                    } catch (error) {
+                    }
+                } catch (error) {
+                    session.logger.error('Error en settings polling:', error);
+                }
+            }, 30000); // Cada 30 segundos
+            
+            // Guardar referencia para cleanup
+            const sessionData = this.activeSessions.get(sessionId);
+            if (sessionData) {
+                sessionData.settingsPolling = settingsPolling;
+            }
+            
+        } catch (error) {
+            session.logger.error('Error configurando settings listener:', error);
+        }
+        
+        session.logger.info(`Settings listener configurado para ${sessionId}`);
+    }
+
+    /**
+     * Obtener datos de glucosa desde Nightscout (TU CÓDIGO ORIGINAL)
+     */
+    async getGlucoseData(settings) {
+        try {
+            // 🆕 AÑADIR ESTAS LÍNEAS DE LIMPIEZA DE URL
+            let cleanUrl = settings.nightscoutUrl?.trim();
+            if (!cleanUrl) {
+                throw new Error('URL de Nightscout no configurada');
+            }
+
+            // Asegurar protocolo HTTPS
+            if (!cleanUrl.startsWith('http')) {
+                cleanUrl = 'https://' + cleanUrl;
+            }
+
+            // 🎯 ESTA ES LA LÍNEA CLAVE PARA PREVENIR EL ERROR
+            cleanUrl = cleanUrl.replace(/\/$/, ''); // Remover barra final si existe
+
+            // Construir URL completa del endpoint usando la URL limpia
+            const fullUrl = `${cleanUrl}/api/v1/entries/current.json`;
+            // 🆕 FIN DE LAS LÍNEAS NUEVAS
+
+            const response = await axios.get(fullUrl, {
+                params: { token: settings.nightscoutToken },
+                timeout: 10000,
+                headers: { 'User-Agent': 'MentraOS-Nightscout/1.0' }
+            });
+
+            const data = response.data;
+            const reading = Array.isArray(data) ? data[0] : data;
+
+            if (!reading || !reading.sgv) {
+                throw new Error('No se encontraron datos válidos de glucosa');
+            }
+
+            return reading;
+        } catch (error) {
+            console.error('❌ Error obteniendo datos de Nightscout:', error.message);
+            throw error;
+        }
+    }
+
+    /**
+     * Formatear datos para Even Realities G1 (TIMEZONE INTELIGENTE)
+     */
+    formatForG1(glucoseData, settings) {
+        const glucoseValue = glucoseData.sgv;
+        const trend = this.getTrendArrow(glucoseData.direction);
+
+        //
