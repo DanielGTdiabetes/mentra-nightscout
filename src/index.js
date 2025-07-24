@@ -532,3 +532,20 @@ server.start().catch(err => {
 console.log(`🚀 Nightscout MentraOS v2.1 - SLIDER SUPPORT ACTIVADO`);
 console.log(`📊 Soporta settings tipo "slicer"`);
 console.log(`🔧 Low/High alerts con sliders funcionando`);
+const KEEP_ALIVE_URL = process.env.RENDER_URL || `https://mentra-nightscout.onrender.com`;
+
+// Health check endpoint
+server.app.get('/health', (req, res) => {
+    res.json({ 
+        status: 'alive', 
+        timestamp: new Date().toISOString(),
+        version: '2.4.1'
+    });
+});
+
+// Auto-keep-alive
+setInterval(() => {
+    axios.get(KEEP_ALIVE_URL)
+        .then(() => console.log(`🔄 Keep-alive: ${new Date().toLocaleTimeString()}`))
+        .catch(() => {}); // Expected on startup
+}, 3 * 60 * 1000); // Ping cada 3 minutos
