@@ -59,6 +59,7 @@
 
 ## ⚙️ Updated MentraOS Configuration
 
+
 ### Required Settings (JSON)
 ```json
 {
@@ -314,7 +315,8 @@
 
 ### For Existing Users
 
-- Update your code to **v2.4**  
+- Update your code to **v2.4**
+
 - No breaking changes – everything works automatically  
 - Settings preserve your current configuration  
 
