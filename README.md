@@ -61,47 +61,212 @@
 
 ### Required Settings (JSON)
 ```json
-[
-  {
-    "key": "low_alert",
-    "type": "slicer",
-    "title": "Alerta Glucosa Baja",
-    "min": 40,
-    "max": 90,
-    "default": 70
-  },
-  {
-    "key": "high_alert",
-    "type": "slicer",
-    "title": "Alerta Glucosa Alta",
-    "min": 180,
-    "max": 400,
-    "default": 180
-  },
-  {
-    "key": "nightscout_url",
-    "type": "string",
-    "title": "Nightscout URL"
-  },
-  {
-    "key": "nightscout_token",
-    "type": "string",
-    "title": "API Token"
-  },
-  {
-    "key": "language",
-    "type": "select",
-    "title": "Language",
-    "options": ["en", "es", "fr"],
-    "default": "en"
-  },
-  {
-    "key": "timezone",
-    "type": "string",
-    "title": "Timezone (auto-detected if empty)"
-  }
-]
-```
+{
+  "name": "Nightscout Glucose",
+  "description": "Monitor de glucosa en tiempo real desde Nightscout",
+  "onboardingInstructions": "",
+  "publicUrl": "https://mentra-nightscout.onrender.com",
+  "logoURL": "https://imagedelivery.net/nrc8B2Lk8UIoyW7fY8uHVg/58858985-f97c-40d6-21a3-a8b2514f5a00/square",
+  "appType": "background",
+  "permissions": [
+    {
+      "type": "ALL",
+      "description": ""
+    }
+  ],
+  "settings": [
+    {
+      "type": "group",
+      "key": "",
+      "label": "",
+      "title": "ALARMS"
+    },
+    {
+      "type": "slider",
+      "key": "low_alert",
+      "label": "60",
+      "defaultValue": 0,
+      "min": 40,
+      "max": 90
+    },
+    {
+      "type": "slider",
+      "key": "high_alert",
+      "label": "Critical High Alert (mg/dL)",
+      "defaultValue": 0,
+      "min": 180,
+      "max": 400
+    },
+    {
+      "type": "toggle",
+      "key": "alerts_enabled",
+      "label": "Enable Alerts",
+      "defaultValue": true
+    },
+    {
+      "type": "select",
+      "key": "update_interval",
+      "label": "Update Frequency",
+      "defaultValue": "15 min",
+      "options": [
+        {
+          "label": "1 min",
+          "value": "10 min"
+        },
+        {
+          "label": "5 min",
+          "value": "15 min"
+        }
+      ]
+    },
+    {
+      "type": "group",
+      "key": "",
+      "label": "",
+      "title": "SETTING LANGUAGE AND TIME ZONE"
+    },
+    {
+      "type": "select",
+      "key": "language",
+      "label": "Language",
+      "defaultValue": "en",
+      "options": [
+        {
+          "label": "English",
+          "value": "en"
+        },
+        {
+          "label": "Español",
+          "value": "es"
+        }
+      ]
+    },
+    {
+      "type": "select",
+      "key": "timezone",
+      "label": "Time Zone",
+      "defaultValue": "Europe/Madrid",
+      "options": [
+        {
+          "label": " España - Madrid",
+          "value": "Europe/Madrid"
+        },
+        {
+          "label": "España - Canarias",
+          "value": "Atlantic/Canary"
+        },
+        {
+          "label": "America/New_York",
+          "value": "USA - Este (New York)"
+        },
+        {
+          "label": "America/Chicago",
+          "value": "USA - Centro (Chicago)"
+        },
+        {
+          "label": "America/Los_Angeles",
+          "value": "USA - Oeste (Los Angeles)"
+        },
+        {
+          "label": "America/Mexico_City",
+          "value": "México"
+        },
+        {
+          "label": "America/Argentina/Buenos_Aires",
+          "value": "Argentina"
+        },
+        {
+          "label": "America/Sao_Paulo",
+          "value": "Brasil"
+        },
+        {
+          "label": "Europe/London",
+          "value": "Reino Unido"
+        },
+        {
+          "label": "Europe/Paris",
+          "value": "Francia"
+        },
+        {
+          "label": "Europe/Berlin",
+          "value": "Alemania"
+        },
+        {
+          "label": "Europe/Rome",
+          "value": "Italia"
+        }
+      ]
+    },
+    {
+      "type": "group",
+      "key": "",
+      "label": "",
+      "title": "SETTINGS NIGHTSCOUT"
+    },
+    {
+      "type": "text",
+      "key": "nightscout_url",
+      "label": "Nightscout URL",
+      "defaultValue": ""
+    },
+    {
+      "type": "text",
+      "key": "nightscout_token",
+      "label": "Access Token",
+      "defaultValue": ""
+    }
+  ],
+  "tools": [
+    {
+      "id": "get_glucose",
+      "description": "Get current glucose level from Nightscout CGM. Shows glucose reading, trend, and status on smart glasses display.",
+      "activationPhrases": [
+        "get glucose",
+        "check glucose",
+        "glucose level",
+        "blood sugar",
+        "what's my glucose",
+        "show glucose",
+        "current glucose"
+      ]
+    },
+    {
+      "id": "obtener_glucosa",
+      "description": "Obtener nivel actual de glucosa desde monitor continuo Nightscout. Muestra lectura de glucosa, tendencia y estado en las gafas inteligentes.",
+      "activationPhrases": [
+        "obtener glucosa",
+        "revisar glucosa",
+        "nivel glucosa",
+        "mi glucosa",
+        "cuál es mi glucosa",
+        "mostrar glucosa",
+        "glucosa actual"
+      ]
+    },
+    {
+      "id": "check_glucose",
+      "description": "Check current glucose status with detailed information and recommendations.",
+      "activationPhrases": [
+        "check glucose",
+        "glucose status",
+        "how's my sugar",
+        "glucose check",
+        "blood sugar level"
+      ]
+    },
+    {
+      "id": "revisar_glucosa",
+      "description": "Revisar estado actual de glucosa con información detallada y recomendaciones médicas.",
+      "activationPhrases": [
+        "revisar glucosa",
+        "estado glucosa",
+        "cómo está mi azúcar",
+        "revisar azúcar",
+        "nivel azúcar"
+      ]
+    }
+  ]
+}
 
 ---
 
