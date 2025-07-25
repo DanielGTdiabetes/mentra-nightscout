@@ -1,240 +1,94 @@
-// src/index.js - Nightscout MentraOS VERSIÓN GLUROO COMPATIBLE
-// Fix: Soporte completo para tokens largos de Gluroo
-
+// src/index.js - Aplicación Nightscout MentraOS v2.4.2
+// GLUROO COMPATIBLE + SETTINGS ORDER FIX + FUNCIONALIDADES AVANZADAS
 const { AppServer } = require('@mentra/sdk');
 const axios = require('axios');
 require('dotenv').config();
 
+// Configuración desde variables de entorno
 const PACKAGE_NAME = process.env.PACKAGE_NAME || "com.tucompania.nightscout-glucose";
 const PORT = parseInt(process.env.PORT || "3000");
 const MENTRAOS_API_KEY = process.env.MENTRAOS_API_KEY;
+
+// Constantes de la aplicación
+const UNITS = {
+    MGDL: 'mg/dL',
+    MMOL: 'mmol/L'
+};
+
+const CONVERSION_FACTOR = 18.0; // mg/dL a mmol/L
 
 if (!MENTRAOS_API_KEY) {
     console.error("❌ MENTRAOS_API_KEY environment variable is required");
     process.exit(1);
 }
 
-const UNITS = {
-    MGDL: 'mg/dL',
-    MMOL: 'mmol/L'
-};
-
+/**
+ * NightscoutMentraApp - Aplicación completa para monitoreo de glucosa
+ * Versión 2.4.2 con corrección de race conditions y funcionalidades avanzadas
+ */
 class NightscoutMentraApp extends AppServer {
     constructor(options) {
         super(options);
         this.activeSessions = new Map();
         this.alertHistory = new Map();
-        this.displayTimers = new Map();
-        this.userUnitsCache = new Map();
-    }
-
-    // 🆕 FIX: Parsear valores de slicer y tokens largos
-    parseSlicerValue(value, defaultValue) {
-        if (typeof value === 'object' && value !== null) {
-            return value.value || defaultValue;
-        }
-        return value || defaultValue;
-    }
-
-    validateToken(token) {
-        return String(token || '').trim();
-    }
-
-    async onSettingsUpdate(updates, sessionId) {
-        try {
-            console.log(`🔄 Settings update received for ${sessionId}:`, updates);
-            
-            const sessionData = this.activeSessions.get(sessionId);
-            if (!sessionData) {
-                console.warn(`⚠️ No active session for settings update`);
-                return;
-            }
-
-            const newSettings = await this.getUserSettings(sessionData.session);
-            newSettings.glucoseUnit = await this.getGlucoseUnit(newSettings);
-            
-            sessionData.settings = newSettings;
-            console.log(`✅ Settings refreshed - Token: ${newSettings.nightscoutToken?.substring(0,8)}...`);
-            
-        } catch (error) {
-            console.error(`❌ Settings update failed:`, error);
-        }
-    }
-
-    validateTimezone(timezone) {
-        const validTimezones = [
-            'Europe/Madrid', 'Europe/London', 'America/New_York', 
-            'America/Los_Angeles', 'America/Mexico_City', 'America/Argentina/Buenos_Aires',
-            'America/Sao_Paulo', 'Asia/Tokyo', 'Australia/Sydney', 'UTC'
-        ];
-        return validTimezones.includes(timezone) ? timezone : 'UTC';
-    }
-
-    async getGlucoseUnit(settings) {
-        const cacheKey = `${settings.nightscoutUrl}_${settings.nightscoutToken}`;
-        if (this.userUnitsCache.has(cacheKey)) {
-            return this.userUnitsCache.get(cacheKey);
-        }
-
-        try {
-            let cleanUrl = settings.nightscoutUrl?.trim();
-            if (!cleanUrl) return UNITS.MGDL;
-
-            if (!cleanUrl.startsWith('http')) cleanUrl = 'https://' + cleanUrl;
-            cleanUrl = cleanUrl.replace(/\/$/, '');
-
-            // 🆕 Soporte específico para URLs de Gluroo
-            if (cleanUrl.includes('gluroo.com')) {
-                console.log('✅ Configuración Gluroo detectada');
-            }
-
-            const profileUrl = `${cleanUrl}/api/v1/profile`;
-            const response = await axios.get(profileUrl, {
-                params: { token: settings.nightscoutToken },
-                timeout: 5000,
-                headers: { 'User-Agent': 'MentraOS-Nightscout/1.0' }
-            });
-
-            let unit = UNITS.MGDL;
-            if (response.data && response.data.length > 0) {
-                const profile = response.data[0];
-                if (profile.store?.Default?.units === 'mmol' || profile.units === 'mmol') {
-                    unit = UNITS.MMOL;
-                }
-            }
-
-            this.userUnitsCache.set(cacheKey, unit);
-            return unit;
-
-        } catch (error) {
-            console.warn('⚠️ Unit detection failed, defaulting to mg/dL');
-            this.userUnitsCache.set(cacheKey, UNITS.MGDL);
-            return UNITS.MGDL;
-        }
-    }
-
-    convertToDisplay(value, unit) {
-        if (unit === UNITS.MMOL) {
-            return (value / 18).toFixed(1);
-        }
-        return Math.round(value);
-    }
-
-    getLanguageSettings(settings) {
-        const langMap = {
-            'es': { locale: 'es-ES', timezone: 'Europe/Madrid' },
-            'en': { locale: 'en-US', timezone: 'America/New_York' },
-            'fr': { locale: 'fr-FR', timezone: 'Europe/Paris' }
-        };
-        return langMap[settings.language] || langMap['en'];
-    }
-
-    async onSession(session, sessionId, userId) {
-        console.log(`🚀 Nueva sesión: ${sessionId} para ${userId}`);
+        this.displayTimers = new Map();      // Para display temporal
+        this.userUnitsCache = new Map();     // Caché unidades por usuario
+        this.sessionData = new Map();        // Datos de sesión extendidos
         
-        try {
-            const userSettings = await this.getUserSettings(session);
-            userSettings.glucoseUnit = await this.getGlucoseUnit(userSettings);
-            
-            console.log('📊 Settings cargados:', {
-                lowAlert: userSettings.lowAlert,
-                highAlert: userSettings.highAlert,
-                unit: userSettings.glucoseUnit,
-                tokenLength: userSettings.nightscoutToken?.length
-            });
-
-            if (!userSettings.nightscoutUrl || !userSettings.nightscoutToken) {
-                await this.showConfigurationNeeded(session, userSettings);
-                return;
-            }
-
-            await this.showInitialAndHide(session, sessionId, userSettings);
-            await this.startNormalOperation(session, sessionId, userId, userSettings);
-            this.setupSafeEventHandlers(session, sessionId, userId);
-
-        } catch (error) {
-            session.logger.error(`Error en sesión: ${error.message}`);
-            session.layouts.showTextWall("Error: Check app settings");
-        }
+        // Configurar keep-alive para Render
+        this.setupKeepAlive();
     }
 
-    async showInitialAndHide(session, sessionId, settings) {
-        try {
-            const glucoseData = await this.getGlucoseData(settings);
-            const displayText = await this.formatForG1(glucoseData, settings);
-            
-            session.layouts.showTextWall(displayText);
-            setTimeout(() => this.hideDisplay(session, sessionId), 5000);
-            
-        } catch (error) {
-            console.error('Error en display inicial:', error);
-        }
-    }
-
-    hideDisplay(session, sessionId) {
-        try {
-            session.layouts.showTextWall("");
-        } catch (error) {
-            console.error('Error ocultando display:', error);
-        }
-    }
-
-    setupSafeEventHandlers(session, sessionId, userId) {
-        try {
-            if (session.events?.onButtonPress) {
-                session.events.onButtonPress(async () => {
-                    await this.showGlucoseTemporarily(session, sessionId, 10000);
-                });
-            }
-
-            if (session.events?.onDisconnected) {
-                session.events.onDisconnected(() => {
-                    const displayTimer = this.displayTimers.get(sessionId);
-                    if (displayTimer) {
-                        clearTimeout(displayTimer);
-                        this.displayTimers.delete(sessionId);
-                    }
-
-                    const userSession = this.activeSessions.get(sessionId);
-                    if (userSession?.updateInterval) {
-                        clearInterval(userSession.updateInterval);
-                    }
-
-                    this.activeSessions.delete(sessionId);
-                    this.alertHistory.delete(sessionId);
-                });
-            }
-
-        } catch (error) {
-            console.error(`Error configurando event handlers: ${error.message}`);
-        }
-    }
-
-    // 🆕 FIX: Manejo completo de settings incluyendo tokens largos
+    /**
+     * 🆕 VERSIÓN CORREGIDA: Obtener configuración del usuario de forma secuencial
+     * FIX: Elimina race conditions causados por Promise.all()
+     */
     async getUserSettings(session) {
         try {
-            const [
-                nightscoutUrl,
-                nightscoutToken,
-                updateInterval,
-                lowAlertSetting,
-                highAlertSetting,
-                alertsEnabled,
-                language,
-                timezone
-            ] = await Promise.all([
-                session.settings.get('nightscout_url'),
-                session.settings.get('nightscout_token'),
-                session.settings.get('update_interval'),
-                session.settings.get('low_alert'),
-                session.settings.get('high_alert'),
-                session.settings.get('alerts_enabled'),
-                session.settings.get('language'),
-                session.settings.get('timezone')
-            ]);
+            console.log('🔧 [v2.4.2] Obteniendo settings secuencialmente para evitar race conditions...');
+            
+            // OBTENER SETTINGS UNO POR UNO para evitar conflictos de orden
+            const nightscoutUrl = await session.settings.get('nightscout_url');
+            console.log(`📍 URL obtenida: ${nightscoutUrl ? nightscoutUrl.substring(0, 25) + '...' : 'null'}`);
+            
+            // Pequeña pausa para evitar race conditions en MentraOS
+            await new Promise(resolve => setTimeout(resolve, 50));
+            
+            const nightscoutToken = await session.settings.get('nightscout_token');
+            console.log(`🔑 Token obtenido: ${nightscoutToken ? nightscoutToken.substring(0, 12) + '...' : 'null'} (length: ${nightscoutToken?.length || 0})`);
+            
+            await new Promise(resolve => setTimeout(resolve, 50));
+            
+            const updateInterval = await session.settings.get('update_interval');
+            console.log(`⏱️ Intervalo obtenido: ${updateInterval}`);
+            
+            await new Promise(resolve => setTimeout(resolve, 50));
+            
+            const lowAlertSetting = await session.settings.get('low_alert');
+            console.log(`🔻 Alerta baja obtenida: ${lowAlertSetting}`);
+            
+            await new Promise(resolve => setTimeout(resolve, 50));
+            
+            const highAlertSetting = await session.settings.get('high_alert');
+            console.log(`🔺 Alerta alta obtenida: ${highAlertSetting}`);
+            
+            await new Promise(resolve => setTimeout(resolve, 50));
+            
+            const alertsEnabled = await session.settings.get('alerts_enabled');
+            console.log(`🚨 Alertas habilitadas: ${alertsEnabled}`);
+            
+            await new Promise(resolve => setTimeout(resolve, 50));
+            
+            const language = await session.settings.get('language');
+            console.log(`🌍 Idioma obtenido: ${language}`);
+            
+            await new Promise(resolve => setTimeout(resolve, 50));
+            
+            const timezone = await session.settings.get('timezone');
+            console.log(`🕐 Zona horaria obtenida: ${timezone}`);
 
-            // 🆕 FIX: Manejo completo de tokens (incluidos largos de Gluroo)
-            const settings = {
+            // Procesar todos los settings usando las funciones existentes
+            const processedSettings = {
                 nightscoutUrl: this.validateToken(nightscoutUrl),
                 nightscoutToken: this.validateToken(nightscoutToken),
                 updateInterval: this.parseSlicerValue(updateInterval, 5),
@@ -242,19 +96,31 @@ class NightscoutMentraApp extends AppServer {
                 highAlert: this.parseSlicerValue(highAlertSetting, 180),
                 alertsEnabled: alertsEnabled === 'true' || alertsEnabled === true || alertsEnabled === 1,
                 language: language || 'en',
-                timezone: timezone || null
+                timezone: timezone || 'Europe/Madrid'
             };
 
-            console.log('🔧 Settings procesados:', {
-                url: settings.nightscoutUrl,
-                token: settings.nightscoutToken?.substring(0,12) + '...',
-                tokenLength: settings.nightscoutToken?.length
+            // Verificar compatibilidad con Gluroo
+            if (processedSettings.nightscoutUrl && processedSettings.nightscoutUrl.includes('gluroo.com')) {
+                console.log('✅ Configuración Gluroo detectada - Tokens largos soportados');
+            }
+
+            console.log('✅ Settings procesados secuencialmente:', {
+                url: processedSettings.nightscoutUrl ? 'OK' : 'MISSING',
+                token: processedSettings.nightscoutToken ? `OK (${processedSettings.nightscoutToken.length} chars)` : 'MISSING',
+                updateInterval: processedSettings.updateInterval,
+                lowAlert: processedSettings.lowAlert,
+                highAlert: processedSettings.highAlert,
+                alertsEnabled: processedSettings.alertsEnabled,
+                language: processedSettings.language,
+                timezone: processedSettings.timezone
             });
 
-            return settings;
+            return processedSettings;
 
         } catch (error) {
-            console.error('Error obteniendo settings:', error);
+            console.error('❌ Error obteniendo settings secuencialmente:', error);
+            
+            // Devolver configuración por defecto en caso de error
             return {
                 nightscoutUrl: null,
                 nightscoutToken: null,
@@ -263,186 +129,598 @@ class NightscoutMentraApp extends AppServer {
                 highAlert: 180,
                 alertsEnabled: true,
                 language: 'en',
-                timezone: null
+                timezone: 'Europe/Madrid'
             };
         }
     }
 
-    async showConfigurationNeeded(session, settings) {
-        const messages = {
-            en: "Please configure Nightscout\nURL and token in settings",
-            es: "Configura URL y token\nde Nightscout en ajustes",
-            fr: "Configurez l'URL et le token\nNightscout dans les paramètres"
-        };
-        session.layouts.showTextWall(messages[settings.language] || messages.en);
-    }
-
-    async startNormalOperation(session, sessionId, userId, settings) {
-        this.activeSessions.set(sessionId, { session, userId, settings });
-
-        const intervalMs = settings.updateInterval * 60 * 1000;
-        const updateInterval = setInterval(async () => {
-            try {
-                if (!this.activeSessions.has(sessionId)) {
-                    clearInterval(updateInterval);
-                    return;
-                }
-
-                const currentSettings = await this.getUserSettings(session);
-                currentSettings.glucoseUnit = await this.getGlucoseUnit(currentSettings);
-                const newData = await this.getGlucoseData(currentSettings);
-                
-                if (currentSettings.alertsEnabled) {
-                    await this.checkAlerts(session, sessionId, newData, currentSettings);
-                }
-
-                console.log(`🔄 Update: ${newData.sgv} ${currentSettings.glucoseUnit} (Token: ${currentSettings.nightscoutToken?.substring(0,8)}...)`);
-
-            } catch (error) {
-                console.error('Error en update automático:', error);
+    /**
+     * Método principal onSession con manejo seguro de eventos y funcionalidades completas
+     */
+    async onSession(session, sessionId, userId) {
+        session.logger.info(`🎯 Nueva sesión Nightscout v2.4.2: ${sessionId} para ${userId}`);
+        
+        try {
+            // Obtener configuración del usuario (método corregido)
+            const userSettings = await this.getUserSettings(session);
+            
+            // Validar configuración esencial
+            if (!userSettings.nightscoutUrl || !userSettings.nightscoutToken) {
+                await this.showConfigurationNeeded(session, userSettings);
+                return;
             }
-        }, intervalMs);
 
-        this.activeSessions.get(sessionId).updateInterval = updateInterval;
+            // Almacenar sesión con datos completos
+            this.activeSessions.set(sessionId, { 
+                session, 
+                userId, 
+                settings: userSettings,
+                updateInterval: null,
+                autoCleanupTimeout: null,
+                lastGlucoseReading: null
+            });
+
+            // Configurar eventos de botón para mostrar glucosa
+            this.setupButtonEvents(session, sessionId, userSettings);
+
+            // Iniciar operación normal
+            await this.startNormalOperation(session, sessionId, userId, userSettings);
+
+            // Configurar event handlers seguros
+            this.setupSafeEventHandlers(session, sessionId, userId);
+
+        } catch (error) {
+            session.logger.error(`❌ Error en sesión: ${error.message}`);
+            session.layouts.showTextWall("Error: Check app settings\nin MentraOS app");
+        }
     }
 
+    /**
+     * Configurar eventos de botón para interacción
+     */
+    setupButtonEvents(session, sessionId, userSettings) {
+        try {
+            if (session.events && typeof session.events.onButtonPress === 'function') {
+                session.events.onButtonPress(async (button) => {
+                    session.logger.info(`🔘 Botón presionado: ${button}`);
+                    
+                    try {
+                        // Mostrar glucosa temporalmente al presionar botón
+                        await this.showGlucoseTemporarily(session, sessionId, userSettings);
+                    } catch (error) {
+                        session.logger.error(`❌ Error en evento de botón: ${error.message}`);
+                    }
+                });
+                
+                session.logger.info(`✅ Eventos de botón configurados para ${sessionId}`);
+            }
+        } catch (error) {
+            session.logger.warn(`⚠️ No se pudieron configurar eventos de botón: ${error.message}`);
+        }
+    }
+
+    /**
+     * Mostrar glucosa temporalmente (5 segundos)
+     */
+    async showGlucoseTemporarily(session, sessionId, userSettings) {
+        try {
+            // Limpiar timer previo si existe
+            const existingTimer = this.displayTimers.get(sessionId);
+            if (existingTimer) {
+                clearTimeout(existingTimer);
+            }
+
+            // Obtener y mostrar datos actuales
+            const glucoseData = await this.getGlucoseData(userSettings);
+            const displayText = await this.formatForG1(glucoseData, userSettings, sessionId);
+            
+            session.layouts.showTextWall(displayText);
+            session.logger.info(`📊 Glucosa mostrada temporalmente: ${displayText.split('\n')[0]}`);
+
+            // Programar ocultación después de 5 segundos
+            const hideTimer = setTimeout(() => {
+                this.hideDisplay(session, sessionId);
+            }, 5000);
+
+            this.displayTimers.set(sessionId, hideTimer);
+
+        } catch (error) {
+            session.logger.error(`❌ Error mostrando glucosa temporal: ${error.message}`);
+        }
+    }
+
+    /**
+     * Ocultar display
+     */
+    hideDisplay(session, sessionId) {
+        try {
+            session.layouts.showTextWall("");
+            this.displayTimers.delete(sessionId);
+            session.logger.info(`👻 Display ocultado para sesión ${sessionId}`);
+        } catch (error) {
+            session.logger.error(`❌ Error ocultando display: ${error.message}`);
+        }
+    }
+
+    /**
+     * Iniciar operación normal con todas las funcionalidades
+     */
+    async startNormalOperation(session, sessionId, userId, settings) {
+        session.logger.info(`🚀 Iniciando operación normal para ${userId}`);
+        
+        try {
+            // Mostrar datos iniciales temporalmente
+            await this.showInitialAndHide(session, sessionId, settings);
+
+            // Configurar actualizaciones automáticas
+            const intervalMs = settings.updateInterval * 60 * 1000;
+            const updateInterval = setInterval(async () => {
+                try {
+                    if (!this.activeSessions.has(sessionId)) {
+                        clearInterval(updateInterval);
+                        return;
+                    }
+
+                    const currentSettings = await this.getUserSettings(session);
+                    const newData = await this.getGlucoseData(currentSettings);
+                    
+                    // Actualizar caché
+                    const sessionData = this.activeSessions.get(sessionId);
+                    if (sessionData) {
+                        sessionData.lastGlucoseReading = newData;
+                    }
+
+                    // Verificar alertas si están habilitadas
+                    if (currentSettings.alertsEnabled) {
+                        await this.checkAlerts(session, sessionId, newData, currentSettings);
+                    }
+
+                } catch (error) {
+                    session.logger.error('❌ Error en update automático:', error);
+                }
+            }, intervalMs);
+
+            // Guardar intervalo para cleanup
+            const userSession = this.activeSessions.get(sessionId);
+            if (userSession) {
+                userSession.updateInterval = updateInterval;
+            }
+
+        } catch (error) {
+            session.logger.error('❌ Error iniciando operación:', error);
+            session.layouts.showTextWall("Error: Check Nightscout\nconnection in settings");
+        }
+    }
+
+    /**
+     * Mostrar datos iniciales y ocultar después de 5 segundos
+     */
+    async showInitialAndHide(session, sessionId, userSettings) {
+        try {
+            const glucoseData = await this.getGlucoseData(userSettings);
+            const displayText = await this.formatForG1(glucoseData, userSettings, sessionId);
+            
+            session.layouts.showTextWall(displayText);
+            session.logger.info(`📊 Datos iniciales mostrados: ${displayText.split('\n')[0]}`);
+
+            // Programar ocultación después de 5 segundos
+            const timer = setTimeout(() => {
+                this.hideDisplay(session, sessionId);
+            }, 5000);
+
+            this.displayTimers.set(sessionId, timer);
+
+        } catch (error) {
+            session.logger.error(`❌ Error mostrando datos iniciales: ${error.message}`);
+        }
+    }
+
+    /**
+     * Configurar event handlers de manera segura
+     */
+    setupSafeEventHandlers(session, sessionId, userId) {
+        try {
+            if (session.events && typeof session.events.onDisconnected === 'function') {
+                const disconnectHandler = () => {
+                    try {
+                        session.logger.info(`👋 Sesión ${sessionId} desconectada`);
+                        
+                        // Limpiar recursos de manera segura
+                        const userSession = this.activeSessions.get(sessionId);
+                        if (userSession) {
+                            if (userSession.updateInterval) {
+                                clearInterval(userSession.updateInterval);
+                            }
+                            if (userSession.autoCleanupTimeout) {
+                                clearTimeout(userSession.autoCleanupTimeout);
+                            }
+                        }
+                        
+                        // Limpiar timer de display
+                        const displayTimer = this.displayTimers.get(sessionId);
+                        if (displayTimer) {
+                            clearTimeout(displayTimer);
+                            this.displayTimers.delete(sessionId);
+                        }
+                        
+                        // Limpiar cachés
+                        this.activeSessions.delete(sessionId);
+                        this.alertHistory.delete(sessionId);
+                        this.userUnitsCache.delete(sessionId);
+                        this.sessionData.delete(sessionId);
+                        
+                    } catch (cleanupError) {
+                        console.error(`❌ Error en cleanup de sesión ${sessionId}:`, cleanupError);
+                    }
+                };
+
+                session.events.onDisconnected(disconnectHandler);
+                session.logger.info(`✅ Event handler registrado para sesión ${sessionId}`);
+                
+            } else {
+                session.logger.warn('⚠️ session.events.onDisconnected no disponible, usando cleanup alternativo');
+                
+                // Cleanup alternativo usando timeout
+                const sessionData = this.activeSessions.get(sessionId);
+                if (sessionData) {
+                    sessionData.autoCleanupTimeout = setTimeout(() => {
+                        session.logger.info(`🧹 Auto-cleanup para sesión ${sessionId}`);
+                        this.cleanupSession(sessionId);
+                    }, 1800000); // 30 minutos
+                }
+            }
+        } catch (error) {
+            session.logger.error(`❌ Error configurando event handlers: ${error.message}`);
+        }
+    }
+
+    /**
+     * Obtener datos de glucosa desde Nightscout/Gluroo
+     */
     async getGlucoseData(settings) {
         try {
+            // Limpiar y validar URL (prevención automática de errores)
             let cleanUrl = settings.nightscoutUrl?.trim();
-            if (!cleanUrl) throw new Error('URL de Nightscout no configurada');
-
-            // 🆕 Soporte para URLs de Gluroo
-            if (cleanUrl.includes('gluroo.com')) {
-                console.log('🌐 Conectando con Gluroo:', cleanUrl);
+            if (!cleanUrl) {
+                throw new Error('URL de Nightscout no configurada');
             }
-
-            if (!cleanUrl.startsWith('http')) cleanUrl = 'https://' + cleanUrl;
+            
+            // Asegurar protocolo HTTPS
+            if (!cleanUrl.startsWith('http')) {
+                cleanUrl = 'https://' + cleanUrl;
+            }
+            
+            // Remover barra final si existe (PREVENCIÓN DEL ERROR 404)
             cleanUrl = cleanUrl.replace(/\/$/, '');
+            
+            // Verificar compatibilidad con Gluroo
+            const isGluroo = cleanUrl.includes('gluroo.com');
+            if (isGluroo) {
+                console.log('🟢 Usando configuración optimizada para Gluroo');
+            }
             
             const response = await axios.get(`${cleanUrl}/api/v1/entries/current.json`, {
                 params: { token: settings.nightscoutToken },
                 timeout: 10000,
-                headers: { 'User-Agent': 'MentraOS-Nightscout/1.0' }
+                headers: { 'User-Agent': 'MentraOS-Nightscout-v2.4.2' }
             });
 
-            const reading = Array.isArray(response.data) ? response.data[0] : response.data;
-            if (!reading?.sgv) throw new Error('No hay datos de glucosa');
+            const data = response.data;
+            const reading = Array.isArray(data) ? data[0] : data;
 
+            if (!reading || !reading.sgv) {
+                throw new Error('No se encontraron datos válidos de glucosa');
+            }
+
+            console.log(`📊 Datos obtenidos exitosamente: ${reading.sgv} ${reading.units || 'mg/dL'} (${reading.direction})`);
             return reading;
+            
         } catch (error) {
-            console.error('Error obteniendo datos:', error.message);
+            console.error('❌ Error obteniendo datos de Nightscout:', error.message);
             throw error;
         }
     }
 
-    async formatForG1(glucoseData, settings) {
-        const unit = settings.glucoseUnit || UNITS.MGDL;
-        const displayValue = this.convertToDisplay(glucoseData.sgv, unit);
-        const trend = this.getTrendArrow(glucoseData.direction);
-
-        const langSettings = this.getLanguageSettings(settings);
-        let timeZone = langSettings.timezone;
-
+    /**
+     * Formatear datos para Even Realities G1 con detección automática de unidades
+     */
+    async formatForG1(glucoseData, settings, sessionId) {
         try {
-            if (settings.timezone) {
-                timeZone = this.validateTimezone(settings.timezone);
+            let glucoseValue = glucoseData.sgv;
+            const originalUnits = glucoseData.units || 'mg/dL';
+            
+            // Detección y conversión de unidades
+            let displayUnits = UNITS.MGDL;
+            let cachedUnits = this.userUnitsCache.get(sessionId);
+            
+            if (!cachedUnits) {
+                // Detectar unidades automáticamente
+                if (originalUnits === 'mmol/L' || glucoseValue < 30) {
+                    displayUnits = UNITS.MMOL;
+                    this.userUnitsCache.set(sessionId, UNITS.MMOL);
+                } else {
+                    this.userUnitsCache.set(sessionId, UNITS.MGDL);
+                }
             } else {
-                const detected = Intl.DateTimeFormat().resolvedOptions().timeZone;
-                if (detected && detected !== 'UTC') timeZone = this.validateTimezone(detected);
+                displayUnits = cachedUnits;
             }
-        } catch {
-            console.warn('Timezone detection failed, using fallback');
+
+            // Convertir si es necesario
+            if (displayUnits === UNITS.MMOL && originalUnits !== 'mmol/L') {
+                glucoseValue = Math.round((glucoseValue / CONVERSION_FACTOR) * 10) / 10;
+            } else if (displayUnits === UNITS.MGDL && originalUnits === 'mmol/L') {
+                glucoseValue = Math.round(glucoseValue * CONVERSION_FACTOR);
+            }
+
+            // Obtener flecha de tendencia
+            const trend = this.getTrendArrow(glucoseData.direction);
+            
+            // Formato de tiempo localizado
+            const time = new Date().toLocaleTimeString(
+                settings.language === 'es' ? 'es-ES' : 'en-US', 
+                { 
+                    hour: '2-digit', 
+                    minute: '2-digit',
+                    timeZone: settings.timezone 
+                }
+            );
+
+            // Determinar símbolo según umbrales personalizados
+            let symbol = '*';
+            if (displayUnits === UNITS.MMOL) {
+                // Convertir umbrales a mmol/L para comparación
+                const lowThreshold = settings.lowAlert / CONVERSION_FACTOR;
+                const highThreshold = settings.highAlert / CONVERSION_FACTOR;
+                
+                if (glucoseValue < lowThreshold) symbol = '!';
+                else if (glucoseValue > highThreshold) symbol = '^';
+            } else {
+                if (glucoseValue < settings.lowAlert) symbol = '!';
+                else if (glucoseValue > settings.highAlert) symbol = '^';
+            }
+
+            // Formato optimizado para Even Realities G1
+            return `${symbol} ${glucoseValue} ${displayUnits}\n${time}`;
+
+        } catch (error) {
+            console.error('❌ Error formateando para G1:', error);
+            return `Error: ${glucoseData.sgv || '---'} mg/dL\n${new Date().toLocaleTimeString()}`;
         }
-
-        const time = new Date(glucoseData.date || Date.now()).toLocaleTimeString(langSettings.locale, {
-            hour: '2-digit',
-            minute: '2-digit',
-            timeZone: timeZone
-        });
-
-        const mgdlValue = unit === UNITS.MMOL ? 
-            this.convertToMgdl(parseFloat(displayValue), UNITS.MMOL) : 
-            parseFloat(displayValue);
-
-        let symbol = '*';
-        if (mgdlValue < settings.lowAlert) symbol = '!';
-        else if (mgdlValue > settings.highAlert) symbol = '^';
-
-        return `${symbol} ${displayValue} ${unit}\n${time}`;
     }
 
+    /**
+     * Obtener flecha de tendencia
+     */
     getTrendArrow(direction) {
         const arrows = {
-            'DoubleUp': '^^', 'SingleUp': '^', 'FortyFiveUp': '/',
-            'Flat': '->', 'FortyFiveDown': '\\', 'SingleDown': 'v',
-            'DoubleDown': 'vv', 'NONE': '-', 'NOT COMPUTABLE': '?'
+            'DoubleUp': '↑↑',
+            'SingleUp': '↑',
+            'FortyFiveUp': '↗',
+            'Flat': '→',
+            'FortyFiveDown': '↘',
+            'SingleDown': '↓',
+            'DoubleDown': '↓↓',
+            'NONE': '→',
+            'NOT COMPUTABLE': '?'
         };
-        return arrows[direction] || '->';
+        return arrows[direction] || '→';
     }
 
-    getGlucoseStatusText(value, settings, lang) {
-        const mgdlValue = settings.glucoseUnit === UNITS.MMOL ? 
-            this.convertToMgdl(parseFloat(value), UNITS.MMOL) : 
-            value;
-
-        if (mgdlValue < 70) return lang === 'es' ? 'Crítico Bajo' : 'Critical Low';
-        if (mgdlValue < settings.lowAlert) return lang === 'es' ? 'Bajo' : 'Low';
-        if (mgdlValue > 250) return lang === 'es' ? 'Crítico Alto' : 'Critical High';
-        if (mgdlValue > settings.highAlert) return lang === 'es' ? 'Alto' : 'High';
-        return lang === 'es' ? 'Normal' : 'Normal';
-    }
-
-    // 🆕 FIX: Parsear settings array incluyendo slicers
-    parseSettingsFromArray(settingsArray) {
-        const settings = {};
-        for (const setting of settingsArray) {
-            settings[setting.key] = setting.value;
+    /**
+     * Verificar y mostrar alertas inteligentes
+     */
+    async checkAlerts(session, sessionId, glucoseData, settings) {
+        const glucoseValue = glucoseData.sgv;
+        const currentTime = Date.now();
+        
+        // Evitar spam de alertas (máximo una cada 10 minutos)
+        const lastAlert = this.alertHistory.get(sessionId);
+        if (lastAlert && (currentTime - lastAlert) < 600000) {
+            return;
         }
 
-        return {
-            nightscoutUrl: this.validateToken(settings.nightscout_url),
-            nightscoutToken: this.validateToken(settings.nightscout_token),
-            updateInterval: this.parseSlicerValue(settings.update_interval, 5),
-            lowAlert: this.parseSlicerValue(settings.low_alert, 70),
-            highAlert: this.parseSlicerValue(settings.high_alert, 180),
-            alertsEnabled: settings.alerts_enabled === 'true' || settings.alerts_enabled === true || settings.alerts_enabled === 1,
-            language: settings.language || 'en',
-            timezone: settings.timezone || null
+        let alertMessage = null;
+        const messages = {
+            en: {
+                low: `LOW GLUCOSE!\n${glucoseValue} mg/dL\nCheck now`,
+                high: `HIGH GLUCOSE!\n${glucoseValue} mg/dL\nTake action`,
+                critical_low: `CRITICAL LOW!\n${glucoseValue} mg/dL\nEMERGENCY`,
+                critical_high: `CRITICAL HIGH!\n${glucoseValue} mg/dL\nEMERGENCY`
+            },
+            es: {
+                low: `GLUCOSA BAJA!\n${glucoseValue} mg/dL\nRevisar ahora`,
+                high: `GLUCOSA ALTA!\n${glucoseValue} mg/dL\nActuar`,
+                critical_low: `CRÍTICO BAJO!\n${glucoseValue} mg/dL\nEMERGENCIA`,
+                critical_high: `CRÍTICO ALTO!\n${glucoseValue} mg/dL\nEMERGENCIA`
+            },
+            fr: {
+                low: `GLUCOSE BASSE!\n${glucoseValue} mg/dL\nVérifier`,
+                high: `GLUCOSE HAUTE!\n${glucoseValue} mg/dL\nAgir`,
+                critical_low: `CRITIQUE BAS!\n${glucoseValue} mg/dL\nURGENCE`,
+                critical_high: `CRITIQUE HAUT!\n${glucoseValue} mg/dL\nURGENCE`
+            }
         };
+
+        const lang = settings.language || 'en';
+        const langMessages = messages[lang] || messages.en;
+
+        // Determinar tipo de alerta
+        if (glucoseValue < 50) {
+            alertMessage = langMessages.critical_low;
+        } else if (glucoseValue > 250) {
+            alertMessage = langMessages.critical_high;
+        } else if (glucoseValue < settings.lowAlert) {
+            alertMessage = langMessages.low;
+        } else if (glucoseValue > settings.highAlert) {
+            alertMessage = langMessages.high;
+        }
+
+        if (alertMessage) {
+            // Limpiar timer de display si existe
+            const existingTimer = this.displayTimers.get(sessionId);
+            if (existingTimer) {
+                clearTimeout(existingTimer);
+            }
+
+            session.layouts.showTextWall(alertMessage);
+            this.alertHistory.set(sessionId, currentTime);
+            session.logger.warn(`🚨 Alerta enviada: ${glucoseValue} mg/dL`);
+
+            // Volver a mostrar datos normales después de 15 segundos
+            const normalTimer = setTimeout(async () => {
+                if (this.activeSessions.has(sessionId)) {
+                    try {
+                        const displayText = await this.formatForG1(glucoseData, settings, sessionId);
+                        session.layouts.showTextWall(displayText);
+                        
+                        // Ocultar después de 5 segundos
+                        setTimeout(() => {
+                            this.hideDisplay(session, sessionId);
+                        }, 5000);
+                        
+                    } catch (error) {
+                        session.logger.error('❌ Error volviendo a display normal:', error);
+                    }
+                }
+            }, 15000);
+
+            this.displayTimers.set(sessionId, normalTimer);
+        }
+    }
+
+    /**
+     * Mostrar mensaje de configuración necesaria
+     */
+    async showConfigurationNeeded(session, settings) {
+        const messages = {
+            en: "Please configure your\nNightscout URL and token\nin MentraOS app settings",
+            es: "Por favor configura tu\nURL y token de Nightscout\nen ajustes de MentraOS",
+            fr: "Veuillez configurer votre\nURL et token Nightscout\ndans les paramètres MentraOS"
+        };
+
+        const message = messages[settings.language] || messages.en;
+        session.layouts.showTextWall(message);
+        session.logger.info('⚙️ Configuración requerida mostrada al usuario');
+    }
+
+    /**
+     * Validar y limpiar tokens/URLs
+     */
+    validateToken(token) {
+        if (!token) return null;
+        if (typeof token === 'string') {
+            return token.trim() || null;
+        }
+        return null;
+    }
+
+    /**
+     * Parsear valores del slicer de MentraOS
+     */
+    parseSlicerValue(value, defaultValue) {
+        if (typeof value === 'object' && value !== null) {
+            return value.value || defaultValue;
+        }
+        return value || defaultValue;
+    }
+
+    /**
+     * Cleanup manual de sesión
+     */
+    cleanupSession(sessionId) {
+        const sessionData = this.activeSessions.get(sessionId);
+        if (sessionData) {
+            if (sessionData.updateInterval) {
+                clearInterval(sessionData.updateInterval);
+            }
+            if (sessionData.autoCleanupTimeout) {
+                clearTimeout(sessionData.autoCleanupTimeout);
+            }
+        }
+
+        const displayTimer = this.displayTimers.get(sessionId);
+        if (displayTimer) {
+            clearTimeout(displayTimer);
+            this.displayTimers.delete(sessionId);
+        }
+
+        this.activeSessions.delete(sessionId);
+        this.alertHistory.delete(sessionId);
+        this.userUnitsCache.delete(sessionId);
+        this.sessionData.delete(sessionId);
+        
+        console.log(`🧹 Sesión ${sessionId} limpiada completamente`);
+    }
+
+    /**
+     * Configurar keep-alive para Render
+     */
+    setupKeepAlive() {
+        if (process.env.NODE_ENV === 'production') {
+            // Keep-alive cada 5 minutos para evitar que Render duerma la app
+            setInterval(async () => {
+                try {
+                    const response = await axios.get('https://httpbin.org/get', { 
+                        timeout: 5000,
+                        headers: { 'User-Agent': 'MentraOS-KeepAlive-v2.4.2' }
+                    });
+                    console.log('💚 Keep-alive ping exitoso');
+                } catch (error) {
+                    console.log('⚠️ Keep-alive ping falló:', error.message);
+                }
+            }, 5 * 60 * 1000); // 5 minutos
+        }
     }
 }
 
-// Iniciar servidor
+// Crear y iniciar el servidor
 const server = new NightscoutMentraApp({
     packageName: PACKAGE_NAME,
     apiKey: MENTRAOS_API_KEY,
     port: PORT
 });
 
+// Endpoint de salud con información completa
+server.app.get('/health', (req, res) => {
+    const health = {
+        status: 'alive',
+        version: '2.4.2',
+        timestamp: new Date().toISOString(),
+        features: {
+            gluroo_compatible: true,
+            multi_units: true,
+            multi_language: true,
+            button_events: true,
+            temporal_display: true,
+            smart_alerts: true,
+            keep_alive: true
+        },
+        active_sessions: server.activeSessions?.size || 0,
+        uptime: process.uptime(),
+        memory: process.memoryUsage()
+    };
+    
+    res.json(health);
+});
+
+// Keep-alive endpoint específico
+server.app.get('/keep-alive', (req, res) => {
+    res.json({
+        status: 'alive',
+        timestamp: new Date().toISOString(),
+        version: '2.4.2',
+        keep_alive: true
+    });
+});
+
+// Iniciar servidor
 server.start().catch(err => {
     console.error("❌ Error iniciando servidor:", err);
     process.exit(1);
 });
 
-console.log(`🚀 Nightscout MentraOS v2.4 - GLUROO COMPATIBLE`);
-console.log(`📊 Soporta tokens largos de Gluroo`);
-console.log(`🔧 API Secret Token funcionando correctamente`);
-
-const KEEP_ALIVE_URL = process.env.RENDER_URL || `https://mentra-nightscout.onrender.com`;
-
-// Health check endpoint
-server.app.get('/health', (req, res) => {
-    res.json({ 
-        status: 'alive', 
-        timestamp: new Date().toISOString(),
-        version: '2.4.1',
-        gluroo_compatible: true
-    });
-});
-
-// Auto-keep-alive
-setInterval(() => {
-    axios.get(KEEP_ALIVE_URL)
-        .then(() => console.log(`🔄 Keep-alive: ${new Date().toLocaleTimeString()}`))
-        .catch(() => {}); // Expected on startup
-}, 3 * 60 * 1000); // Ping cada 3 minutos
+console.log(`🚀 Nightscout MentraOS v2.4.2 - GLUROO COMPATIBLE + SETTINGS ORDER FIX`);
+console.log(`📱 Optimizado para Even Realities G1 (640×200, verde monocromático)`);
+console.log(`🔧 Características: Multi-unidades, Multi-idioma, Display temporal, Alertas inteligentes`);
+console.log(`🔌 Puerto: ${PORT}`);
+console.log(`⚙️ Keep-alive: ${process.env.NODE_ENV === 'production' ? 'Activado' : 'Desactivado'}`);
