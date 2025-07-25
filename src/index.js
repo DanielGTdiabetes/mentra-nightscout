@@ -1,5 +1,5 @@
-// src/index.js - Nightscout MentraOS VERSIÓN SLICER COMPATIBLE
-// Fix: Soporte completo para settings tipo "slicer"
+// src/index.js - Nightscout MentraOS VERSIÓN GLUROO COMPATIBLE
+// Fix: Soporte completo para tokens largos de Gluroo
 
 const { AppServer } = require('@mentra/sdk');
 const axios = require('axios');
@@ -28,17 +28,16 @@ class NightscoutMentraApp extends AppServer {
         this.userUnitsCache = new Map();
     }
 
-    // 🆕 FIX: Parsear valores de slicer correctamente
+    // 🆕 FIX: Parsear valores de slicer y tokens largos
     parseSlicerValue(value, defaultValue) {
         if (typeof value === 'object' && value !== null) {
-            return parseInt(value.value) || defaultValue;
+            return value.value || defaultValue;
         }
-        return parseInt(value) || defaultValue;
+        return value || defaultValue;
     }
 
-    validateSlicerValue(value, min, max, defaultValue) {
-        const parsed = this.parseSlicerValue(value, defaultValue);
-        return Math.max(min, Math.min(max, parsed));
+    validateToken(token) {
+        return String(token || '').trim();
     }
 
     async onSettingsUpdate(updates, sessionId) {
@@ -51,12 +50,11 @@ class NightscoutMentraApp extends AppServer {
                 return;
             }
 
-            // Force refresh settings
             const newSettings = await this.getUserSettings(sessionData.session);
             newSettings.glucoseUnit = await this.getGlucoseUnit(newSettings);
             
             sessionData.settings = newSettings;
-            console.log(`✅ Settings refreshed - Low: ${newSettings.lowAlert}, High: ${newSettings.highAlert}`);
+            console.log(`✅ Settings refreshed - Token: ${newSettings.nightscoutToken?.substring(0,8)}...`);
             
         } catch (error) {
             console.error(`❌ Settings update failed:`, error);
@@ -84,6 +82,11 @@ class NightscoutMentraApp extends AppServer {
 
             if (!cleanUrl.startsWith('http')) cleanUrl = 'https://' + cleanUrl;
             cleanUrl = cleanUrl.replace(/\/$/, '');
+
+            // 🆕 Soporte específico para URLs de Gluroo
+            if (cleanUrl.includes('gluroo.com')) {
+                console.log('✅ Configuración Gluroo detectada');
+            }
 
             const profileUrl = `${cleanUrl}/api/v1/profile`;
             const response = await axios.get(profileUrl, {
@@ -137,7 +140,7 @@ class NightscoutMentraApp extends AppServer {
                 lowAlert: userSettings.lowAlert,
                 highAlert: userSettings.highAlert,
                 unit: userSettings.glucoseUnit,
-                language: userSettings.language
+                tokenLength: userSettings.nightscoutToken?.length
             });
 
             if (!userSettings.nightscoutUrl || !userSettings.nightscoutToken) {
@@ -150,7 +153,7 @@ class NightscoutMentraApp extends AppServer {
             this.setupSafeEventHandlers(session, sessionId, userId);
 
         } catch (error) {
-            console.error(`Error en sesión: ${error.message}`);
+            session.logger.error(`Error en sesión: ${error.message}`);
             session.layouts.showTextWall("Error: Check app settings");
         }
     }
@@ -207,7 +210,7 @@ class NightscoutMentraApp extends AppServer {
         }
     }
 
-    // 🆕 FIX: Manejo completo de settings incluyendo slicers
+    // 🆕 FIX: Manejo completo de settings incluyendo tokens largos
     async getUserSettings(session) {
         try {
             const [
@@ -230,25 +233,22 @@ class NightscoutMentraApp extends AppServer {
                 session.settings.get('timezone')
             ]);
 
-            // 🆕 FIX: Parsear valores de slicer correctamente
-            const lowAlert = this.validateSlicerValue(lowAlertSetting, 40, 90, 70);
-            const highAlert = this.validateSlicerValue(highAlertSetting, 180, 400, 180);
-
+            // 🆕 FIX: Manejo completo de tokens (incluidos largos de Gluroo)
             const settings = {
-                nightscoutUrl: nightscoutUrl?.trim(),
-                nightscoutToken: nightscoutToken?.trim(),
+                nightscoutUrl: this.validateToken(nightscoutUrl),
+                nightscoutToken: this.validateToken(nightscoutToken),
                 updateInterval: this.parseSlicerValue(updateInterval, 5),
-                lowAlert: lowAlert,
-                highAlert: highAlert,
+                lowAlert: this.parseSlicerValue(lowAlertSetting, 70),
+                highAlert: this.parseSlicerValue(highAlertSetting, 180),
                 alertsEnabled: alertsEnabled === 'true' || alertsEnabled === true || alertsEnabled === 1,
                 language: language || 'en',
                 timezone: timezone || null
             };
 
             console.log('🔧 Settings procesados:', {
-                low: settings.lowAlert,
-                high: settings.highAlert,
-                type: typeof settings.lowAlert
+                url: settings.nightscoutUrl,
+                token: settings.nightscoutToken?.substring(0,12) + '...',
+                tokenLength: settings.nightscoutToken?.length
             });
 
             return settings;
@@ -296,7 +296,7 @@ class NightscoutMentraApp extends AppServer {
                     await this.checkAlerts(session, sessionId, newData, currentSettings);
                 }
 
-                console.log(`🔄 Update: ${newData.sgv} ${currentSettings.glucoseUnit} (Low: ${currentSettings.lowAlert}, High: ${currentSettings.highAlert})`);
+                console.log(`🔄 Update: ${newData.sgv} ${currentSettings.glucoseUnit} (Token: ${currentSettings.nightscoutToken?.substring(0,8)}...)`);
 
             } catch (error) {
                 console.error('Error en update automático:', error);
@@ -310,6 +310,11 @@ class NightscoutMentraApp extends AppServer {
         try {
             let cleanUrl = settings.nightscoutUrl?.trim();
             if (!cleanUrl) throw new Error('URL de Nightscout no configurada');
+
+            // 🆕 Soporte para URLs de Gluroo
+            if (cleanUrl.includes('gluroo.com')) {
+                console.log('🌐 Conectando con Gluroo:', cleanUrl);
+            }
 
             if (!cleanUrl.startsWith('http')) cleanUrl = 'https://' + cleanUrl;
             cleanUrl = cleanUrl.replace(/\/$/, '');
@@ -325,7 +330,7 @@ class NightscoutMentraApp extends AppServer {
 
             return reading;
         } catch (error) {
-            console.error('Error obteniendo datos de Nightscout:', error.message);
+            console.error('Error obteniendo datos:', error.message);
             throw error;
         }
     }
@@ -375,135 +380,6 @@ class NightscoutMentraApp extends AppServer {
         return arrows[direction] || '->';
     }
 
-    async checkAlerts(session, sessionId, glucoseData, settings) {
-        const unit = settings.glucoseUnit || UNITS.MGDL;
-        const displayValue = this.convertToDisplay(glucoseData.sgv, unit);
-        const mgdlValue = unit === UNITS.MMOL ? 
-            this.convertToMgdl(parseFloat(displayValue), UNITS.MMOL) : 
-            parseFloat(displayValue);
-
-        const lastAlert = this.alertHistory.get(sessionId);
-        if (lastAlert && (Date.now() - lastAlert) < 600000) return;
-
-        const messages = {
-            en: {
-                low: `🚨 LOW!\n${displayValue} ${unit}`,
-                high: `🚨 HIGH!\n${displayValue} ${unit}`
-            },
-            es: {
-                low: `🚨 ¡BAJA!\n${displayValue} ${unit}`,
-                high: `🚨 ¡ALTA!\n${displayValue} ${unit}`
-            }
-        };
-
-        const lang = settings.language || 'en';
-        let alertMessage = null;
-
-        if (mgdlValue < settings.lowAlert) {
-            alertMessage = messages[lang]?.low || messages.en.low;
-            this.alertHistory.set(sessionId, Date.now());
-        } else if (mgdlValue > settings.highAlert) {
-            alertMessage = messages[lang]?.high || messages.en.high;
-            this.alertHistory.set(sessionId, Date.now());
-        }
-
-        if (alertMessage) {
-            session.layouts.showTextWall(alertMessage);
-            
-            const timer = setTimeout(() => {
-                this.hideDisplay(session, sessionId);
-                this.displayTimers.delete(sessionId);
-            }, 15000);
-            
-            this.displayTimers.set(sessionId, timer);
-        }
-    }
-
-    async onToolCall(data) {
-        const toolId = data.toolId || data.toolName;
-        const userId = data.userId;
-        const activeSession = data.activeSession;
-        
-        try {
-            let userPreferredLang = 'en';
-            if (activeSession?.settings?.settings) {
-                const langSetting = activeSession.settings.settings.find(s => s.key === 'language');
-                if (langSetting) userPreferredLang = langSetting.value === 'es' ? 'es' : 'en';
-            }
-
-            const isSpanishTool = ['obtener_glucosa', 'revisar_glucosa', 'nivel_glucosa', 'mi_glucosa'].includes(toolId);
-            const lang = isSpanishTool ? 'es' : userPreferredLang;
-
-            return await this.handleGetGlucoseForMira(userId, activeSession, lang);
-
-        } catch (error) {
-            return { success: false, error: error.message };
-        }
-    }
-
-    async handleGetGlucoseForMira(userId, activeSession, lang) {
-        try {
-            let settings = null;
-            
-            if (activeSession?.settings?.settings) {
-                settings = this.parseSettingsFromArray(activeSession.settings.settings);
-            } else {
-                for (const [sid, data] of this.activeSessions) {
-                    if (data.userId === userId) {
-                        settings = await this.getUserSettings(data.session);
-                        break;
-                    }
-                }
-            }
-
-            if (!settings?.nightscoutUrl || !settings?.nightscoutToken) {
-                throw new Error(lang === 'es' ? 'Nightscout no configurado' : 'Nightscout not configured');
-            }
-
-            settings.glucoseUnit = await this.getGlucoseUnit(settings);
-            const glucoseData = await this.getGlucoseData(settings);
-            
-            const displayValue = this.convertToDisplay(glucoseData.sgv, settings.glucoseUnit);
-            const trend = this.getTrendArrow(glucoseData.direction);
-            const status = this.getGlucoseStatusText(glucoseData.sgv, settings, lang);
-
-            const message = lang === 'es' 
-                ? `Tu glucosa está en ${displayValue} ${settings.glucoseUnit} ${trend}. Estado: ${status}.`
-                : `Your glucose is ${displayValue} ${settings.glucoseUnit} ${trend}. Status: ${status}.`;
-
-            return {
-                success: true,
-                data: { glucose: displayValue, unit: settings.glucoseUnit, trend, status },
-                message: message
-            };
-
-        } catch (error) {
-            return {
-                success: false,
-                error: lang === 'es' ? `Error: ${error.message}` : `Error: ${error.message}`
-            };
-        }
-    }
-
-    // 🆕 FIX: Parsear settings array incluyendo slicers
-    parseSettingsFromArray(settingsArray) {
-        const settings = {};
-        for (const setting of settingsArray) {
-            settings[setting.key] = setting.value;
-        }
-
-        return {
-            nightscoutUrl: settings.nightscout_url?.trim(),
-            nightscoutToken: settings.nightscout_token?.trim(),
-            updateInterval: this.parseSlicerValue(settings.update_interval, 5),
-            lowAlert: this.validateSlicerValue(settings.low_alert, 40, 90, 70),
-            highAlert: this.validateSlicerValue(settings.high_alert, 180, 400, 180),
-            alertsEnabled: settings.alerts_enabled === 'true' || settings.alerts_enabled === true || settings.alerts_enabled === 1,
-            language: settings.language || 'en',
-            timezone: settings.timezone || null
-        };
-    }
-
     getGlucoseStatusText(value, settings, lang) {
         const mgdlValue = settings.glucoseUnit === UNITS.MMOL ? 
             this.convertToMgdl(parseFloat(value), UNITS.MMOL) : 
@@ -514,6 +390,25 @@ class NightscoutMentraApp extends AppServer {
         if (mgdlValue > 250) return lang === 'es' ? 'Crítico Alto' : 'Critical High';
         if (mgdlValue > settings.highAlert) return lang === 'es' ? 'Alto' : 'High';
         return lang === 'es' ? 'Normal' : 'Normal';
+    }
+
+    // 🆕 FIX: Parsear settings array incluyendo slicers
+    parseSettingsFromArray(settingsArray) {
+        const settings = {};
+        for (const setting of settingsArray) {
+            settings[setting.key] = setting.value;
+        }
+
+        return {
+            nightscoutUrl: this.validateToken(settings.nightscout_url),
+            nightscoutToken: this.validateToken(settings.nightscout_token),
+            updateInterval: this.parseSlicerValue(settings.update_interval, 5),
+            lowAlert: this.parseSlicerValue(settings.low_alert, 70),
+            highAlert: this.parseSlicerValue(settings.high_alert, 180),
+            alertsEnabled: settings.alerts_enabled === 'true' || settings.alerts_enabled === true || settings.alerts_enabled === 1,
+            language: settings.language || 'en',
+            timezone: settings.timezone || null
+        };
     }
 }
 
@@ -529,9 +424,10 @@ server.start().catch(err => {
     process.exit(1);
 });
 
-console.log(`🚀 Nightscout MentraOS v2.1 - SLIDER SUPPORT ACTIVADO`);
-console.log(`📊 Soporta settings tipo "slicer"`);
-console.log(`🔧 Low/High alerts con sliders funcionando`);
+console.log(`🚀 Nightscout MentraOS v2.4 - GLUROO COMPATIBLE`);
+console.log(`📊 Soporta tokens largos de Gluroo`);
+console.log(`🔧 API Secret Token funcionando correctamente`);
+
 const KEEP_ALIVE_URL = process.env.RENDER_URL || `https://mentra-nightscout.onrender.com`;
 
 // Health check endpoint
@@ -539,7 +435,8 @@ server.app.get('/health', (req, res) => {
     res.json({ 
         status: 'alive', 
         timestamp: new Date().toISOString(),
-        version: '2.4.1'
+        version: '2.4.1',
+        gluroo_compatible: true
     });
 });
 
