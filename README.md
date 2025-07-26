@@ -1,102 +1,118 @@
-# 🚀 Nightscout for MentraOS – v2.4 Advanced Update
+🚀 Nightscout for MentraOS – v2.4.5 Advanced Update
+Monitor de Glucosa en Tiempo Real para Even Realities G1 Smart Glasses
+✨ Ahora con soporte completo de unidades duales (mg/dL ↔ mmol/L), alarmas configurables y mejoras de timezone
 
-**Real-Time Glucose Monitoring for Even Realities G1 Smart Glasses**  
-✨ Now with full slicer support, mmol/L detection & enhanced internationalization
+🆕 Novedades en v2.4.5
+🔧 Mejoras Críticas y Nuevas Funcionalidades
+✅ Sistema de Unidades Dual – Configuración mg/dL ↔ mmol/L con cambio dinámico
 
----
+✅ Alarmas Independientes – Límites separados para mg/dL y mmol/L
 
-## 🆕 What's New in v2.4
+✅ Detección de Cambios en Tiempo Real – Actualización automática al cambiar configuración
 
-### 🔧 Critical Fixes & Enhancements
+✅ Soporte Completo de Sliders – Todos los ajustes numéricos funcionan perfectamente
 
-- ✅ **Fixed SDK compatibility errors** – No more `updateSettingsForTesting` issues  
-- ✅ **Full Slicer Support** – Settings now work perfectly with MentraOS sliders  
-- ✅ **mmol/L Auto-Detection** – Automatically detects units from Nightscout profile  
-- ✅ **Enhanced Language Support** – Complete Spanish/English/French localization  
-- ✅ **Timezone Fixes** – Proper handling of global timezones (Spain, USA, etc.)
+✅ Gestión Mejorada de Timezone – Corrección de bugs de zona horaria
 
----
+✅ Internacionalización Completa – Español/Inglés con detección automática
 
-## 📊 New Configuration Options
+📊 Nuevas Opciones de Configuración
+Sistema de Unidades Dual
+Configuración	Tipo	Rango	Por Defecto
+units	select	mg/dL, mmol/L	mg/dL
+low_alert_mg	slider	40–90 mg/dL	70
+high_alert_mg	slider	180–400 mg/dL	250
+low_alert_mmol	slider	2–5 mmol/L	3.9
+high_alert_mmol	slider	8–30 mmol/L	13.9
+Configuraciones Adicionales
+Setting	Tipo	Rango	Por Defecto
+update_interval	select	1, 5, 15 min	5 min
+alerts_enabled	toggle	true/false	true
+language	select	en, es	en
+timezone	select	Varias zonas	Europe/Madrid
+🌍 Soporte Internacional Mejorado
+🇪🇸 Usuarios en España
+Comandos de Voz: "Hey Mira, obtener mi glucosa", "mostrar glucosa actual"
 
-### Slider Settings (Fully Functional)
+Alertas: 🚨 ¡GLUCOSA BAJA! 3.8 mmol/L / 🚨 ¡GLUCOSA BAJA! 70 mg/dL
 
-| Setting          | Type    | Range            | Default |
-|------------------|---------|------------------|---------|
-| `low_alert`      | slicer  | 40–90 mg/dL      | 70      |
-| `high_alert`     | slicer  | 180–400 mg/dL    | 180     |
-| `update_interval`| slicer  | 1–60 min         | 5       |
+Timezone: Europe/Madrid (Peninsula) / Atlantic/Canary (Canarias)
 
-### Language & Timezone
+Unidades: Cambio dinámico entre mg/dL y mmol/L
 
-- **Language**: Auto-detects from MentraOS settings  
-- **Timezone**: Supports all major global zones  
-- **Units**: `mg/dL` ↔ `mmol/L` automatic detection
+🇺🇸 Usuarios en Estados Unidos
+Comandos de Voz: "Hey Mira, get my glucose", "check blood sugar"
 
----
+Alertas: 🚨 LOW GLUCOSE! 70 mg/dL / 🚨 LOW GLUCOSE! 3.8 mmol/L
 
-## 🌍 International Support Enhanced
+Timezone: America/New_York, America/Chicago, America/Los_Angeles
 
-### 🇪🇸 Spanish Users
+Unidades: Soporte completo para ambas unidades
 
-- **Comandos**: `Hey Mira, obtener mi glucosa`  
-- **Alertas**: `🚨 ¡BAJA! 70 mg/dL`  
-- **Timezone**: Europe/Madrid auto-detected  
+🌎 Compatibilidad Global
+Unidades Duales: mg/dL y mmol/L con conversión automática (1 mmol/L = 18 mg/dL)
 
-### 🇺🇸 US Users
+Timezones: 12+ zonas horarias soportadas
 
-- **Commands**: `Hey Mira, get my glucose`  
-- **Alerts**: `🚨 LOW! 70 mg/dL`  
-- **Timezone**: America/Los_Angeles auto-detected  
+Idiomas: Detección automática desde preferencias del usuario
 
-### 🌎 Global Compatibility
-
-- **mmol/L**: Automatic detection from Nightscout profile  
-- **Timezone**: Full `Intl.DateTimeFormat` support  
-- **Language**: Smart detection from user preferences  
-
----
-
-## ⚙️ Updated MentraOS Configuration
-
-
-### Required Settings (JSON)
-```json
-{
+⚙️ Configuración MentraOS Actualizada
+JSON de Configuración Completo
+```{
   "name": "Nightscout Glucose",
   "description": "Monitor de glucosa en tiempo real desde Nightscout",
-  "onboardingInstructions": "",
   "publicUrl": "https://mentra-nightscout.onrender.com",
-  "logoURL": "https://imagedelivery.net/nrc8B2Lk8UIoyW7fY8uHVg/58858985-f97c-40d6-21a3-a8b2514f5a00/square",
   "appType": "background",
-  "permissions": [
-    {
-      "type": "ALL",
-      "description": ""
-    }
-  ],
   "settings": [
     {
       "type": "group",
-      "key": "",
-      "label": "",
+      "title": "SELECT UNITS"
+    },
+    {
+      "type": "select",
+      "key": "units",
+      "label": "Units",
+      "defaultValue": "mg/dL",
+      "options": [
+        {"label": "mg/dL", "value": "mg/dL"},
+        {"label": "mmol/L", "value": "mmol/L"}
+      ]
+    },
+    {
+      "type": "group",
       "title": "ALARMS"
     },
     {
       "type": "slider",
-      "key": "low_alert",
-      "label": "60",
-      "defaultValue": 0,
+      "key": "low_alert_mg",
+      "label": "Critical Low Alert (mg/dL)",
+      "defaultValue": 70,
       "min": 40,
       "max": 90
     },
     {
       "type": "slider",
-      "key": "high_alert",
+      "key": "high_alert_mg",
       "label": "Critical High Alert (mg/dL)",
-      "defaultValue": 0,
+      "defaultValue": 250,
       "min": 180,
       "max": 400
+    },
+    {
+      "type": "slider",
+      "key": "low_alert_mmol",
+      "label": "Critical Low Alert (mmol/L)",
+      "defaultValue": 3.9,
+      "min": 2,
+      "max": 5
+    },
+    {
+      "type": "slider",
+      "key": "high_alert_mmol",
+      "label": "Critical High Alert (mmol/L)",
+      "defaultValue": 13.9,
+      "min": 8,
+      "max": 30
     },
     {
       "type": "toggle",
@@ -108,22 +124,15 @@
       "type": "select",
       "key": "update_interval",
       "label": "Update Frequency",
-      "defaultValue": "15 min",
+      "defaultValue": "5",
       "options": [
-        {
-          "label": "1 min",
-          "value": "10 min"
-        },
-        {
-          "label": "5 min",
-          "value": "15 min"
-        }
+        {"label": "1 min", "value": "1"},
+        {"label": "5 min", "value": "5"},
+        {"label": "15 min", "value": "15"}
       ]
     },
     {
       "type": "group",
-      "key": "",
-      "label": "",
       "title": "SETTING LANGUAGE AND TIME ZONE"
     },
     {
@@ -132,14 +141,8 @@
       "label": "Language",
       "defaultValue": "en",
       "options": [
-        {
-          "label": "English",
-          "value": "en"
-        },
-        {
-          "label": "Español",
-          "value": "es"
-        }
+        {"label": "English", "value": "en"},
+        {"label": "Español", "value": "es"}
       ]
     },
     {
@@ -148,213 +151,259 @@
       "label": "Time Zone",
       "defaultValue": "Europe/Madrid",
       "options": [
-        {
-          "label": " España - Madrid",
-          "value": "Europe/Madrid"
-        },
-        {
-          "label": "España - Canarias",
-          "value": "Atlantic/Canary"
-        },
-        {
-          "label": "America/New_York",
-          "value": "USA - Este (New York)"
-        },
-        {
-          "label": "America/Chicago",
-          "value": "USA - Centro (Chicago)"
-        },
-        {
-          "label": "America/Los_Angeles",
-          "value": "USA - Oeste (Los Angeles)"
-        },
-        {
-          "label": "America/Mexico_City",
-          "value": "México"
-        },
-        {
-          "label": "America/Argentina/Buenos_Aires",
-          "value": "Argentina"
-        },
-        {
-          "label": "America/Sao_Paulo",
-          "value": "Brasil"
-        },
-        {
-          "label": "Europe/London",
-          "value": "Reino Unido"
-        },
-        {
-          "label": "Europe/Paris",
-          "value": "Francia"
-        },
-        {
-          "label": "Europe/Berlin",
-          "value": "Alemania"
-        },
-        {
-          "label": "Europe/Rome",
-          "value": "Italia"
-        }
+        {"label": "España - Madrid", "value": "Europe/Madrid"},
+        {"label": "España - Canarias", "value": "Atlantic/Canary"},
+        {"label": "USA - Este (New York)", "value": "America/New_York"},
+        {"label": "USA - Centro (Chicago)", "value": "America/Chicago"},
+        {"label": "USA - Oeste (Los Angeles)", "value": "America/Los_Angeles"},
+        {"label": "México", "value": "America/Mexico_City"},
+        {"label": "Argentina", "value": "America/Argentina/Buenos_Aires"},
+        {"label": "Brasil", "value": "America/Sao_Paulo"},
+        {"label": "Reino Unido", "value": "Europe/London"},
+        {"label": "Francia", "value": "Europe/Paris"},
+        {"label": "Alemania", "value": "Europe/Berlin"},
+        {"label": "Italia", "value": "Europe/Rome"}
       ]
     },
     {
       "type": "group",
-      "key": "",
-      "label": "",
       "title": "SETTINGS NIGHTSCOUT"
     },
     {
       "type": "text",
       "key": "nightscout_url",
       "label": "Nightscout URL",
-      "defaultValue": ""
+      "defaultValue": "https://ejemplo.nightscout.com"
     },
     {
       "type": "text",
       "key": "nightscout_token",
       "label": "Access Token",
-      "defaultValue": ""
+      "defaultValue": "demo-token-12345"
     }
   ],
   "tools": [
     {
       "id": "get_glucose",
-      "description": "Get current glucose level from Nightscout CGM. Shows glucose reading, trend, and status on smart glasses display.",
+      "description": "Get current glucose level from Nightscout CGM",
       "activationPhrases": [
-        "get glucose",
-        "check glucose",
-        "glucose level",
-        "blood sugar",
-        "what's my glucose",
-        "show glucose",
-        "current glucose"
+        "get glucose", "check glucose", "glucose level", 
+        "blood sugar", "what's my glucose", "show glucose", "current glucose"
       ]
     },
     {
       "id": "obtener_glucosa",
-      "description": "Obtener nivel actual de glucosa desde monitor continuo Nightscout. Muestra lectura de glucosa, tendencia y estado en las gafas inteligentes.",
+      "description": "Obtener nivel actual de glucosa desde monitor continuo Nightscout",
       "activationPhrases": [
-        "obtener glucosa",
-        "revisar glucosa",
-        "nivel glucosa",
-        "mi glucosa",
-        "cuál es mi glucosa",
-        "mostrar glucosa",
-        "glucosa actual"
+        "obtener glucosa", "revisar glucosa", "nivel glucosa", 
+        "mi glucosa", "cuál es mi glucosa", "mostrar glucosa", "glucosa actual"
       ]
     },
     {
       "id": "check_glucose",
-      "description": "Check current glucose status with detailed information and recommendations.",
+      "description": "Check current glucose status with detailed information",
       "activationPhrases": [
-        "check glucose",
-        "glucose status",
-        "how's my sugar",
-        "glucose check",
-        "blood sugar level"
+        "check glucose", "glucose status", "how's my sugar", 
+        "glucose check", "blood sugar level"
       ]
     },
     {
       "id": "revisar_glucosa",
-      "description": "Revisar estado actual de glucosa con información detallada y recomendaciones médicas.",
+      "description": "Revisar estado actual de glucosa con información detallada",
       "activationPhrases": [
-        "revisar glucosa",
-        "estado glucosa",
-        "cómo está mi azúcar",
-        "revisar azúcar",
-        "nivel azúcar"
+        "revisar glucosa", "estado glucosa", "cómo está mi azúcar", 
+        "revisar azúcar", "nivel azúcar"
       ]
     }
   ]
 }
 ```
+🎮 Nuevos Métodos de Interacción
+Comandos de Voz Mejorados
+Español:
 
+"Hey Mira, obtener mi glucosa" → Muestra: 120 mg/dL ↑
 
-## 🎮 New Interaction Methods
+"Hey Mira, revisar glucosa" → Muestra estado completo con tendencia
 
-### Enhanced Voice Commands
+"Hey Mira, mostrar glucosa actual" → Display temporal con hora
 
-- **Spanish**: `"mostrar glucosa"`, `"revisar azúcar"`  
-- **English**: `"show glucose"`, `"check blood sugar"`  
-- **French**: `"afficher glucose"`, `"vérifier sucre"`
+English:
 
-### Slider Integration
+"Hey Mira, get my glucose" → Shows: 6.7 mmol/L ↑
 
-- Real-time updates when changing slider values  
-- No app restart required  
-- Immediate alert threshold changes  
+"Hey Mira, check glucose" → Shows complete status with trend
 
----
+"Hey Mira, show current glucose" → Temporary display with time
 
-## 📈 Performance Improvements
+Integración de Sliders
+Cambios en Tiempo Real: Sin necesidad de reiniciar la app
 
-### Memory Management
+Unidades Duales: Sliders separados para mg/dL y mmol/L
 
-- ✅ Fixed memory leaks in settings updates  
-- ✅ Proper cleanup of intervals and timeouts  
-- ✅ Enhanced error handling for network issues  
+Validación Automática: Rangos apropiados para cada unidad
 
-### SDK Compatibility
+Actualización Inmediata: Los límites de alerta se aplican al instante
 
-- ✅ Fixed `updateSettingsForTesting` errors  
-- ✅ Added proper `onSettingsUpdate` handler  
-- ✅ Enhanced session management  
+📈 Mejoras de Rendimiento
+Gestión de Configuración
+✅ Detección de Cambios: Método onSettingsChange() optimizado
 
----
+✅ Cache Inteligente: Configuración almacenada en sesión activa
 
-## 🛠️ Quick Start Updated
+✅ Limpieza Automática: Historial de alertas se reinicia con cambios de límites
 
-### For New Users
+✅ Validación Robusta: Rangos apropiados para cada tipo de configuración
 
-1. Deploy to [Render](https://render.com) or Railway with **Node.js 18+**
-2. Configure MentraOS settings with sliders
-3. Set your Nightscout URL & token
-4. Adjust alert thresholds via sliders
-5. Enjoy global glucose monitoring 🎉
+Compatibilidad SDK
+✅ Sin Errores de Compatibilidad: Totalmente compatible con MentraOS SDK
 
-### For Existing Users
+✅ Gestión de Sesiones: Limpieza apropiada de timers e intervalos
 
-- Update your code to **v2.4**
+✅ Manejo de Errores: Recuperación robusta ante fallos de red
 
-- No breaking changes – everything works automatically  
-- Settings preserve your current configuration  
+🛠️ Guía de Inicio Rápido
+Para Nuevos Usuarios
+Deploy a Render/Railway con Node.js 18+
 
----
+Configura MentraOS:
 
-## 🏆 Technical Achievements
+Selecciona unidades (mg/dL o mmol/L)
 
-### Fixed Issues
+Ajusta límites de alerta con sliders
 
-- ❌ SDK compatibility errors → ✅ **SOLVED**  
-- ❌ Slider settings not working → ✅ **SOLVED**  
-- ❌ mmol/L detection failing → ✅ **SOLVED**  
-- ❌ Timezone issues → ✅ **SOLVED**
+Configura tu timezone
 
-### New Capabilities
+Conecta Nightscout:
 
-- 🔧 Slicer support for all numeric settings  
-- 🌍 Enhanced internationalization  
-- 📊 mmol/L auto-detection  
-- ⚡ Real-time settings updates  
+URL: https://tu-nightscout.herokuapp.com
 
----
+Token: Tu token de acceso
 
-## 🔗 Links & Resources
+¡Disfruta! 🎉
 
-- 📱 [MentraOS Developer Console](https://console.mentra.glass)  
-- 🌐 Deploy to Render: One-click deployment available  
-- 📚 Full Documentation: Available in `README.md`  
-- 🤝 Community Support: GitHub Discussions  
+Para Usuarios Existentes
+Actualiza a v2.4.5 sin perder configuración
 
----
+Nuevas funciones disponibles inmediatamente
 
-## 📄 License & Disclaimer
+Sin cambios disruptivos - todo funciona como antes
 
-- MIT License – Feel free to fork and contribute!  
-- **Medical Disclaimer**: For informational purposes only. Always verify readings with approved medical devices.  
+🏆 Logros Técnicos
+Problemas Solucionados
+Problema Anterior	Estado	Solución v2.4.5
+❌ Sin soporte mmol/L configurables	✅ RESUELTO	Sistema dual completo
+❌ Alarmas con una sola unidad	✅ RESUELTO	Límites independientes
+❌ Cambios de config requieren reinicio	✅ RESUELTO	Actualización en tiempo real
+❌ Timezone bugs	✅ RESUELTO	Validación mejorada
+Nuevas Capacidades
+🔄 Cambio Dinámico de Unidades: Sin reinicio de app
 
----
+🚨 Alarmas Duales: Límites específicos para mg/dL y mmol/L
 
-⭐ *Star this repo if you find it helpful!*  
-Built with ❤️ for the global diabetes community.
+⚙️ Configuración en Tiempo Real: Cambios instantáneos
+
+🌍 Soporte Global: 12+ timezones y 2 idiomas
+
+💡 Casos de Uso
+Usuario Español en Valencia
+text
+Configuración:
+- Units: mmol/L
+- Low Alert: 3.9 mmol/L
+- High Alert: 13.9 mmol/L
+- Language: Español
+- Timezone: Europe/Madrid
+
+Comando: "Hey Mira, obtener mi glucosa"
+Respuesta: "Tu glucosa está en 6.8 mmol/L ↗. Estado: Normal."
+Usuario Americano en California
+text
+Configuración:
+- Units: mg/dL
+- Low Alert: 70 mg/dL
+- High Alert: 250 mg/dL
+- Language: English
+- Timezone: America/Los_Angeles
+
+Comando: "Hey Mira, check glucose"
+Respuesta: "Your glucose is 125 mg/dL ↑. Status: Normal."
+🔗 Enlaces y Recursos
+📱 MentraOS Console: console.mentra.glass
+
+🚀 Deploy a Render: Deploy en un clic disponible
+
+📚 Documentación Completa: En este README
+
+🤝 Soporte Comunitario: GitHub Discussions
+
+🌐 Demo Live: mentra-nightscout.onrender.com
+
+📋 Checklist de Configuración
+✅ Configuración Básica
+ URL de Nightscout configurada
+
+ Token de acceso válido
+
+ Unidades seleccionadas (mg/dL o mmol/L)
+
+ Idioma configurado
+
+ Timezone de tu ubicación
+
+✅ Alarmas
+ Límites de alerta ajustados
+
+ Alertas habilitadas
+
+ Frecuencia de actualización configurada
+
+✅ Pruebas
+ Comando de voz funciona
+
+ Display muestra datos correctos
+
+ Cambio de unidades funciona
+
+ Alertas se muestran correctamente
+
+📄 Licencia y Descargo de Responsabilidad
+Licencia MIT – ¡Libre para fork y contribuir!
+
+Descargo Médico: Solo para fines informativos. Siempre verifica lecturas con dispositivos médicos aprobados.
+
+🆕 Changelog v2.4.5
+Añadido
+Sistema de unidades dual (mg/dL ↔ mmol/L)
+
+Alarmas independientes por unidad
+
+Detección de cambios de configuración en tiempo real
+
+Método onSettingsChange() mejorado
+
+Validación robusta de configuraciones
+
+Corregido
+Bugs de timezone en formateo de tiempo
+
+Gestión de memoria en cambios de configuración
+
+Limpieza de historial de alertas
+
+Compatibilidad completa con MentraOS SDK
+
+Mejorado
+Rendimiento en cambios de configuración
+
+Experiencia de usuario con cambios instantáneos
+
+Logs de debugging más informativos
+
+Gestión de errores de red
+
+⭐ ¡Dale una estrella a este repo si te resulta útil!
+Desarrollado con ❤️ para la comunidad global de diabetes.
+
+Versión: 2.4.5 | Fecha: Julio 2025 | Compatibilidad: MentraOS SDK Latest
+
