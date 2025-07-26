@@ -141,7 +141,6 @@ class NightscoutMentraApp extends AppServer {
     const langMap = {
       es: { locale: 'es-ES', timezone: 'Europe/Madrid' },
       en: { locale: 'en-US', timezone: 'America/New_York' },
-      fr: { locale: 'fr-FR', timezone: 'Europe/Paris' },
     };
     return langMap[settings.language] || langMap['en'];
   }
@@ -154,6 +153,28 @@ class NightscoutMentraApp extends AppServer {
   'America/Sao_Paulo', 'Asia/Tokyo', 'Australia/Sydney', 'UTC',
     ];
     return valid.includes(tz) ? tz : 'UTC';
+  }
+
+  // MÉTODO AÑADIDO: formatForG1
+  async formatForG1(data, settings) {
+    const display = this.convertToDisplay(data.sgv, settings.glucoseUnit);
+    const trend = this.getTrendArrow(data.direction);
+    
+    // Formatear tiempo
+    const langSettings = this.getLanguageSettings(settings);
+    const timezone = settings.timezone ? this.validateTimezone(settings.timezone) : langSettings.timezone;
+    const readingTime = new Date(data.date);
+    const timeStr = readingTime.toLocaleTimeString(langSettings.locale, {
+      timeZone: timezone,
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+
+    // Calcular minutos desde la última lectura
+    const minutesAgo = Math.floor((Date.now() - data.date) / 60000);
+    const timeAgo = minutesAgo <= 1 ? 'now' : `${minutesAgo}m ago`;
+
+    return `${display} ${settings.glucoseUnit} ${trend}\n${timeStr} (${timeAgo})`;
   }
 
   /* ---------- data ---------- */
@@ -197,12 +218,25 @@ class NightscoutMentraApp extends AppServer {
     }
   }
 
+  // MÉTODO CORREGIDO: showInitialAndHide
   async showInitialAndHide(session, sessionId, settings) {
     try {
       const data = await this.getGlucoseData(settings);
-      session.layouts.showTextWall(await this.formatForG1(data, settings));
+      const formattedData = await this.formatForG1(data, settings);
+      session.layouts.showTextWall(formattedData);
+      console.log(`✅ Mostrando datos iniciales: ${formattedData.replace('\n', ' ')}`);
       setTimeout(() => this.hideDisplay(session, sessionId), 5000);
-    } catch {}
+    } catch (error) {
+      console.error('Error obteniendo datos iniciales:', error);
+      // Mostrar mensaje de error en lugar de no mostrar nada
+      const errorMsg = {
+        en: 'Error loading glucose data\nCheck your settings',
+        es: 'Error cargando datos\nRevisa tu configuración'
+      };
+      const msg = errorMsg[settings.language] || errorMsg.en;
+      session.layouts.showTextWall(msg);
+      setTimeout(() => this.hideDisplay(session, sessionId), 5000);
+    }
   }
 
   hideDisplay(session) {
@@ -347,6 +381,6 @@ server.start().catch(err => {
 
 console.log('🚀 Nightscout MentraOS v2.4.4 – TIMEZONE-FIX aplicado');
 
-const KEEP_ALIVE_URL = process.env.RENDER_URL || `https://mentra-nightscout.onrender.com`;
+const KEEP_ALIVE_URL = process.env.RENDER_URL || 'https://mentra-nightscout.onrender.com';
 server.app.get('/health', (_, res) => res.json({ status: 'alive', timestamp: new Date().toISOString(), version: '2.4.4' }));
 setInterval(() => axios.get(KEEP_ALIVE_URL).catch(() => {}), 3 * 60 * 1000);
