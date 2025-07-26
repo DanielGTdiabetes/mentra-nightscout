@@ -215,12 +215,17 @@ class NightscoutMentraApp extends AppServer {
 
   /* ---------- session ---------- */
   async onSession(session, sessionId, userId) {
-    console.log(`🚀 Nueva sesión: ${sessionId} para ${userId}`);
+    console.log(`🚀 Nueva sesión iniciada: ${sessionId} para usuario ${userId}`);
     try {
+      console.log('📋 Obteniendo configuración de usuario...');
       const settings = await this.getUserSettings(session);
+      
+      console.log('🔧 Obteniendo unidades de glucosa...');
       settings.glucoseUnit = await this.getGlucoseUnit(settings);
+      console.log(`🔧 Unidad configurada: ${settings.glucoseUnit}`);
 
       if (!settings.nightscoutUrl || !settings.nightscoutToken) {
+        console.log('⚠️ Configuración incompleta, mostrando mensaje de configuración');
         const msg = {
           en: 'Please configure Nightscout\nURL and token in settings',
           es: 'Configura URL y token\nde Nightscout en ajustes',
@@ -229,11 +234,13 @@ class NightscoutMentraApp extends AppServer {
         return;
       }
 
+      console.log('🎯 Configuración completa, iniciando aplicación...');
       await this.showInitialAndHide(session, sessionId, settings);
       await this.startNormalOperation(session, sessionId, userId, settings);
       this.setupSafeEventHandlers(session, sessionId, userId);
+      console.log('✅ Sesión configurada correctamente');
     } catch (e) {
-      console.error('Error en sesión:', e);
+      console.error('❌ Error crítico en sesión:', e);
       session.layouts.showTextWall('Error: Check app settings');
     }
   }
