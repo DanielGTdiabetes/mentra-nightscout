@@ -1,4 +1,4 @@
-// src/index.js – Nightscout MentraOS v2.4.3 (TOKEN-SAFE + SLIDER-SAFE)
+// src/index.js – Nightscout MentraOS v2.4.4 (TIMEZONE-FIX)
 require('dotenv').config();
 const { AppServer } = require('@mentra/sdk');
 const axios = require('axios');
@@ -97,7 +97,7 @@ class NightscoutMentraApp extends AppServer {
     };
   }
 
-  /* ---------- resto de lógica (sin cambios esenciales) ---------- */
+  /* ---------- utils ---------- */
   async getGlucoseUnit(settings) {
     const ck = `${settings.nightscoutUrl}_${settings.nightscoutToken}`;
     if (this.userUnitsCache.has(ck)) return this.userUnitsCache.get(ck);
@@ -137,24 +137,25 @@ class NightscoutMentraApp extends AppServer {
     return map[dir] || '→';
   }
 
-  async formatForG1(data, settings) {
-    const unit = settings.glucoseUnit || UNITS.MGDL;
-    const display = this.convertToDisplay(data.sgv, unit);
-    const mgdl = unit === UNITS.MMOL ? parseFloat(display) * 18 : parseFloat(display);
-
-    let sym = '*';
-    if (mgdl < settings.lowAlert) sym = '!';
-    else if (mgdl > settings.highAlert) sym = '^';
-
-    const locale = { es: 'es-ES', en: 'en-US' }[settings.language] || 'en-US';
-    const time = new Date(data.date || Date.now()).toLocaleTimeString(locale, {
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-
-    return `${sym} ${display} ${unit}\n${time}`;
+  getLanguageSettings(settings) {
+    const langMap = {
+      es: { locale: 'es-ES', timezone: 'Europe/Madrid' },
+      en: { locale: 'en-US', timezone: 'America/New_York' },
+      fr: { locale: 'fr-FR', timezone: 'Europe/Paris' },
+    };
+    return langMap[settings.language] || langMap['en'];
   }
 
+  validateTimezone(tz) {
+    const valid = [
+      'Europe/Madrid', 'Europe/London', 'America/New_York',
+      'America/Los_Angeles', 'America/Mexico_City', 'America/Argentina/Buenos_Aires',
+      'America/Sao_Paulo', 'Asia/Tokyo', 'Australia/Sydney', 'UTC',
+    ];
+    return valid.includes(tz) ? tz : 'UTC';
+  }
+
+  /* ---------- data ---------- */
   async getGlucoseData(settings) {
     let u = settings.nightscoutUrl;
     if (!u) throw new Error('URL no configurada');
@@ -170,7 +171,7 @@ class NightscoutMentraApp extends AppServer {
     return reading;
   }
 
-  /* ---------- session & alerts ---------- */
+  /* ---------- session ---------- */
   async onSession(session, sessionId, userId) {
     console.log(`🚀 Nueva sesión: ${sessionId} para ${userId}`);
     try {
@@ -343,9 +344,8 @@ server.start().catch(err => {
   process.exit(1);
 });
 
-console.log('🚀 Nightscout MentraOS v2.4.3 – TOKEN + SLIDER SAFE');
+console.log('🚀 Nightscout MentraOS v2.4.4 – TIMEZONE-FIX aplicado');
 
-/* ---------- keep-alive ---------- */
 const KEEP_ALIVE_URL = process.env.RENDER_URL || `https://mentra-nightscout.onrender.com`;
-server.app.get('/health', (_, res) => res.json({ status: 'alive', timestamp: new Date().toISOString(), version: '2.4.3' }));
+server.app.get('/health', (_, res) => res.json({ status: 'alive', timestamp: new Date().toISOString(), version: '2.4.4' }));
 setInterval(() => axios.get(KEEP_ALIVE_URL).catch(() => {}), 3 * 60 * 1000);
