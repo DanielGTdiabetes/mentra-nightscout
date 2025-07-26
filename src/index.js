@@ -57,9 +57,15 @@ class NightscoutMentraApp extends AppServer {
         session.settings.get('timezone'),
       ]);
 
+      const finalUrl = String(url || '').trim() || '';
+      const finalToken = String(token || '').trim() || '';
+
+      // Log para debug del bug de MentraOS
+      console.log(`🔍 Settings obtenidos - URL: ${finalUrl ? '[SET]' : '[EMPTY]'}, Token: ${finalToken ? '[SET]' : '[EMPTY]'}`);
+
       return {
-        nightscoutUrl: String(url || '').trim() || '',
-        nightscoutToken: String(token || '').trim() || '',
+        nightscoutUrl: finalUrl,
+        nightscoutToken: finalToken,
         updateInterval: this.parseSlicerValue(updateInterval, 5),
         lowAlert: this.validateSlicerValue(lowAlertSetting, 40, 90, 70),
         highAlert: this.validateSlicerValue(highAlertSetting, 180, 400, 180),
@@ -85,9 +91,16 @@ class NightscoutMentraApp extends AppServer {
   parseSettingsFromArray(arr) {
     const o = {};
     arr.forEach(s => (o[s.key] = s.value));
+    
+    const finalUrl = String(o.nightscout_url || '').trim() || '';
+    const finalToken = String(o.nightscout_token || '').trim() || '';
+    
+    // Log para debug del bug de MentraOS
+    console.log(`🔍 Settings parseados - URL: ${finalUrl ? '[SET]' : '[EMPTY]'}, Token: ${finalToken ? '[SET]' : '[EMPTY]'}`);
+    
     return {
-      nightscoutUrl: String(o.nightscout_url || '').trim() || '',
-      nightscoutToken: String(o.nightscout_token || '').trim() || '',
+      nightscoutUrl: finalUrl,
+      nightscoutToken: finalToken,
       updateInterval: this.parseSlicerValue(o.update_interval, 5),
       lowAlert: this.validateSlicerValue(o.low_alert, 40, 90, 70),
       highAlert: this.validateSlicerValue(o.high_alert, 180, 400, 180),
@@ -234,12 +247,27 @@ class NightscoutMentraApp extends AppServer {
       console.log(`✅ Mostrando datos iniciales: ${formattedData.replace('\n', ' ')}`);
       setTimeout(() => this.hideDisplay(session, sessionId), 5000);
     } catch (error) {
-      console.error('Error obteniendo datos iniciales:', error);
-      // Mostrar mensaje de error en lugar de no mostrar nada
-      const errorMsg = {
-        en: 'Error loading glucose data\nCheck your settings',
-        es: 'Error cargando datos\nRevisa tu configuración'
-      };
+      console.error('❌ Error obteniendo datos iniciales:', error.message);
+      
+      // Mensaje de error más específico
+      let errorMsg;
+      if (error.message.includes('URL no configurada')) {
+        errorMsg = {
+          en: 'Nightscout URL not set\nCheck settings',
+          es: 'URL de Nightscout no configurada\nRevisa ajustes'
+        };
+      } else if (error.message.includes('Sin datos') || error.message.includes('timeout')) {
+        errorMsg = {
+          en: 'Cannot connect to Nightscout\nCheck URL and token',
+          es: 'No se puede conectar\nRevisa URL y token'
+        };
+      } else {
+        errorMsg = {
+          en: 'Error loading glucose data\nCheck your settings',
+          es: 'Error cargando datos\nRevisa tu configuración'
+        };
+      }
+      
       const msg = errorMsg[settings.language] || errorMsg.en;
       session.layouts.showTextWall(msg);
       setTimeout(() => this.hideDisplay(session, sessionId), 5000);
