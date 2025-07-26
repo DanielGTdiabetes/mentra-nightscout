@@ -148,9 +148,10 @@ class NightscoutMentraApp extends AppServer {
 
   validateTimezone(tz) {
     const valid = [
-      'Europe/Madrid', 'Europe/London', 'America/New_York',
-      'America/Los_Angeles', 'America/Mexico_City', 'America/Argentina/Buenos_Aires',
-      'America/Sao_Paulo', 'Asia/Tokyo', 'Australia/Sydney', 'UTC',
+      'Europe/Madrid', 'Atlantic/Canary', 'Europe/London', 'Europe/Paris',
+  'Europe/Berlin', 'Europe/Rome', 'America/New_York', 'America/Chicago',
+  'America/Los_Angeles', 'America/Mexico_City', 'America/Argentina/Buenos_Aires',
+  'America/Sao_Paulo', 'Asia/Tokyo', 'Australia/Sydney', 'UTC',
     ];
     return valid.includes(tz) ? tz : 'UTC';
   }
