@@ -170,9 +170,16 @@ class NightscoutMentraApp extends AppServer {
       minute: '2-digit'
     });
 
-    // Calcular minutos desde la última lectura
+    // Calcular minutos desde la última lectura con idioma
     const minutesAgo = Math.floor((Date.now() - data.date) / 60000);
-    const timeAgo = minutesAgo <= 1 ? 'now' : `${minutesAgo}m ago`;
+    const lang = settings.language || 'en';
+    let timeAgo;
+    
+    if (minutesAgo <= 1) {
+      timeAgo = lang === 'es' ? 'ahora' : 'now';
+    } else {
+      timeAgo = lang === 'es' ? `hace ${minutesAgo}m` : `${minutesAgo}m ago`;
+    }
 
     return `${display} ${settings.glucoseUnit} ${trend}\n${timeStr} (${timeAgo})`;
   }
