@@ -2,6 +2,13 @@
 
 require('dotenv').config();
 
+// Log de versión del SDK en runtime (para verificar en Render)
+try {
+  const sdkPkg = require('@mentra/sdk/package.json');
+  console.log(`@mentra/sdk version at runtime: ${sdkPkg.version}`);
+} catch {}
+
+
 const { AppServer } = require('@mentra/sdk');
 const axios = require('axios');
 
@@ -253,7 +260,13 @@ class NightscoutMentraApp extends AppServer {
     /* ---------- session ---------- */
     async onSession(session, sessionId, userId) {
         console.log(`🚀 Nueva sesión: ${sessionId} para ${userId}`);
-        
+           // 🔧 Compatibilidad: neutraliza llamadas antiguas del SDK/middleware
+              if (typeof session.updateSettingsForTesting !== 'function') {
+                session.updateSettingsForTesting = async () => {
+                  session.logger?.debug?.('Compat shim: updateSettingsForTesting noop');
+                  return;
+                };
+              }
         // Usar el logger de la sesión
         session.logger?.info('Session started', { userId, sessionId });
         
