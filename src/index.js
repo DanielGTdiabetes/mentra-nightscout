@@ -1,6 +1,19 @@
 // src/index.js — Nightscout MentraOS v2.5.1 (ROBUST + FALLBACK + COMPAT SHIMS)
 
 require('dotenv').config();
+// ---------- PATCH para evitar error en updateSettingsForTesting ----------
+try {
+  const sdk = require("@mentra/sdk");
+  if (!sdk.updateSettingsForTesting) {
+    sdk.updateSettingsForTesting = () => {
+      console.warn("⚠️ updateSettingsForTesting no soportado en esta versión del SDK");
+    };
+  }
+} catch (err) {
+  console.error("No se pudo cargar @mentra/sdk:", err);
+}
+// -------------------------------------------------------------------------
+
 
 const { AppServer } = require('@mentra/sdk');
 const axios = require('axios');
