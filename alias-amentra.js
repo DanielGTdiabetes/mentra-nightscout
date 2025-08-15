@@ -1,5 +1,5 @@
 // scripts/alias-amentra.js
-// Crea un "alias" para que require('amentra/sdk/...') resuelva a @mentra/sdk.
+// Crea un alias para que require('amentra/sdk/...') resuelva a @mentra/sdk
 const fs = require('fs');
 const path = require('path');
 
@@ -18,22 +18,18 @@ try {
 
   ensureDir(amentraSdk);
 
-  // 1) index.js que reexporta el paquete real cuando se hace require('amentra/sdk')
+  // 1) Reexportar paquete real cuando se hace require('amentra/sdk')
   const indexJs = path.join(amentraSdk, 'index.js');
   fs.writeFileSync(indexJs, "module.exports = require('@mentra/sdk');\n");
 
-  // 2) enlazar 'dist' -> real 'dist' para soportar subrutas: require('amentra/sdk/dist/...').
+  // 2) Enlace 'dist' -> real 'dist' para soportar subrutas require('amentra/sdk/dist/..')
   const linkFrom = path.join(amentraSdk, 'dist');
   const linkTo = path.join(realSdk, 'dist');
 
-  // Si existía un 'dist' previo (carpeta o link), lo eliminamos.
   try { fs.rmSync(linkFrom, { recursive: true, force: true }); } catch {}
-
-  // Crear symlink (Render corre en Linux, por lo que 'dir' funciona).
   fs.symlinkSync(linkTo, linkFrom, 'dir');
 
   console.log('[alias-amentra] alias creado: amentra/sdk -> @mentra/sdk');
 } catch (e) {
-  console.warn('[alias-amentra] no se pudo crear el alias (continuo sin romper):', e && e.message);
-  // No hacemos process.exit(1); preferimos no romper la instalación.
+  console.warn('[alias-amentra] no se pudo crear el alias (continuo):', e && e.message);
 }
