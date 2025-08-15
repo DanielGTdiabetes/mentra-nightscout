@@ -4,7 +4,7 @@
   "scripts": {
     "dev": "node src/index.js",
     "start": "node src/index.js",
-    "postinstall": "node scripts/alias-amentra.js"   // 👈 nuevo
+    "postinstall": "node scripts/alias-amentra.js"
   },
   "dependencies": {
     "@mentra/sdk": "2.1.18",
@@ -12,5 +12,7 @@
     "dotenv": "^16.6.1",
     "node-fetch": "^2.7.0"
   },
-  "engines": { "node": ">=18 <23" }
+  "engines": {
+    "node": ">=18 <23"
+  }
 }
