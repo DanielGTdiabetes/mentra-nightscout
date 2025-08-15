@@ -1,24 +1,31 @@
-# 🚀 Nightscout for MentraOS – v2.4.5 DUAL-UNITS Advanced
+# 🚀 Nightscout for MentraOS – v2.5.1 HEAD-UP Display + DUAL-UNITS Advanced
 
 **Monitor de Glucosa en Tiempo Real para Even Realities G1 Smart Glasses**  
-✨ Ahora con soporte completo de unidades duales (mg/dL ↔ mmol/L), alarmas configurables independientes y mejoras de timezone
+✨ Ahora con soporte completo de unidades duales (mg/dL ↔ mmol/L), alarmas configurables, mejoras de timezone y nueva función **Head-Up Display** para mostrar la glucosa al mirar hacia arriba.
 
 ---
 
-## 🆕 Novedades en v2.4.5
+## 🆕 Novedades en v2.5.1
 
 ### 🔧 Mejoras Críticas y Nuevas Funcionalidades
 
+- ✅ **Head-Up Display** – Muestra glucosa y estado al inclinar la cabeza hacia arriba (posición ‘up’)  
+- ✅ **Control desde consola de Mentra** – Variable `enable_head_up_display` para activar/desactivar la función sin redeploy  
 - ✅ Sistema de Unidades Dual – Configuración mg/dL ↔ mmol/L con cambio dinámico  
 - ✅ Alarmas Independientes – Límites separados para mg/dL y mmol/L con sliders duales  
 - ✅ Detección de Cambios en Tiempo Real – Actualización automática al cambiar configuración  
-- ✅ Soporte Completo de Sliders – Todos los ajustes numéricos funcionan perfectamente  
 - ✅ Gestión Mejorada de Timezone – Corrección de bugs de zona horaria  
 - ✅ Internacionalización Completa – Español/Inglés con detección automática
 
 ---
 
 ## 📊 Nuevas Opciones de Configuración
+
+### Head-Up Display
+
+| Configuración              | Tipo   | Opciones     | Por Defecto | Descripción                                                       |
+|----------------------------|--------|--------------|-------------|-------------------------------------------------------------------|
+| `enable_head_up_display`   | toggle | true / false | true        | Si está activo, muestra glucosa al mover la cabeza hacia arriba   |
 
 ### Sistema de Unidades Dual
 
@@ -30,38 +37,21 @@
 | `low_alert_mmol` | slider | 2–5 mmol/L               | 4           | Alerta crítica baja (mmol/L)             |
 | `high_alert_mmol`| slider | 8–30 mmol/L              | 14          | Alerta crítica alta (mmol/L)             |
 
-### Configuraciones Adicionales
-
-| Setting           | Tipo    | Opciones                 | Por Defecto     | Descripción                       |
-|------------------|---------|--------------------------|-----------------|-----------------------------------|
-| `update_interval`| select  | 1, 5, 15 min             | 5 min           | Frecuencia de actualización       |
-| `alerts_enabled` | toggle  | true / false             | true            | Activar/desactivar alertas        |
-| `language`       | select  | en, es                   | en              | Idioma de la interfaz             |
-| `timezone`       | select  | Varias zonas             | Europe/Madrid   | Zona horaria local                |
-
 ---
 
 ## 🌍 Soporte Internacional Mejorado
 
-### 🇪🇸 Usuarios en España
+### 🇪🇸 Español
 
-- Comandos de Voz:  
-  `"Hey Mira, obtener mi glucosa"`  
-  `"mostrar glucosa actual"`
+- `"Hey Mira, obtener mi glucosa"`  
+- `"mostrar glucosa actual"`  
+- También ahora se puede **mirar hacia arriba** para verla instantáneamente si está activa la opción.
 
-- Alertas:  
-  🚨 ¡GLUCOSA BAJA! 3.8 mmol/L / 70 mg/dL
+### 🇺🇸 English
 
-- Timezone: Europe/Madrid o Atlantic/Canary
-
-### 🇺🇸 Usuarios en Estados Unidos
-
-- Comandos de Voz:  
-  `"Hey Mira, get my glucose"`  
-  `"check blood sugar"`
-
-- Alertas:  
-  🚨 LOW GLUCOSE! 70 mg/dL / 3.8 mmol/L
+- `"Hey Mira, get my glucose"`  
+- `"show current glucose"`  
+- Look up to see glucose if `enable_head_up_display` is enabled.
 
 ---
 
@@ -70,84 +60,33 @@
 ```json
 {
   "name": "Nightscout Glucose",
-  "description": "Monitor de glucosa en tiempo real desde Nightscout",
+  "description": "Monitor de glucosa en tiempo real desde Nightscout con Head-Up Display",
   "publicUrl": "https://mentra-nightscout.onrender.com",
   "appType": "background",
   "permissions": [{"type": "ALL", "description": ""}],
-  ...
+  "settings": [
+    {"id": "enable_head_up_display", "type": "toggle", "default": true, "label": "Enable Head-Up Display"}
+  ]
 }
 ```
-
-(*se ha abreviado el JSON para brevedad, incluir completo en documentación final*)
-
----
-
-## 🎮 Interacción por Voz Mejorada
-
-### Español
-
-- `"Hey Mira, obtener mi glucosa"` → muestra nivel actual con tendencia  
-- `"Hey Mira, mostrar glucosa actual"` → muestra con hora local
-
-### English
-
-- `"Hey Mira, get my glucose"` → shows glucose with trend  
-- `"Hey Mira, show current glucose"` → with local time
 
 ---
 
 ## 📈 Mejoras de Rendimiento
 
-- ✅ onSettingsChange optimizado  
+- ✅ Manejo de eventos `onHeadPosition` integrado con sistema de configuración  
+- ✅ Compatibilidad con el panel nativo de fecha/hora de MentraOS (sin solapamiento)  
 - ✅ Cache inteligente y limpieza automática  
-- ✅ Validación robusta  
-- ✅ Compatible con MentraOS SDK y gestión de errores
+- ✅ Gestión robusta de errores y validación
 
 ---
 
 ## 🛠️ Guía de Inicio Rápido
 
-### Para Nuevos Usuarios
-
-1. Deploy en Render o Railway (Node.js 18+)
-2. Configura unidades, alertas, zona horaria
-3. Introduce URL + Token de Nightscout
-
-### Para Usuarios Existentes (v2.4.4)
-
-- Migración sin perder configuración  
-- Sliders duales disponibles inmediatamente  
-
----
-
-## 🏆 Logros Técnicos
-
-| Problema                                | Estado    | Solución v2.4.5                                |
-|----------------------------------------|-----------|------------------------------------------------|
-| ❌ Sin soporte mmol/L configurables     | ✅ RESUELTO | Sistema dual completo con sliders             |
-| ❌ Alarmas con una sola unidad          | ✅ RESUELTO | Límites independientes mg/dL y mmol/L         |
-| ❌ Cambios de config requieren reinicio | ✅ RESUELTO | Actualización en tiempo real                  |
-| ❌ Timezone bugs                        | ✅ RESUELTO | Validación mejorada                           |
-
----
-
-## 📄 Variables de Entorno
-
-```bash
-# .env
-MENTRAOS_API_KEY=tu_api_key_mentraos
-PORT=3000
-RENDER_URL=https://tu-app.onrender.com
-PACKAGE_NAME=com.tucompania.nightscout-glucose
-```
-
----
-
-## 🆕 Changelog v2.4.5
-
-- Añadido: sistema de unidades dual, sliders separados, detección de cambios  
-- Corregido: timezone bugs, validación de rangos, compatibilidad SDK  
-- Mejorado: rendimiento, UX, logs, gestión de errores
+1. Deploy en Render o Railway (Node.js 18+)  
+2. Configura unidades, alertas, zona horaria y `enable_head_up_display` en consola Mentra  
+3. Introduce URL + Token de Nightscout  
+4. Si `enable_head_up_display` está activo, mirar hacia arriba mostrará la glucosa
 
 ---
 
@@ -155,19 +94,18 @@ PACKAGE_NAME=com.tucompania.nightscout-glucose
 
 - [x] URL de Nightscout configurada  
 - [x] Token válido  
-- [x] Unidades y idioma configurados  
+- [x] Unidades e idioma configurados  
 - [x] Timezone correcto  
-- [x] Alertas habilitadas y funcionando
+- [x] Alertas habilitadas y funcionando  
+- [x] Head-Up Display activado si se desea
 
 ---
 
 ## 📄 Licencia
 
-**MIT License**
+**MIT License**  
+> Descargo: Solo para fines informativos. Verifica siempre con dispositivos médicos.
 
-> Descargo: Solo para fines informativos. Verifica siempre con dispositivos médicos.  
-> Desarrollado con ❤️ para la comunidad global de diabetes.
-
-**Versión:** 2.4.5  
-**Fecha:** Julio 2025  
+**Versión:** 2.5.1  
+**Fecha:** Agosto 2025  
 **Compatibilidad:** MentraOS SDK (última versión)
