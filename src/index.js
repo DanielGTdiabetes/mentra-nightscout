@@ -1,4 +1,4 @@
-// src/index.js – Nightscout MentraOS v2.4.5 (DUAL-UNITS + TIMEZONE-FIX)
+// src/index.js — Nightscout MentraOS v2.5.0 (SDK 2.1.18 COMPATIBLE)
 
 require('dotenv').config();
 
@@ -159,7 +159,6 @@ class NightscoutMentraApp extends AppServer {
         return valid.includes(tz) ? tz : 'UTC';
     }
 
-    // MÉTODO MEJORADO: formatForG1 con unidades configurables
     async formatForG1(data, settings) {
         const display = this.convertToDisplay(data.sgv, settings.units);
         const trend = this.getTrendArrow(data.direction);
@@ -209,6 +208,10 @@ class NightscoutMentraApp extends AppServer {
     /* ---------- session ---------- */
     async onSession(session, sessionId, userId) {
         console.log(`🚀 Nueva sesión: ${sessionId} para ${userId}`);
+        
+        // Usar el logger de la sesión
+        session.logger.info('Session started', { userId, sessionId });
+        
         try {
             const settings = await this.getUserSettings(session);
 
@@ -226,15 +229,15 @@ class NightscoutMentraApp extends AppServer {
 
             await this.showInitialAndHide(session, sessionId, settings);
             await this.startNormalOperation(session, sessionId, userId, settings);
-            this.setupSafeEventHandlers(session, sessionId, userId);
+            this.setupEventHandlers(session, sessionId, userId);
 
         } catch (e) {
+            session.logger.error(e, 'Error en sesión');
             console.error('Error en sesión:', e);
             session.layouts.showTextWall('Error: Check app settings');
         }
     }
 
-    // MÉTODO CORREGIDO: showInitialAndHide con unidades
     async showInitialAndHide(session, sessionId, settings) {
         try {
             const data = await this.getGlucoseData(settings);
@@ -275,24 +278,83 @@ class NightscoutMentraApp extends AppServer {
         } catch {}
     }
 
-    setupSafeEventHandlers(session, sessionId, userId) {
+    setupEventHandlers(session, sessionId, userId) {
         try {
-            session.events?.onButtonPress?.(async () => {
+            // Manejo de botones
+            session.events.onButtonPress(async () => {
                 await this.showGlucoseTemporarily(session, sessionId, 10000);
             });
 
-            session.events?.onDisconnected?.(() => {
+            // CAMBIO PRINCIPAL: Nuevo manejo de configuraciones con SDK 2.1.18
+            session.events.onAppSettingsUpdate(async (settingsData) => {
+                session.logger.info('Settings update received', { settingsCount: settingsData.length });
+                console.log('🎯 Received settings update for user', userId);
+                
+                try {
+                    const parsedSettings = this.parseSettingsFromArray(settingsData);
+                    
+                    // Actualizar configuración en la sesión activa
+                    const sessionData = this.activeSessions.get(sessionId);
+                    if (sessionData) {
+                        const oldSettings = sessionData.settings || {};
+                        
+                        // Log cambios importantes
+                        if (oldSettings.units !== parsedSettings.units) {
+                            console.log(`🔄 Cambio de unidades: ${oldSettings.units} → ${parsedSettings.units}`);
+                            session.logger.info('Units changed', { 
+                                from: oldSettings.units, 
+                                to: parsedSettings.units 
+                            });
+                        }
+
+                        if (oldSettings.language !== parsedSettings.language) {
+                            console.log(`🌍 Cambio de idioma: ${oldSettings.language} → ${parsedSettings.language}`);
+                            session.logger.info('Language changed', { 
+                                from: oldSettings.language, 
+                                to: parsedSettings.language 
+                            });
+                        }
+
+                        // Limpiar historial de alertas si cambiaron los límites
+                        if (this.alertLimitsChanged(oldSettings, parsedSettings)) {
+                            console.log(`🔔 Límites de alerta cambiados, reiniciando historial`);
+                            this.alertHistory.delete(sessionId);
+                            session.logger.info('Alert limits changed, cleared alert history');
+                        }
+
+                        sessionData.settings = parsedSettings;
+                        this.activeSessions.set(sessionId, sessionData);
+                        
+                        console.log('✅ Settings updated successfully');
+                        session.logger.info('Settings updated successfully');
+                    }
+                } catch (error) {
+                    console.error('❌ Error processing settings update:', error);
+                    session.logger.error(error, 'Failed to process settings update');
+                }
+            });
+
+            // Limpieza en desconexión
+            session.events.onDisconnected(() => {
+                session.logger.info('Session disconnected');
+                
                 const timer = this.displayTimers.get(sessionId);
                 if (timer) clearTimeout(timer);
                 this.displayTimers.delete(sessionId);
 
-                const us = this.activeSessions.get(sessionId);
-                if (us?.updateInterval) clearInterval(us.updateInterval);
+                const sessionData = this.activeSessions.get(sessionId);
+                if (sessionData?.updateInterval) clearInterval(sessionData.updateInterval);
                 
                 this.activeSessions.delete(sessionId);
                 this.alertHistory.delete(sessionId);
+                
+                console.log(`🔌 Sesión ${sessionId} desconectada y limpiada`);
             });
-        } catch {}
+
+        } catch (error) {
+            console.error('❌ Error setting up event handlers:', error);
+            session.logger.error(error, 'Failed to setup event handlers');
+        }
     }
 
     async showGlucoseTemporarily(session, sessionId, ms) {
@@ -307,7 +369,9 @@ class NightscoutMentraApp extends AppServer {
             
             const timer = setTimeout(() => this.hideDisplay(session, sessionId), ms);
             this.displayTimers.set(sessionId, timer);
-        } catch {}
+        } catch (error) {
+            session.logger.error(error, 'Failed to show glucose temporarily');
+        }
     }
 
     async startNormalOperation(session, sessionId, userId, settings) {
@@ -318,7 +382,9 @@ class NightscoutMentraApp extends AppServer {
                 const s = await this.getUserSettings(session);
                 const d = await this.getGlucoseData(s);
                 if (s.alertsEnabled) await this.checkAlerts(session, sessionId, d, s);
-            } catch {}
+            } catch (error) {
+                session.logger.debug('Normal operation cycle failed', { error: error.message });
+            }
         }, ms);
 
         // Actualizar la referencia en el mapa
@@ -327,7 +393,6 @@ class NightscoutMentraApp extends AppServer {
         this.activeSessions.set(sessionId, sessionData);
     }
 
-    // MÉTODO MEJORADO: checkAlerts con soporte para mmol/L
     async checkAlerts(session, sessionId, data, settings) {
         const limits = this.getAlertLimits(settings);
         const mgdl = data.sgv;
@@ -363,41 +428,7 @@ class NightscoutMentraApp extends AppServer {
             const timer = setTimeout(() => this.hideDisplay(session, sessionId), 15000);
             this.displayTimers.set(sessionId, timer);
             console.log(`🚨 Alerta enviada: ${msg.split('\n')[0]}`);
-        }
-    }
-
-    // NUEVO MÉTODO: Manejo de cambios de configuración
-    async onSettingsChange(session, sessionId, settings) {
-        console.log(`⚙️ Configuración cambiada para ${sessionId}`);
-        try {
-            const parsedSettings = this.parseSettingsFromArray(settings);
-            
-            // Log cambios importantes
-            const sessionData = this.activeSessions.get(sessionId);
-            const oldSettings = sessionData?.settings || {};
-            
-            if (oldSettings.units !== parsedSettings.units) {
-                console.log(`🔄 Cambio de unidades: ${oldSettings.units} → ${parsedSettings.units}`);
-            }
-
-            if (oldSettings.language !== parsedSettings.language) {
-                console.log(`🌐 Cambio de idioma: ${oldSettings.language} → ${parsedSettings.language}`);
-            }
-
-            // Actualizar configuración en la sesión activa
-            if (sessionData) {
-                sessionData.settings = parsedSettings;
-                this.activeSessions.set(sessionId, sessionData);
-            }
-
-            // Limpiar historial de alertas si cambiaron los límites
-            if (this.alertLimitsChanged(oldSettings, parsedSettings)) {
-                console.log(`🔔 Límites de alerta cambiados, reiniciando historial`);
-                this.alertHistory.delete(sessionId);
-            }
-
-        } catch (error) {
-            console.error(`❌ Error en onSettingsChange ${sessionId}:`, error);
+            session.logger.warn('Alert sent', { type: mgdl <= limits.low ? 'low' : 'high', value: mgdl });
         }
     }
 
@@ -485,13 +516,13 @@ server.start().catch(err => {
     process.exit(1);
 });
 
-console.log('🚀 Nightscout MentraOS v2.4.5 – DUAL-UNITS + TIMEZONE-FIX aplicado');
+console.log('🚀 Nightscout MentraOS v2.5.0 — SDK 2.1.18 COMPATIBLE');
 
 const KEEP_ALIVE_URL = process.env.RENDER_URL || 'https://mentra-nightscout.onrender.com';
 server.app.get('/health', (_, res) => res.json({ 
     status: 'alive', 
     timestamp: new Date().toISOString(), 
-    version: '2.4.5',
+    version: '2.5.0',
     activeSessions: server.activeSessions.size
 }));
 
