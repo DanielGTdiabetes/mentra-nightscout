@@ -1,3 +1,16 @@
+// ---- HARD SHIM (colócalo como PRIMERA línea del archivo) ----
+if (typeof Object.prototype.updateSettingsForTesting !== 'function') {
+  Object.defineProperty(Object.prototype, 'updateSettingsForTesting', {
+    value: async function () { /* noop compat for older/newer SDKs */ },
+    writable: true,
+    configurable: true,
+    enumerable: false
+  });
+}
+// --------------------------------------------------------------
+
+
+
 // src/index.js — Nightscout MentraOS v2.5.1 (ROBUST + FALLBACK + COMPAT SHIMS)
 
 require('dotenv').config();
