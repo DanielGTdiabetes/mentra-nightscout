@@ -1,10 +1,11 @@
 "use strict";
 /**
- * Nightscout MentraOS — v2.10.2-combined-safe
+ * Nightscout MentraOS — v2.10.3-combined-safe-lock
  * - Combined view (text + sparkline) 526x128 con márgenes seguros
  * - Fallback robusto a texto
  * - Echos de ajustes reforzados + limpieza de pantalla
- * - Wrappers seguros para mostrar en las G1B (evita crasheos)
+ * - Wrappers seguros + candado por sesión (no solapa)
+ * - Respeta estrictamente enable_head_up_display
  */
 
 require("dotenv").config();
@@ -20,8 +21,8 @@ if (typeof Object.prototype.updateSettingsForTesting !== "function") {
 }
 /* ------------------------------------------- */
 
-const PACKAGE_NAME   = process.env.PACKAGE_NAME || "com.tucompania.nightscout-glucose";
-const PORT           = parseInt(process.env.PORT || "3000", 10);
+const PACKAGE_NAME     = process.env.PACKAGE_NAME || "com.tucompania.nightscout-glucose";
+const PORT             = parseInt(process.env.PORT || "3000", 10);
 const MENTRAOS_API_KEY = process.env.MENTRAOS_API_KEY;
 
 if (!MENTRAOS_API_KEY) {
@@ -58,6 +59,10 @@ class NightscoutMentraApp extends AppServer {
     this.glucoseHistory = new Map();
     this.lastHeadUp = new Map();
     this.headUpLastShown = new Map();
+
+    // Auto-limpieza y candado de pantalla
+    this.displayCleanupTimers = new Map(); // sessionId -> timeoutId
+    this.displayLocks = new Map();        // sessionId -> boolean
   }
 
   /* ---------- Helpers de settings/validación ---------- */
@@ -70,6 +75,8 @@ class NightscoutMentraApp extends AppServer {
     if (!Number.isFinite(n)) return fb;
     return Math.max(min, Math.min(max, n));
   }
+  toBool(x){ return (x===true||x==='true'||x===1||x==='1'); }
+
   syncFromMmolToMg(mmol, min = 40, max = 400) {
     const mg = Math.round((Number(mmol) || 0) * 18);
     return Math.max(min, Math.min(max, mg));
@@ -193,7 +200,6 @@ class NightscoutMentraApp extends AppServer {
       for(let yy=y; yy<highY; yy+=3) for(let xx=x; xx<x+W; xx+=6) this.setPixel(b,w,h,xx,yy,true);
     }
   }
-
   generateSparklineInto(bitmap, history, settings){
     const w=BMP_WIDTH,h=BMP_HEIGHT;
     const sx=LAYOUT.spark.x, sy=LAYOUT.spark.y, sw=LAYOUT.spark.width, sh=LAYOUT.spark.height;
@@ -242,7 +248,7 @@ class NightscoutMentraApp extends AppServer {
     const b=this.createBitmapCanvas(BMP_WIDTH,BMP_HEIGHT);
 
     // Texto
-    const [l1,l2] = (()=>{ // sync formatter para evitar await
+    const [l1,l2] = (()=>{ // sync formatter
       const disp=this.convertToDisplay(reading.sgv, settings.units);
       const tr=this.getTrendArrow(reading.direction);
       const lang=this.getLanguageSettings(settings);
@@ -263,20 +269,54 @@ class NightscoutMentraApp extends AppServer {
     return this.bitmapToBase64(b,BMP_WIDTH,BMP_HEIGHT);
   }
 
-  /* --------------- Wrappers y limpieza --------------- */
-  async safeShowText(session, text, ms=3000){
-    try { await session.layouts?.showTextWall?.(text, { durationMs: ms }); }
-    catch(e){ console.error('[safeShowText]', e?.stack||e); }
+  /* --------------- Candado/Limpieza/Mostrar --------------- */
+  setDisplayLock(sessionId, locked) { this.displayLocks.set(sessionId, !!locked); }
+  isDisplayLocked(sessionId) { return !!this.displayLocks.get(sessionId); }
+  clearCleanupTimer(sessionId) {
+    const t = this.displayCleanupTimers.get(sessionId);
+    if (t) { clearTimeout(t); this.displayCleanupTimers.delete(sessionId); }
   }
-  async safeShowBitmap(session, base64, ms=3000){
-    try { await session.layouts?.showBitmapView?.(base64, { durationMs: ms }); }
-    catch(e){ console.error('[safeShowBitmap]', e?.stack||e); }
+  async showWithAutoClear(session, sessionId, showFn, durationMs) {
+    try {
+      this.setDisplayLock(sessionId, true);
+      this.clearCleanupTimer(sessionId);
+      await showFn();
+    } finally {
+      const t = setTimeout(() => {
+        this.showBlank(session, 220).catch(()=>{});
+        this.setDisplayLock(sessionId, false);
+        this.displayCleanupTimers.delete(sessionId);
+      }, Math.max(0, (durationMs || 0) + 60));
+      this.displayCleanupTimers.set(sessionId, t);
+    }
+  }
+  async safeShowText(session, text, ms = 3000, sessionId = null) {
+    const sid = sessionId || ([...this.sessions.entries()].find(([k,v]) => v.session === session)?.[0] || 'solo');
+    try {
+      await this.showWithAutoClear(session, sid, async () => {
+        await session.layouts?.showTextWall?.(text, { durationMs: ms });
+      }, ms);
+    } catch (e) {
+      console.error('[safeShowText]', e?.stack || e);
+      this.setDisplayLock(sid, false);
+    }
+  }
+  async safeShowBitmap(session, base64, ms = 3000, sessionId = null) {
+    const sid = sessionId || ([...this.sessions.entries()].find(([k,v]) => v.session === session)?.[0] || 'solo');
+    try {
+      await this.showWithAutoClear(session, sid, async () => {
+        await session.layouts?.showBitmapView?.(base64, { durationMs: ms });
+      }, ms);
+    } catch (e) {
+      console.error('[safeShowBitmap]', e?.stack || e);
+      this.setDisplayLock(sid, false);
+    }
   }
   async showBlank(session, ms=220){
     try {
       const b=this.createBitmapCanvas(BMP_WIDTH,BMP_HEIGHT);
       const base64=this.bitmapToBase64(b,BMP_WIDTH,BMP_HEIGHT);
-      await this.safeShowBitmap(session, base64, ms);
+      await session.layouts?.showBitmapView?.(base64, { durationMs: ms });
     } catch(_) {}
   }
 
@@ -316,12 +356,12 @@ class NightscoutMentraApp extends AppServer {
         high_alert_mg: this.validateSlicerValue(highMg, 180, 400, 250),
         low_alert_mmol: this.validateSlicerValue(lowMmol, 2, 5, 3.9),
         high_alert_mmol: this.validateSlicerValue(highMmol, 8, 30, 13.9),
-        alertsEnabled: (alertsEnabled===true||alertsEnabled==='true'||alertsEnabled===1||alertsEnabled==='1'),
+        alertsEnabled: this.toBool(alertsEnabled),
         language: language || 'es',
         timezone: timezone || null,
         units: units || UNITS.MGDL,
-        enable_head_up_display: (enable_head_up_display===true||enable_head_up_display==='true'||enable_head_up_display===1||enable_head_up_display==='1'),
-        enable_sparkline_display: (enable_sparkline_display===true||enable_sparkline_display==='true'||enable_sparkline_display===1||enable_sparkline_display==='1'),
+        enable_head_up_display: this.toBool(enable_head_up_display),
+        enable_sparkline_display: this.toBool(enable_sparkline_display),
         display_duration_ms: this.validateSlicerValue(display_duration_ms, 1000, 30000, 5000),
         dashboard_duration_ms: this.validateSlicerValue(dashboard_duration_ms, 1000, 30000, 10000),
         alert_duration_ms: this.validateSlicerValue(alert_duration_ms, 5000, 60000, 15000),
@@ -372,12 +412,12 @@ class NightscoutMentraApp extends AppServer {
       high_alert_mg: this.validateSlicerValue(o.high_alert_mg,180,400,250),
       low_alert_mmol: this.validateSlicerValue(o.low_alert_mmol,2,5,3.9),
       high_alert_mmol: this.validateSlicerValue(o.high_alert_mmol,8,30,13.9),
-      alertsEnabled: (o.alerts_enabled===true||o.alerts_enabled==='true'||o.alerts_enabled===1||o.alerts_enabled==='1'),
+      alertsEnabled: this.toBool(o.alerts_enabled),
       language: o.language||'es',
       timezone: o.timezone||null,
       units: o.units||UNITS.MGDL,
-      enable_head_up_display:(o.enable_head_up_display===true||o.enable_head_up_display==='true'||o.enable_head_up_display===1||o.enable_head_up_display==='1'),
-      enable_sparkline_display:(o.enable_sparkline_display===true||o.enable_sparkline_display==='true'||o.enable_sparkline_display===1||o.enable_sparkline_display==='1'),
+      enable_head_up_display: this.toBool(o.enable_head_up_display),
+      enable_sparkline_display: this.toBool(o.enable_sparkline_display),
       display_duration_ms:this.validateSlicerValue(o.display_duration_ms,1000,30000,5000),
       dashboard_duration_ms:this.validateSlicerValue(o.dashboard_duration_ms,1000,30000,10000),
       alert_duration_ms:this.validateSlicerValue(o.alert_duration_ms,5000,60000,15000)
@@ -398,7 +438,7 @@ class NightscoutMentraApp extends AppServer {
     for(const ep of endpoints){
       try{
         const params=s.nightscoutToken?{token:s.nightscoutToken}:{};
-        const {data}=await axios.get(ep,{params,timeout:10000,headers:{'User-Agent':'MentraOS-Nightscout/2.10.2'}});
+        const {data}=await axios.get(ep,{params,timeout:10000,headers:{'User-Agent':'MentraOS-Nightscout/2.10.3'}});
         const arr=Array.isArray(data)?data:(data?[data]:[]);
         if(arr.length===0) throw new Error('Empty response');
         return arr.map(r=>({ sgv:Number(r.sgv??r.glucose), date:typeof r.date==='string'?new Date(r.date).getTime():r.date, direction:r.direction||r.trend||'NONE' }))
@@ -427,8 +467,8 @@ class NightscoutMentraApp extends AppServer {
       (error.message.includes('timeout')||error.code==='ECONNABORTED'||error.message.includes('connect')||error.message.includes('ECONNREFUSED')) ? {es:'No se puede conectar\nRevisa URL/token',en:'Cannot connect\nCheck URL/token'} :
       (error.message.includes('401')||error.message.includes('403')||error.message.includes('Auth')) ? {es:'Token o permisos inválidos\nRevisa ajustes',en:'Invalid token or permissions\nCheck settings'} :
       {es:'Error cargando datos\nRevisa configuración',en:'Error loading data\nCheck configuration'};
-    this.safeShowText(session, msg[settings.language]||msg.en, duration);
-    setTimeout(()=>this.showBlank(session,220).catch(()=>{}), duration+50);
+    const sid = [...this.sessions.entries()].find(([k,v])=>v.session===session)?.[0];
+    this.safeShowText(session, msg[settings.language]||msg.en, duration, sid);
     session.logger?.error(error, isAlert?'alert display fail':'display fail');
   }
 
@@ -443,13 +483,13 @@ class NightscoutMentraApp extends AppServer {
       if(!isAlert && settings.enable_sparkline_display && hist.length>=MIN_HISTORY_FOR_SPARKLINE && mode!=='textOnly'){
         try{
           const bmp=this.generateCombinedBitmap(hist,r,settings);
-          await this.safeShowBitmap(session,bmp,ms);
+          await this.safeShowBitmap(session,bmp,ms,sessionId);
           return;
         }catch(e){ console.warn('combined fail, fallback text', e?.message); }
       }
 
       const [l1,l2]=await this.formatLines(r,settings);
-      await this.safeShowText(session, `${l1}\n${l2}`, ms);
+      await this.safeShowText(session, `${l1}\n${l2}`, ms, sessionId);
     }catch(e){
       this.handleDisplayError(session,e,settings,ms,false);
     }
@@ -460,15 +500,14 @@ class NightscoutMentraApp extends AppServer {
     let s=null;
     try{ s=await this.getUserSettings(session); }catch(e){ console.error('settings read fail',e); }
     if(!s?.nightscoutUrl){
-      await this.safeShowText(session,'URL de Nightscout no configurada\nAbre Ajustes',3500); await this.showBlank(session,220); return;
+      await this.safeShowText(session,'URL de Nightscout no configurada\nAbre Ajustes',3500,sessionId); return;
     }
     if(!s?.nightscoutToken){
-      await this.safeShowText(session,'Token no configurado\nAbre Ajustes',3500); await this.showBlank(session,220); return;
+      await this.safeShowText(session,'Token no configurado\nAbre Ajustes',3500,sessionId); return;
     }
     try{ await this.getGlucoseData(s,1); }
     catch(e){
-      await this.safeShowText(session, s.language==='es'?'No se pueden cargar datos\nRevisa URL/token/red':'Cannot load data\nCheck URL/token/network', 4000);
-      await this.showBlank(session,220);
+      await this.safeShowText(session, s.language==='es'?'No se pueden cargar datos\nRevisa URL/token/red':'Cannot load data\nCheck URL/token/network', 4000, sessionId);
       // seguimos igualmente
     }
     this.sessions.set(sessionId,{session,userId,settings:s,updateInterval:null});
@@ -485,12 +524,10 @@ class NightscoutMentraApp extends AppServer {
       if(typeof session.updateSettingsForTesting!=='function'){
         session.updateSettingsForTesting=async()=>{session.logger?.debug?.('compat noop');};
       }
-      console.log('[diag] layouts:', Object.keys(session.layouts||{}));
-      console.log('[diag] events:', Object.keys(session.events||{}));
       await this.showInitialAndStart(session,sessionId,userId);
     }catch(e){
       console.error('onSession failed:', e?.stack||e);
-      await this.safeShowText(session,'Startup error.\nOpen settings.',3000);
+      await this.safeShowText(session,'Startup error.\nOpen settings.',3000,sessionId);
     }
   }
 
@@ -499,6 +536,7 @@ class NightscoutMentraApp extends AppServer {
     try{
       session.events?.onButtonPress?.(async ()=>{
         const sd=this.sessions.get(sessionId); if(!sd) return;
+        if (this.isDisplayLocked(sessionId)) return;
         await this.showGlucoseDisplay(session,sessionId,sd.settings,{mode:'auto'});
       });
 
@@ -519,33 +557,46 @@ class NightscoutMentraApp extends AppServer {
       session.events?.onSettingsUpdate?.(handler);
       session.events?.onSettingsChange?.(handler);
 
-      // Gesto cabeza arriba→abajo muestra combined si hay historial
+      // Gesto cabeza arriba→abajo
       session.events?.onHeadPosition?.(async ({position})=>{
         try{
           if(position!=='up' && position!=='down') return;
-          const sd=this.sessions.get(sessionId); const s=sd?.settings; if(!s?.enable_head_up_display) return;
+
+          // Respetar estrictamente el toggle
+          const sd=this.sessions.get(sessionId); const s=sd?.settings;
+          if(!s || !this.toBool(s.enable_head_up_display)) return;
+
+          // Secuencia up->down rápida
           const now=Date.now();
           if(position==='up'){ this.lastHeadUp.set(sessionId, now); return; }
-          const lastUp=this.lastHeadUp.get(sessionId)||0; if(now-lastUp>2500) return;
-          const cd=this.headUpLastShown.get(sessionId)||0; if(now-cd<5000) return; this.headUpLastShown.set(sessionId, now);
+          const lastUp=this.lastHeadUp.get(sessionId)||0;
+          if(now-lastUp>2500) return;
 
+          // Cooldown para no spamear
+          const lastShown=this.headUpLastShown.get(sessionId)||0;
+          if(now-lastShown<5000) return;
+          this.headUpLastShown.set(sessionId, now);
+
+          if (this.isDisplayLocked(sessionId)) return; // no pisar otra vista
+
+          // Asegurar lectura reciente
           let last=(this.glucoseHistory.get(sessionId)||[]).slice(-1)[0];
           if(!last || (Date.now()-last.date)>10*60*1000){
             const r=await this.getGlucoseData(s,1); if(r&&r[0]){ last=r[0]; this.addToGlucoseHistory(sessionId,last); }
           }
-          if(!last){ await this.safeShowText(session,'Sin datos',3000); return; }
+          if(!last){ await this.safeShowText(session,'Sin datos',3000,sessionId); return; }
 
           const hist=this.glucoseHistory.get(sessionId)||[];
-          if(s.enable_sparkline_display && hist.length>=MIN_HISTORY_FOR_SPARKLINE){
+          if(this.toBool(s.enable_sparkline_display) && hist.length>=MIN_HISTORY_FOR_SPARKLINE){
             const bmp=this.generateCombinedBitmap(hist,last,s);
-            await this.safeShowBitmap(session,bmp,s.dashboard_duration_ms);
+            await this.safeShowBitmap(session,bmp,s.dashboard_duration_ms,sessionId);
             return;
           }
           const [l1,l2]=await this.formatLines(last,s);
-          await this.safeShowText(session, `${l1}\n${l2}`, s.dashboard_duration_ms);
+          await this.safeShowText(session, `${l1}\n${l2}`, s.dashboard_duration_ms, sessionId);
         }catch(e){
           session.logger?.error(e,'head-up fail');
-          await this.safeShowText(session,'Error',2000);
+          await this.safeShowText(session,'Error',2000,sessionId);
         }
       });
 
@@ -554,6 +605,8 @@ class NightscoutMentraApp extends AppServer {
         this.sessions.delete(sessionId);
         this.alertHistory.delete(sessionId);
         this.glucoseHistory.delete(sessionId);
+        this.clearCleanupTimer(sessionId);
+        this.displayLocks.delete(sessionId);
       });
     }catch(e){ console.error('setupEventHandlers fail', e?.stack||e); }
   }
@@ -581,15 +634,14 @@ class NightscoutMentraApp extends AppServer {
       if(s.units===UNITS.MMOL){ lines.push(`Low: ${s.low_alert_mmol} mmol/L`, `High: ${s.high_alert_mmol} mmol/L`); }
       else { lines.push(`Low: ${s.low_alert_mg} mg/dL`, `High: ${s.high_alert_mg} mg/dL`); }
       lines.push(`Units: ${s.units}`);
-      lines.push(`HeadUp: ${s.enable_head_up_display?'ON':'OFF'}`);
-      lines.push(`Sparkline: ${s.enable_sparkline_display?'ON':'OFF'}`);
+      lines.push(`HeadUp: ${this.toBool(s.enable_head_up_display)?'ON':'OFF'}`);
+      lines.push(`Sparkline: ${this.toBool(s.enable_sparkline_display)?'ON':'OFF'}`);
 
       // Pausa ciclo, eco y limpieza
       let sid=null; for(const [k,v] of this.sessions){ if(v.session===session){ sid=k; break; } }
       if(sid) this.stopNormalOperation(sid);
 
-      await this.safeShowText(session, `\n${lines.join('\n')}`, 5000);
-      setTimeout(()=>this.showBlank(session,220).catch(()=>{}), 5050);
+      await this.safeShowText(session, `\n${lines.join('\n')}`, 5000, sid);
 
       if(sid){
         const sd=this.sessions.get(sid);
@@ -605,6 +657,7 @@ class NightscoutMentraApp extends AppServer {
     const iv=setInterval(async()=>{
       try{
         const sd=this.sessions.get(sessionId); if(!sd) return clearInterval(iv);
+        if (this.isDisplayLocked(sessionId)) return; // no pintar si hay vista activa
         const d=await this.getGlucoseData(sd.settings,1);
         if(d&&d[0]){
           this.addToGlucoseHistory(sessionId,d[0]);
@@ -626,7 +679,7 @@ class NightscoutMentraApp extends AppServer {
     else if(mg>=lim.high) title=s.language==='es'?'¡GLUCOSA ALTA!':'HIGH GLUCOSE!';
     if(!title) return;
     const disp=this.convertToDisplay(mg,s.units);
-    await this.safeShowText(session, `${title}\n${disp} ${s.units}`, s.alert_duration_ms);
+    await this.safeShowText(session, `${title}\n${disp} ${s.units}`, s.alert_duration_ms, sessionId);
     this.alertHistory.set(sessionId, Date.now());
   }
 
@@ -637,10 +690,10 @@ class NightscoutMentraApp extends AppServer {
 const server = new NightscoutMentraApp({ packageName: PACKAGE_NAME, apiKey: MENTRAOS_API_KEY, port: PORT });
 server.start().catch(err=>{ console.error('❌ start fail:',err); process.exit(1); });
 
-console.log('🚀 Nightscout MentraOS v2.10.2-combined-safe — listo');
+console.log('🚀 Nightscout MentraOS v2.10.3-combined-safe-lock — listo');
 
 const KEEP_ALIVE_URL = process.env.RENDER_URL || 'https://mentra-nightscout.onrender.com';
-server.app.get('/health', (_,res)=>res.json({status:'alive',ts:new Date().toISOString(),ver:'2.10.2-combined-safe',sessions:server.sessions.size}));
+server.app.get('/health', (_,res)=>res.json({status:'alive',ts:new Date().toISOString(),ver:'2.10.3-combined-safe-lock',sessions:server.sessions.size}));
 setInterval(()=>axios.get(`${KEEP_ALIVE_URL}/health`).catch(()=>{}), 180000);
 
 module.exports = server;
