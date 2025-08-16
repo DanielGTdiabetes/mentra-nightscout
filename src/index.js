@@ -1,7 +1,7 @@
 "use strict";
-// src/index.js — Nightscout MentraOS v2.9.4 (sobre tu base)
-// HUD texto + TIR con barra | (escapada) + CH/Ins 4h + reset diario + semilla TIR + alertas
-// ES/EN y mg/dL/mmol. Sin mostrar nº de lecturas.
+// src/index.js — Nightscout MentraOS v2.9.5
+// HUD texto + TIR con barra │ en línea + CH/Ins del día + reset diario + semilla TIR + alertas
+// ES/EN y mg/dL/mmol. Sin nº de lecturas.
 
 require('dotenv').config();
 
@@ -211,7 +211,7 @@ class NightscoutMentraApp extends AppServer {
 
       // mmol normalizados (x10 si vienen como enteros)
       low_alert_mmol: this.normalizeMmol(o.low_alert_mmol) ?? 3.9,
-      high_alert_mmol: this.normalizeMmol(o.high_alert_mmol) ?? 13.9, // <-- FIX de la base
+      high_alert_mmol: this.normalizeMmol(o.high_alert_mmol) ?? 13.9,
 
       alertsEnabled: this.toBool(o.alerts_enabled),
       language: o.language || 'en',
@@ -296,18 +296,16 @@ class NightscoutMentraApp extends AppServer {
   buildTirBar(tirPct) {
     if (tirPct === null || !Number.isFinite(tirPct)) return '';
     const blocks = Math.max(0, Math.min(20, Math.round(tirPct / 5)));
-    // Escapamos el pipe para que NO se convierta en tabla en visores Markdown del canvas.
-    const pipe = '\\|';
-    return pipe.repeat(blocks);
+    // Usamos barra vertical U+2502 para evitar tablas
+    const BAR = '│';
+    return BAR.repeat(blocks);
   }
   updateDailyTirState(sessionId, readingMgdl, readingTs, settings) {
-    const range = this.getAlertLimits(settings); // rango: low_alert_mg – high_alert_mg
+    const range = this.getAlertLimits(settings); // rango
     const dayStr = this.getLocalDayStr(readingTs, settings);
 
     let st = this.dailyTirState.get(sessionId);
-    if (!st || st.dayStr !== dayStr) {
-      st = { dayStr, total: 0, inRange: 0 };
-    }
+    if (!st || st.dayStr !== dayStr) st = { dayStr, total: 0, inRange: 0 };
 
     if (Number.isFinite(readingMgdl)) {
       st.total += 1;
@@ -319,7 +317,7 @@ class NightscoutMentraApp extends AppServer {
     return { tirPct, total: st.total };
   }
 
-  // Tratamientos recientes (carbs/insulin) — ventana por defecto 4h
+  // Tratamientos: 'hours' (número) o 'day' para todo el día local
   async getRecentTreatments(settings, hours = 4) {
     try {
       const base = (settings.nightscoutUrl || '').trim();
@@ -328,10 +326,14 @@ class NightscoutMentraApp extends AppServer {
       u = u.replace(/\/$/, '');
       const endpoint = `${u}/api/v1/treatments.json?count=1000`;
       const params = settings.nightscoutToken ? { token: settings.nightscoutToken } : {};
-      const { data } = await axios.get(endpoint, { params, timeout: 10000, headers: { 'User-Agent': 'MentraOS-Nightscout/2.9.4' } });
+      const { data } = await axios.get(endpoint, { params, timeout: 10000, headers: { 'User-Agent': 'MentraOS-Nightscout/2.9.5' } });
       const arr = Array.isArray(data) ? data : (data ? [data] : []);
 
-      const since = Date.now() - Math.max(1, hours) * 60 * 60 * 1000;
+      const langSettings = this.getLanguageSettings(settings);
+      const tz = settings.timezone ? this.validateTimezone(settings.timezone) : langSettings.timezone;
+      const locale = langSettings.locale;
+      const todayStr = new Date().toLocaleDateString(locale, { timeZone: tz });
+
       const events = arr.map(t => {
         const dateStr = t.created_at || t.timestamp || t.dateString || t.date || null;
         let ts = null;
@@ -340,8 +342,19 @@ class NightscoutMentraApp extends AppServer {
         return { ts, carbs: Number(t.carbs), insulin: Number(t.insulin) };
       }).filter(e => e.ts && (Number.isFinite(e.carbs) || Number.isFinite(e.insulin)));
 
-      const windowed = events.filter(e => e.ts >= since);
-      if (!windowed.length) return { hours, totalCarbs: 0, totalInsulin: 0, last: null };
+      let windowed, label;
+      if (hours === 'day') {
+        windowed = events.filter(e =>
+          new Date(e.ts).toLocaleDateString(locale, { timeZone: tz }) === todayStr
+        );
+        label = settings.language === 'es' ? 'hoy' : 'today';
+      } else {
+        const since = Date.now() - Math.max(1, hours) * 60 * 60 * 1000;
+        windowed = events.filter(e => e.ts >= since);
+        label = `${hours}h`;
+      }
+
+      if (!windowed.length) return { label, totalCarbs: 0, totalInsulin: 0, last: null };
 
       let totalCarbs = 0, totalInsulin = 0; let last = null;
       for (const e of windowed) {
@@ -349,12 +362,12 @@ class NightscoutMentraApp extends AppServer {
         if (Number.isFinite(e.insulin)) totalInsulin += e.insulin;
         if (!last || e.ts > last.ts) last = e;
       }
-      return { hours, totalCarbs, totalInsulin, last };
+      return { label, totalCarbs, totalInsulin, last };
     } catch (_) { return null; }
   }
   formatTreatmentsLine(summary, settings) {
     if (!summary) return '';
-    const { hours, totalCarbs, totalInsulin, last } = summary;
+    const { label, totalCarbs, totalInsulin, last } = summary;
     const lang = settings.language || 'en';
     const round1 = (x) => Number.isFinite(x) ? Math.round(x * 10) / 10 : 0;
     const c = round1(totalCarbs); const i = round1(totalInsulin);
@@ -370,7 +383,8 @@ class NightscoutMentraApp extends AppServer {
       lastStr = parts.length ? (lang==='es' ? ` · Últ: ${parts.join(', ')} ${t}` : ` · Last: ${parts.join(', ')} ${t}`) : '';
     }
 
-    return (lang==='es') ? `CH/Ins ${hours}h: ${c}g / ${i}U${lastStr}` : `Carbs/Ins ${hours}h: ${c}g / ${i}U${lastStr}`;
+    if (lang==='es') return label === 'hoy' ? `CH/Ins hoy: ${c}g / ${i}U${lastStr}` : `CH/Ins ${label}: ${c}g / ${i}U${lastStr}`;
+    return label === 'today' ? `Carbs/Ins today: ${c}g / ${i}U${lastStr}` : `Carbs/Ins ${label}: ${c}g / ${i}U${lastStr}`;
   }
 
   /* ---------------- Nightscout data ---------------- */
@@ -382,7 +396,7 @@ class NightscoutMentraApp extends AppServer {
 
     const endpoint = `${u}/api/v1/entries/sgv.json?count=400`;
     const params = settings.nightscoutToken ? { token: settings.nightscoutToken } : {};
-    const { data } = await axios.get(endpoint, { params, timeout: 10000, headers: { 'User-Agent': 'MentraOS-Nightscout/2.9.4' } });
+    const { data } = await axios.get(endpoint, { params, timeout: 10000, headers: { 'User-Agent': 'MentraOS-Nightscout/2.9.5' } });
 
     const arr = Array.isArray(data) ? data : (data ? [data] : []);
     const langSettings = this.getLanguageSettings(settings);
@@ -418,7 +432,7 @@ class NightscoutMentraApp extends AppServer {
     for (const endpoint of endpoints) {
       try {
         const params = settings.nightscoutToken ? { token: settings.nightscoutToken } : {};
-        const { data } = await axios.get(endpoint, { params, timeout: 10000, headers: { 'User-Agent': 'MentraOS-Nightscout/2.9.4' } });
+        const { data } = await axios.get(endpoint, { params, timeout: 10000, headers: { 'User-Agent': 'MentraOS-Nightscout/2.9.5' } });
         const reading = Array.isArray(data) ? data[0] : data; if (!reading) throw new Error('Empty response');
         const glucoseRaw = (reading.sgv ?? reading.glucose);
         const glucose = Number(glucoseRaw); if (!Number.isFinite(glucose)) throw new Error('No glucose data found');
@@ -492,41 +506,41 @@ class NightscoutMentraApp extends AppServer {
   }
 
   async showInitialAndHide(session, sessionId, settings) {
-  try {
-    const data = await this.getGlucoseData(settings);
+    try {
+      const data = await this.getGlucoseData(settings);
+      // contabiliza lectura para TIR (UNA sola vez)
+      const tirRes = this.updateDailyTirState(sessionId, data.sgv, data.date, settings);
 
-    // contabiliza lectura para TIR (UNA sola vez) y reutiliza el resultado
-    const tirRes = this.updateDailyTirState(sessionId, data.sgv, data.date, settings);
+      const formattedData = await this.formatForG1(data, settings);
+      if (settings.enable_advanced_mode) {
+        const tirPct = tirRes.tirPct;
+        const tirLine = (tirPct === null)
+          ? (settings.language==='es' ? 'TIR hoy: n/d' : 'Today TIR: n/a')
+          : (settings.language==='es' ? `TIR hoy: ${tirPct}%` : `Today TIR: ${tirPct}%`);
+        const bar = (tirPct === null) ? '' : this.buildTirBar(tirPct);
 
-    const formattedData = await this.formatForG1(data, settings);
-    if (settings.enable_advanced_mode) {
-      const tirPct = tirRes.tirPct;
-      const tirLine = (tirPct === null)
-        ? (settings.language==='es' ? 'TIR hoy: n/d' : 'Today TIR: n/a')
-        : (settings.language==='es' ? `TIR hoy: ${tirPct}%` : `Today TIR: ${tirPct}%`);
-      const bar = (tirPct === null) ? '' : this.buildTirBar(tirPct);
+        // Tratamientos del día completo
+        let tLine = '';
+        try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {}
 
-      // Tratamientos 4h
-      let tLine = '';
-      try { const sum = await this.getRecentTreatments(settings, 4); tLine = this.formatTreatmentsLine(sum, settings); } catch {}
-
-      session.layouts.showTextWall(`\n${formattedData}\n────────────\n${tirLine}\n${bar}${tLine ? `\n${tLine}` : ''}`);
-    } else {
-      session.layouts.showTextWall(`\n${formattedData}`);
+        session.layouts.showTextWall(`\n${formattedData}\n────────────\n${tirLine}${bar ? ' ' + bar : ''}${tLine ? `\n${tLine}` : ''}`);
+      } else {
+        session.layouts.showTextWall(`\n${formattedData}`);
+      }
+      const t = setTimeout(() => this.hideDisplay(session, sessionId), 5000);
+      this.displayTimers.set(sessionId, t);
+    } catch (error) {
+      const errorMsg =
+        error.message.includes('URL no configurada') ? { en: 'Nightscout URL not set\nCheck settings', es: 'URL de Nightscout no configurada\nRevisa ajustes' } :
+        (error.message.includes('Sin datos') || error.message.includes('timeout')) ? { en: 'Cannot connect to Nightscout\nCheck URL and token', es: 'No se puede conectar\nRevisa URL y token' } :
+        { en: 'Error loading glucose data\nCheck your settings', es: 'Error cargando datos\nRevisa tu configuración' };
+      const msg = errorMsg[settings.language] || errorMsg.en;
+      session.layouts.showTextWall(msg);
+      const t = setTimeout(() => this.hideDisplay(session, sessionId), 5000);
+      this.displayTimers.set(sessionId, t);
     }
-    const t = setTimeout(() => this.hideDisplay(session, sessionId), 5000);
-    this.displayTimers.set(sessionId, t);
-  } catch (error) {
-    const errorMsg =
-      error.message.includes('URL no configurada') ? { en: 'Nightscout URL not set\nCheck settings', es: 'URL de Nightscout no configurada\nRevisa ajustes' } :
-      (error.message.includes('Sin datos') || error.message.includes('timeout')) ? { en: 'Cannot connect to Nightscout\nCheck URL and token', es: 'No se puede conectar\nRevisa URL y token' } :
-      { en: 'Error loading glucose data\nCheck your settings', es: 'Error cargando datos\nRevisa tu configuración' };
-    const msg = errorMsg[settings.language] || errorMsg.en;
-    session.layouts.showTextWall(msg);
-    const t = setTimeout(() => this.hideDisplay(session, sessionId), 5000);
-    this.displayTimers.set(sessionId, t);
   }
-}
+
   /* ---------------- Handlers de eventos ---------------- */
   setupEventHandlers(session, sessionId, userId) {
     try {
@@ -653,12 +667,12 @@ class NightscoutMentraApp extends AppServer {
               }
             } catch {}
 
-            text = `${text}\n────────────\n${tirLine}\n${bar}${minMaxLine}`;
+            text = `${text}\n────────────\n${tirLine}${bar ? ' ' + bar : ''}${minMaxLine}`;
           }
 
-          // Resumen CH/Ins (últimas 4h)
+          // Resumen CH/Ins (todo el día)
           let tLine = '';
-          try { const sum = await this.getRecentTreatments(s, 4); tLine = this.formatTreatmentsLine(sum, s); } catch {}
+          try { const sum = await this.getRecentTreatments(s, 'day'); tLine = this.formatTreatmentsLine(sum, s); } catch {}
 
           session.layouts.showTextWall(`\n${text}${tLine ? `\n${tLine}` : ''}`);
           setTimeout(() => this.hideDisplay(session, sessionId), s.display_duration_ms || 4000);
@@ -714,11 +728,11 @@ class NightscoutMentraApp extends AppServer {
           : (settings.language==='es' ? `TIR hoy: ${tirPct}%` : `Today TIR: ${tirPct}%`);
         const bar = (tirPct === null) ? '' : this.buildTirBar(tirPct);
 
-        // Resumen CH/Ins (últimas 4h)
+        // Resumen CH/Ins (del día)
         let tLine = '';
-        try { const sum = await this.getRecentTreatments(settings, 4); tLine = this.formatTreatmentsLine(sum, settings); } catch {}
+        try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {}
 
-        session.layouts.showTextWall(`${header}\n────────────\n${tirLine}\n${bar}${tLine ? `\n${tLine}` : ''}`);
+        session.layouts.showTextWall(`${header}\n────────────\n${tirLine}${bar ? ' ' + bar : ''}${tLine ? `\n${tLine}` : ''}`);
       } else {
         session.layouts.showTextWall(`\n${await this.formatForG1(data, settings)}`);
       }
@@ -869,13 +883,13 @@ server.start().catch(err => {
   process.exit(1);
 });
 
-console.log('🚀 Nightscout MentraOS v2.9.4 — HUD texto + TIR con barra + CH/Ins 4h + reset diario');
+console.log('🚀 Nightscout MentraOS v2.9.5 — HUD texto + TIR │ inline + CH/Ins día + reset diario');
 
 const KEEP_ALIVE_URL = process.env.RENDER_URL || 'https://mentra-nightscout.onrender.com';
 server.app.get('/health', (_, res) => res.json({
   status: 'alive',
   timestamp: new Date().toISOString(),
-  version: '2.9.4',
+  version: '2.9.5',
   activeSessions: server.activeSessions.size
 }));
 
