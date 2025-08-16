@@ -1,11 +1,11 @@
 "use strict";
 /**
- * Nightscout MentraOS — v2.10.3-combined-safe-lock
+ * Nightscout MentraOS — v2.10.4-gesture-only
+ * - Display SOLO por gesto (head-up) o botón manual
+ * - Bucle normal: solo fetch + alertas (NO muestra)
  * - Combined view (text + sparkline) 526x128 con márgenes seguros
  * - Fallback robusto a texto
- * - Echos de ajustes reforzados + limpieza de pantalla
- * - Wrappers seguros + candado por sesión (no solapa)
- * - Respeta estrictamente enable_head_up_display
+ * - Echos de ajustes + auto-limpieza + candado por sesión
  */
 
 require("dotenv").config();
@@ -438,7 +438,7 @@ class NightscoutMentraApp extends AppServer {
     for(const ep of endpoints){
       try{
         const params=s.nightscoutToken?{token:s.nightscoutToken}:{};
-        const {data}=await axios.get(ep,{params,timeout:10000,headers:{'User-Agent':'MentraOS-Nightscout/2.10.3'}});
+        const {data}=await axios.get(ep,{params,timeout:10000,headers:{'User-Agent':'MentraOS-Nightscout/2.10.4'}});
         const arr=Array.isArray(data)?data:(data?[data]:[]);
         if(arr.length===0) throw new Error('Empty response');
         return arr.map(r=>({ sgv:Number(r.sgv??r.glucose), date:typeof r.date==='string'?new Date(r.date).getTime():r.date, direction:r.direction||r.trend||'NONE' }))
@@ -513,7 +513,8 @@ class NightscoutMentraApp extends AppServer {
     this.sessions.set(sessionId,{session,userId,settings:s,updateInterval:null});
     await this.preloadHistory(sessionId,s,24);
     this.setupEventHandlers(session,sessionId);
-    await this.showGlucoseDisplay(session,sessionId,s,{mode:'auto'});
+
+    // 👇 NO mostramos nada al iniciar (gesto/botón deciden)
     this.startNormalOperation(session,sessionId,s);
   }
 
@@ -534,6 +535,7 @@ class NightscoutMentraApp extends AppServer {
   /* ----------------- Event handlers ----------------- */
   setupEventHandlers(session, sessionId){
     try{
+      // Botón manual → muestra display centralizado (aunque HUD esté OFF)
       session.events?.onButtonPress?.(async ()=>{
         const sd=this.sessions.get(sessionId); if(!sd) return;
         if (this.isDisplayLocked(sessionId)) return;
@@ -546,6 +548,12 @@ class NightscoutMentraApp extends AppServer {
           const sd=this.sessions.get(sessionId); if(!sd) return;
           const old=sd.settings; sd.settings=parsed; this.sessions.set(sessionId,sd);
 
+          // Si el usuario desactiva el HUD en ajustes, ocultamos cualquier vista activa
+          if (old.enable_head_up_display && !parsed.enable_head_up_display) {
+            this.showBlank(session, 220).catch(()=>{});
+            this.setDisplayLock(sessionId, false);
+          }
+
           if(old.updateInterval!==parsed.updateInterval){ this.stopNormalOperation(sessionId); this.startNormalOperation(session,sessionId,parsed); }
           if(this.alertLimitsChanged(old,parsed)){ this.alertHistory.delete(sessionId); }
 
@@ -557,43 +565,30 @@ class NightscoutMentraApp extends AppServer {
       session.events?.onSettingsUpdate?.(handler);
       session.events?.onSettingsChange?.(handler);
 
-      // Gesto cabeza arriba→abajo
+      // Gesto cabeza arriba→abajo (controla TODO el display)
       session.events?.onHeadPosition?.(async ({position})=>{
         try{
           if(position!=='up' && position!=='down') return;
 
-          // Respetar estrictamente el toggle
+          // Respeta estrictamente el toggle de HUD
           const sd=this.sessions.get(sessionId); const s=sd?.settings;
           if(!s || !this.toBool(s.enable_head_up_display)) return;
 
-          // Secuencia up->down rápida
+          // Secuencia up->down dentro de ventana
           const now=Date.now();
           if(position==='up'){ this.lastHeadUp.set(sessionId, now); return; }
           const lastUp=this.lastHeadUp.get(sessionId)||0;
-          if(now-lastUp>2500) return;
+          if(now - lastUp > s.display_duration_ms/2) return; // ventana de gesto
 
           // Cooldown para no spamear
           const lastShown=this.headUpLastShown.get(sessionId)||0;
-          if(now-lastShown<5000) return;
+          if(now - lastShown < 5000) return;
           this.headUpLastShown.set(sessionId, now);
 
           if (this.isDisplayLocked(sessionId)) return; // no pisar otra vista
 
-          // Asegurar lectura reciente
-          let last=(this.glucoseHistory.get(sessionId)||[]).slice(-1)[0];
-          if(!last || (Date.now()-last.date)>10*60*1000){
-            const r=await this.getGlucoseData(s,1); if(r&&r[0]){ last=r[0]; this.addToGlucoseHistory(sessionId,last); }
-          }
-          if(!last){ await this.safeShowText(session,'Sin datos',3000,sessionId); return; }
-
-          const hist=this.glucoseHistory.get(sessionId)||[];
-          if(this.toBool(s.enable_sparkline_display) && hist.length>=MIN_HISTORY_FOR_SPARKLINE){
-            const bmp=this.generateCombinedBitmap(hist,last,s);
-            await this.safeShowBitmap(session,bmp,s.dashboard_duration_ms,sessionId);
-            return;
-          }
-          const [l1,l2]=await this.formatLines(last,s);
-          await this.safeShowText(session, `${l1}\n${l2}`, s.dashboard_duration_ms, sessionId);
+          // Mostrar usando la función centralizada
+          await this.showGlucoseDisplay(session, sessionId, s, { duration: s.display_duration_ms, isAlert: false, mode: 'auto' });
         }catch(e){
           session.logger?.error(e,'head-up fail');
           await this.safeShowText(session,'Error',2000,sessionId);
@@ -637,7 +632,7 @@ class NightscoutMentraApp extends AppServer {
       lines.push(`HeadUp: ${this.toBool(s.enable_head_up_display)?'ON':'OFF'}`);
       lines.push(`Sparkline: ${this.toBool(s.enable_sparkline_display)?'ON':'OFF'}`);
 
-      // Pausa ciclo, eco y limpieza
+      // Pausa ciclo, eco y (si HUD se apagó) limpiar
       let sid=null; for(const [k,v] of this.sessions){ if(v.session===session){ sid=k; break; } }
       if(sid) this.stopNormalOperation(sid);
 
@@ -650,19 +645,18 @@ class NightscoutMentraApp extends AppServer {
     }catch(e){ session.logger?.debug('persist echo fail',{e:e?.message}); }
   }
 
-  /* ----------------- Bucle normal ----------------- */
+  /* ----------------- Bucle normal (SOLO datos/alertas) ----------------- */
   startNormalOperation(session, sessionId, s){
     this.stopNormalOperation(sessionId);
     const ms=(s.updateInterval||5)*60*1000;
     const iv=setInterval(async()=>{
       try{
         const sd=this.sessions.get(sessionId); if(!sd) return clearInterval(iv);
-        if (this.isDisplayLocked(sessionId)) return; // no pintar si hay vista activa
+        // SOLO obtención de datos + alertas; NUNCA mostrar aquí
         const d=await this.getGlucoseData(sd.settings,1);
         if(d&&d[0]){
           this.addToGlucoseHistory(sessionId,d[0]);
           if(sd.settings.alertsEnabled) await this.checkAlerts(session, sessionId, d[0], sd.settings);
-          await this.showGlucoseDisplay(session,sessionId,sd.settings,{mode:'auto'});
         }
       }catch(e){ session.logger?.debug('cycle fail',{e:e?.message}); }
     }, ms);
@@ -690,10 +684,10 @@ class NightscoutMentraApp extends AppServer {
 const server = new NightscoutMentraApp({ packageName: PACKAGE_NAME, apiKey: MENTRAOS_API_KEY, port: PORT });
 server.start().catch(err=>{ console.error('❌ start fail:',err); process.exit(1); });
 
-console.log('🚀 Nightscout MentraOS v2.10.3-combined-safe-lock — listo');
+console.log('🚀 Nightscout MentraOS v2.10.4-gesture-only — listo (display solo por gesto/botón)');
 
 const KEEP_ALIVE_URL = process.env.RENDER_URL || 'https://mentra-nightscout.onrender.com';
-server.app.get('/health', (_,res)=>res.json({status:'alive',ts:new Date().toISOString(),ver:'2.10.3-combined-safe-lock',sessions:server.sessions.size}));
+server.app.get('/health', (_,res)=>res.json({status:'alive',ts:new Date().toISOString(),ver:'2.10.4-gesture-only',sessions:server.sessions.size}));
 setInterval(()=>axios.get(`${KEEP_ALIVE_URL}/health`).catch(()=>{}), 180000);
 
 module.exports = server;
