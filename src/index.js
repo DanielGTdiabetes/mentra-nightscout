@@ -40,10 +40,10 @@ const BMP_HEIGHT = 135;
 const SAFE_TOP = 17, SAFE_BOTTOM = 12, SAFE_LEFT = 10, SAFE_RIGHT = 10;
 
 const LAYOUT = {
-  text:  { x: SAFE_LEFT, y: SAFE_TOP + 10, scale: 2 },  // antes: +2
+  text:  { x: SAFE_LEFT, y: SAFE_TOP + 20, scale: 2 },  // antes: +2
   spark: {
     x: Math.floor(BMP_WIDTH * 0.50),
-    y: SAFE_TOP + 6,                                     // un poco más bajo
+    y: SAFE_TOP + 12,                                     // un poco más bajo
     width: BMP_WIDTH - Math.floor(BMP_WIDTH * 0.50) - SAFE_RIGHT,
     height: BMP_HEIGHT - (SAFE_TOP + 6) - SAFE_BOTTOM - 1
   }
