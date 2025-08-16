@@ -1,5 +1,5 @@
 "use strict";
-// src/index.js — Nightscout MentraOS v2.9.5-patch1
+// src/index.js — Nightscout MentraOS v2.9.5-patch1 (Corregido)
 // SDK 2.1.18 — ROBUST + FALLBACK ENDPOINTS + HEAD-UP DISPLAY + MG/MMOL SYNC + SAFETY SHIMS + SPARKLINE CHARTS + CACHING (LOCAL HISTORY)
 
 require("dotenv").config();
@@ -621,13 +621,8 @@ de Nightscout en ajustes` };
             const text = await this.formatForG1(lastReading, s);
             session.layouts.showTextWall(`
 
+
 ${text}`, { durationMs: s.dashboard_duration_ms });
-          }
-        } catch (e) {
-          session.logger?.error(e, 'Head up display failed');
-          try { session.layouts.showTextWall('Error al cargar', { durationMs: 4000 }); } catch {}
-        }
-      });
           }
         } catch (e) {
           session.logger?.error(e, 'Head up display failed');
@@ -704,6 +699,12 @@ ${lines.join('\n')}`, { durationMs: 4000 });
         if (d && d.length > 0) {
           this.addToGlucoseHistory(sessionId, d[0]);
           if (sd.settings.alertsEnabled) await this.checkAlerts(session, sessionId, d[0], sd.settings);
+          
+          // --- INICIO DE LA CORRECCIÓN ---
+          // Esta línea refresca la pantalla con la gráfica actualizada en cada ciclo.
+          await this.showGlucoseDisplay(session, sessionId, sd.settings);
+          // --- FIN DE LA CORRECCIÓN ---
+
         }
       } catch (error) {
         session.logger?.debug('Normal operation cycle failed', { error: error.message });
