@@ -1,6 +1,7 @@
 "use strict";
-// src/index.js — Nightscout MentraOS v2.9.5-patch1
-// SDK 2.1.18 — ROBUST + FALLBACK ENDPOINTS + HEAD-UP DISPLAY + MG/MMOL SYNC + SAFETY SHIMS + SPARKLINE CHARTS + CACHING (LOCAL HISTORY)
+// src/index.js — Nightscout MentraOS v2.10.0-combined
+// SDK 2.1.18 — ROBUST + FALLBACK ENDPOINTS + HEAD-UP DISPLAY + MG/MMOL SYNC
+// + SPARKLINE CHARTS + CACHING (LOCAL HISTORY) + COMBINED VIEW (TEXT+SPARKLINE) BMP 576x135
 
 require("dotenv").config();
 
@@ -32,8 +33,19 @@ const UNITS = { MGDL: "mg/dL", MMOL: "mmol/L" };
 
 // Umbrales críticos de seguridad (hard-coded para protección del usuario)
 const CRITICAL_THRESHOLDS = {
-  LOW_MGDL: 70,    // Por debajo siempre es "Crítico Bajo" independientemente de configuración
-  HIGH_MGDL: 250  // Por encima siempre es "Crítico Alto" independientemente de configuración
+  LOW_MGDL: 70,
+  HIGH_MGDL: 250
+};
+
+// --- Dimensiones de bitmaps optimizadas para G1B ---
+const BMP_WIDTH = 576;
+const BMP_HEIGHT = 135;
+
+// Zona de layout (texto a la izquierda, sparkline a la derecha)
+const LAYOUT = {
+  padding: 8,
+  text: { x: 12, y: 14, line: 10, scale: 2 }, // fuente 5x7, escalada x2 para el valor
+  spark: { x: 280, y: 8, width: 576 - 280 - 8, height: 119 } // ~288px de ancho
 };
 
 class NightscoutMentraApp extends AppServer {
@@ -89,39 +101,7 @@ class NightscoutMentraApp extends AppServer {
     );
   }
 
-  /* ---------------- Sparkline Chart Generation ---------------- */
-  // Nota: usaremos createSparkline del SDK cuando sea posible. Este generador queda como fallback experimental.
-  generateSparklineBitmap(readings, settings) {
-    const width = 526;
-    const height = 100;
-    const padding = 10;
-    const chartWidth = width - (padding * 2);
-    const chartHeight = height - (padding * 2);
-    const bitmap = this.createBitmapCanvas(width, height);
-    if (!readings || readings.length < 2) {
-      return this.drawTextToBitmap(bitmap, width, height, 'Insufficient data');
-    }
-    const values = readings.map(r => r.sgv);
-    const minValue = Math.min(...values);
-    const maxValue = Math.max(...values);
-    const valueRange = maxValue - minValue || 1;
-    const limits = this.getAlertLimits(settings);
-    this.drawAlertZones(bitmap, width, height, padding, limits, minValue, maxValue);
-    for (let i = 0; i < readings.length - 1; i++) {
-      const x1 = padding + (i * chartWidth / (readings.length - 1));
-      const y1 = height - padding - ((readings[i].sgv - minValue) / valueRange * chartHeight);
-      const x2 = padding + ((i + 1) * chartWidth / (readings.length - 1));
-      const y2 = height - padding - ((readings[i + 1].sgv - minValue) / valueRange * chartHeight);
-      this.drawLine(bitmap, width, height, Math.round(x1), Math.round(y1), Math.round(x2), Math.round(y2));
-    }
-    if (readings.length > 0) {
-      const lastReading = readings[readings.length - 1];
-      const x = width - padding - 5;
-      const y = height - padding - ((lastReading.sgv - minValue) / valueRange * chartHeight);
-      this.drawCircle(bitmap, width, height, Math.round(x), Math.round(y), 3);
-    }
-    return this.bitmapToBase64(bitmap, width, height);
-  }
+  /* ---------------- Motor BMP + Fuente 5×7 ---------------- */
 
   createBitmapCanvas(width, height) {
     const bytesPerRow = Math.ceil(width / 8);
@@ -140,19 +120,23 @@ class NightscoutMentraApp extends AppServer {
   }
 
   drawLine(bitmap, width, height, x1, y1, x2, y2) {
-    const dx = Math.abs(x2 - x1);
-    const dy = Math.abs(y2 - y1);
-    const sx = x1 < x2 ? 1 : -1;
-    const sy = y1 < y2 ? 1 : -1;
-    let err = dx - dy;
-    let x = x1, y = y1;
+    let dx = Math.abs(x2 - x1), sx = x1 < x2 ? 1 : -1;
+    let dy = -Math.abs(y2 - y1), sy = y1 < y2 ? 1 : -1;
+    let err = dx + dy, e2;
     while (true) {
-      this.setPixel(bitmap, width, height, x, y, true);
-      if (x === x2 && y === y2) break;
-      const e2 = 2 * err;
-      if (e2 > -dy) { err -= dy; x += sx; }
-      if (e2 < dx) { err += dx; y += sy; }
+      this.setPixel(bitmap, width, height, x1, y1, true);
+      if (x1 === x2 && y1 === y2) break;
+      e2 = 2 * err;
+      if (e2 >= dy) { err += dy; x1 += sx; }
+      if (e2 <= dx) { err += dx; y1 += sy; }
     }
+  }
+
+  drawRect(bitmap, width, height, x, y, w, h) {
+    this.drawLine(bitmap, width, height, x, y, x + w, y);
+    this.drawLine(bitmap, width, height, x, y + h, x + w, y + h);
+    this.drawLine(bitmap, width, height, x, y, x, y + h);
+    this.drawLine(bitmap, width, height, x + w, y, x + w, y + h);
   }
 
   drawCircle(bitmap, width, height, cx, cy, r) {
@@ -163,21 +147,101 @@ class NightscoutMentraApp extends AppServer {
     }
   }
 
-  drawAlertZones(bitmap, width, height, padding, limits, minValue, maxValue) {
-    const chartHeight = height - (padding * 2);
-    const valueRange = maxValue - minValue || 1;
-    if (limits.low > minValue) {
-      const lowY = height - padding - ((limits.low - minValue) / valueRange * chartHeight);
-      for (let y = Math.round(lowY); y < height - padding; y += 4) {
-        for (let x = padding; x < width - padding; x += 8) this.setPixel(bitmap, width, height, x, y, true);
+  // Fuente 5x7 mínima (ASCII básico 32..90 + set ampliable). 1 = pixel on.
+  // Para brevedad incluimos dígitos, letras mayúsculas básicas, símbolos usados.
+  // Cada char = 5 columnas, 7 filas. Se puede ampliar si lo necesitas.
+  FONT5x7 = (() => {
+    const map = {};
+    const def = (ch, rows) => { map[ch] = rows; };
+    const D = {
+      "0":[0x1E,0x21,0x23,0x25,0x29,0x31,0x1E],
+      "1":[0x00,0x21,0x3F,0x01,0x00,0x00,0x00],
+      "2":[0x23,0x25,0x29,0x29,0x29,0x29,0x31],
+      "3":[0x22,0x41,0x49,0x49,0x49,0x49,0x36],
+      "4":[0x0C,0x14,0x24,0x24,0x3F,0x04,0x04],
+      "5":[0x72,0x51,0x51,0x51,0x51,0x51,0x4E],
+      "6":[0x1E,0x29,0x49,0x49,0x49,0x49,0x06],
+      "7":[0x40,0x47,0x48,0x50,0x60,0x40,0x40],
+      "8":[0x36,0x49,0x49,0x49,0x49,0x49,0x36],
+      "9":[0x30,0x49,0x49,0x49,0x49,0x4A,0x3C],
+      "A":[0x3F,0x48,0x48,0x48,0x48,0x48,0x3F],
+      "B":[0x3F,0x49,0x49,0x49,0x49,0x49,0x36],
+      "C":[0x1E,0x21,0x41,0x41,0x41,0x41,0x22],
+      "D":[0x3F,0x41,0x41,0x41,0x41,0x22,0x1C],
+      "E":[0x3F,0x49,0x49,0x49,0x49,0x41,0x41],
+      "F":[0x3F,0x48,0x48,0x48,0x48,0x40,0x40],
+      "G":[0x1E,0x21,0x41,0x49,0x49,0x2F,0x0E],
+      "H":[0x3F,0x08,0x08,0x08,0x08,0x08,0x3F],
+      "I":[0x00,0x41,0x41,0x3F,0x41,0x41,0x00],
+      "J":[0x02,0x01,0x01,0x01,0x01,0x3E,0x00],
+      "K":[0x3F,0x08,0x14,0x22,0x41,0x00,0x00],
+      "L":[0x3F,0x01,0x01,0x01,0x01,0x01,0x01],
+      "M":[0x3F,0x20,0x10,0x08,0x10,0x20,0x3F],
+      "N":[0x3F,0x20,0x10,0x08,0x04,0x02,0x3F],
+      "O":[0x1E,0x21,0x41,0x41,0x41,0x21,0x1E],
+      "P":[0x3F,0x48,0x48,0x48,0x48,0x30,0x00],
+      "Q":[0x1E,0x21,0x41,0x45,0x42,0x21,0x1E],
+      "R":[0x3F,0x48,0x4C,0x4A,0x49,0x31,0x00],
+      "S":[0x32,0x49,0x49,0x49,0x49,0x49,0x26],
+      "T":[0x40,0x40,0x40,0x3F,0x40,0x40,0x40],
+      "U":[0x3E,0x01,0x01,0x01,0x01,0x01,0x3E],
+      "V":[0x3C,0x02,0x01,0x01,0x01,0x02,0x3C],
+      "W":[0x3E,0x01,0x06,0x18,0x06,0x01,0x3E],
+      "X":[0x22,0x14,0x08,0x08,0x14,0x22,0x00],
+      "Y":[0x20,0x10,0x08,0x07,0x08,0x10,0x20],
+      "Z":[0x23,0x25,0x29,0x31,0x21,0x21,0x21],
+      " ":[0x00,0x00,0x00,0x00,0x00,0x00,0x00],
+      ":":[0x00,0x00,0x24,0x00,0x24,0x00,0x00],
+      "/":[0x01,0x02,0x04,0x08,0x10,0x20,0x00],
+      "-":[0x00,0x00,0x04,0x04,0x04,0x00,0x00],
+      ".":[0x00,0x00,0x00,0x20,0x00,0x00,0x00],
+      "m":[0x00,0x1F,0x10,0x0F,0x10,0x0F,0x00],
+      "g":[0x00,0x0C,0x12,0x12,0x0E,0x01,0x1E],
+      "d":[0x00,0x0F,0x10,0x10,0x10,0x0F,0x00],
+      "L":[0x3F,0x01,0x01,0x01,0x01,0x01,0x01],
+      "h":[0x00,0x3F,0x08,0x08,0x08,0x07,0x00],
+      "a":[0x00,0x0C,0x12,0x12,0x12,0x1E,0x00],
+      "c":[0x00,0x0C,0x12,0x12,0x12,0x00,0x00],
+      "e":[0x00,0x0C,0x1A,0x1A,0x12,0x04,0x00],
+      "s":[0x00,0x14,0x1A,0x1A,0x12,0x00,0x00],
+      "(": [0x00,0x00,0x1E,0x21,0x00,0x00,0x00],
+      ")": [0x00,0x00,0x21,0x1E,0x00,0x00,0x00],
+      "↑":[0x04,0x06,0x05,0x1C,0x05,0x06,0x04],
+      "↓":[0x10,0x30,0x50,0x0F,0x50,0x30,0x10],
+      "→":[0x00,0x08,0x0C,0x7E,0x0C,0x08,0x00],
+      "↗":[0x00,0x06,0x05,0x78,0x00,0x00,0x00],
+      "↘":[0x00,0x00,0x00,0x78,0x05,0x06,0x00],
+      "⇈":[0x04,0x06,0x05,0x1C,0x05,0x06,0x04], // aproximación
+      "⇊":[0x10,0x30,0x50,0x0F,0x50,0x30,0x10]  // aproximación
+    };
+    Object.keys(D).forEach(k => def(k, D[k]));
+    return map;
+  })();
+
+  drawChar5x7(bitmap, width, height, x, y, ch, scale = 1) {
+    const glyph = this.FONT5x7[ch] || this.FONT5x7[" "];
+    for (let row = 0; row < 7; row++) {
+      const rowBits = glyph[row] || 0;
+      for (let col = 0; col < 5; col++) {
+        const on = (rowBits >> (4 - col)) & 1;
+        if (on) {
+          for (let dy = 0; dy < scale; dy++) {
+            for (let dx = 0; dx < scale; dx++) {
+              this.setPixel(bitmap, width, height, x + col * scale + dx, y + row * scale + dy, true);
+            }
+          }
+        }
       }
     }
-    if (limits.high < maxValue) {
-      const highY = height - padding - ((limits.high - minValue) / valueRange * chartHeight);
-      for (let y = padding; y < Math.round(highY); y += 4) {
-        for (let x = padding; x < width - padding; x += 8) this.setPixel(bitmap, width, height, x, y, true);
-      }
+    return 5 * scale;
+  }
+
+  drawString5x7(bitmap, width, height, x, y, text, scale = 1, letterSpacing = 1) {
+    let cursor = x;
+    for (const ch of String(text)) {
+      cursor += this.drawChar5x7(bitmap, width, height, cursor, y, ch, scale) + letterSpacing;
     }
+    return cursor - x;
   }
 
   bitmapToBase64(bitmap, width, height) {
@@ -214,10 +278,183 @@ class NightscoutMentraApp extends AppServer {
     return Buffer.from(result.buffer).toString('base64');
   }
 
-  drawTextToBitmap(bitmap, width, height, _text) {
-    const bytesPerRow = Math.ceil(width / 8);
-    const blank = new Uint8Array(bytesPerRow * height).fill(0x55);
-    return this.bitmapToBase64(blank, width, height);
+  /* ---------------- Sparkline Chart Generation (optimizada) ---------------- */
+
+  // Downsample simple (mantén como máximo N puntos equiespaciados)
+  downsample(points, maxPoints) {
+    if (!points || points.length <= maxPoints) return points || [];
+    const out = [];
+    const step = (points.length - 1) / (maxPoints - 1);
+    for (let i = 0; i < maxPoints; i++) {
+      out.push(points[Math.round(i * step)]);
+    }
+    return out;
+  }
+
+  drawAlertZones(bitmap, width, height, rect, limits, minValue, maxValue) {
+    const { x, y, w, h } = rect;
+    const range = maxValue - minValue || 1;
+    // LOW (rayado inferior)
+    if (limits.low > minValue) {
+      const lowY = y + h - Math.round(((limits.low - minValue) / range) * h);
+      for (let yy = lowY; yy < y + h; yy += 3) {
+        for (let xx = x; xx < x + w; xx += 6) this.setPixel(bitmap, width, height, xx, yy, true);
+      }
+    }
+    // HIGH (rayado superior)
+    if (limits.high < maxValue) {
+      const highY = y + h - Math.round(((limits.high - minValue) / range) * h);
+      for (let yy = y; yy < highY; yy += 3) {
+        for (let xx = x; xx < x + w; xx += 6) this.setPixel(bitmap, width, height, xx, yy, true);
+      }
+    }
+  }
+
+  generateSparklineBitmap(history, settings, canvasW = BMP_WIDTH, canvasH = BMP_HEIGHT) {
+    const bitmap = this.createBitmapCanvas(canvasW, canvasH);
+    const sx = LAYOUT.spark.x, sy = LAYOUT.spark.y, sw = LAYOUT.spark.width, sh = LAYOUT.spark.height;
+
+    const points = (history || []).map(h => ({ sgv: h.sgv }));
+    const ds = this.downsample(points, 64); // 64 puntos máx para reducir CPU
+    if (ds.length < 2) return this.bitmapToBase64(bitmap, canvasW, canvasH);
+
+    const values = ds.map(p => p.sgv);
+    const minValue = Math.min(...values);
+    const maxValue = Math.max(...values);
+    const range = maxValue - minValue || 1;
+
+    // Marco de sparkline
+    this.drawRect(bitmap, canvasW, canvasH, sx, sy, sw - 1, sh - 1);
+
+    // Zonas LOW/HIGH (rayadas)
+    const limits = this.getAlertLimits(settings);
+    this.drawAlertZones(bitmap, canvasW, canvasH, { x: sx + 1, y: sy + 1, w: sw - 2, h: sh - 2 }, limits, minValue, maxValue);
+
+    // Línea
+    const n = ds.length;
+    for (let i = 0; i < n - 1; i++) {
+      const x1 = sx + 1 + Math.round(i * (sw - 3) / (n - 1));
+      const y1 = sy + 1 + (sh - 3) - Math.round(((ds[i].sgv - minValue) / range) * (sh - 3));
+      const x2 = sx + 1 + Math.round((i + 1) * (sw - 3) / (n - 1));
+      const y2 = sy + 1 + (sh - 3) - Math.round(((ds[i + 1].sgv - minValue) / range) * (sh - 3));
+      this.drawLine(bitmap, canvasW, canvasH, x1, y1, x2, y2);
+    }
+
+    // Punto final
+    const lastX = sx + 1 + Math.round((n - 1) * (sw - 3) / (n - 1));
+    const lastY = sy + 1 + (sh - 3) - Math.round(((ds[n - 1].sgv - minValue) / range) * (sh - 3));
+    this.drawCircle(bitmap, canvasW, canvasH, lastX, lastY, 2);
+
+    return this.bitmapToBase64(bitmap, canvasW, canvasH);
+  }
+
+  /* ---------------- Vista combinada (texto + sparkline en un BMP) ---------------- */
+
+  getTrendArrow(dir) {
+    const map = {
+      'DoubleUp': '⇈', 'SingleUp': '↑', 'FortyFiveUp': '↗',
+      'Flat': '→', 'FortyFiveDown': '↘', 'SingleDown': '↓', 'DoubleDown': '⇊',
+      'NONE': '-', 'NOT COMPUTABLE': '→',
+    };
+    return map[dir] || '→';
+  }
+  convertToDisplay(mgdlValue, targetUnit) {
+    if (targetUnit === UNITS.MMOL) return (mgdlValue / 18).toFixed(1);
+    return Math.round(mgdlValue);
+  }
+  getLanguageSettings(settings) {
+    const langMap = {
+      es: { locale: 'es-ES', timezone: 'Europe/Madrid' },
+      en: { locale: 'en-US', timezone: 'America/New_York' },
+    };
+    return langMap[settings.language] || langMap['en'];
+  }
+  validateTimezone(tz) {
+    const valid = [
+      'Europe/Madrid', 'Atlantic/Canary', 'Europe/London', 'Europe/Paris',
+      'Europe/Berlin', 'Europe/Rome', 'America/New_York', 'America/Chicago',
+      'America/Los_Angeles', 'America/Mexico_City', 'America/Argentina/Buenos_Aires',
+      'America/Sao_Paulo', 'Asia/Tokyo', 'Australia/Sydney', 'UTC',
+    ];
+    return valid.includes(tz) ? tz : 'UTC';
+  }
+
+  async formatForG1(data, settings) {
+    const display = this.convertToDisplay(data.sgv, settings.units);
+    const trend = this.getTrendArrow(data.direction);
+    const langSettings = this.getLanguageSettings(settings);
+    const timezone = settings.timezone ? this.validateTimezone(settings.timezone) : langSettings.timezone;
+    const readingTime = new Date(data.date);
+    const timeStr = readingTime.toLocaleTimeString(langSettings.locale, {
+      timeZone: timezone, hour: '2-digit', minute: '2-digit'
+    });
+    const minutesAgo = Math.floor((Date.now() - data.date) / 60000);
+    const lang = settings.language || 'en';
+    const timeAgo = minutesAgo <= 1 ? (lang === 'es' ? 'ahora' : 'now') : (lang === 'es' ? `hace ${minutesAgo}m` : `${minutesAgo}m ago`);
+    return { line1: `${display} ${settings.units} ${trend}`, line2: `${timeStr} (${timeAgo})` };
+  }
+
+  generateCombinedBitmap(history, lastReading, settings) {
+    const bitmap = this.createBitmapCanvas(BMP_WIDTH, BMP_HEIGHT);
+
+    // Texto principal
+    const { line1, line2 } = { ...{ line1: '', line2: '' }, ...((() => {
+      // utilizamos la versión sync del formatter (mismos cálculos pero inline)
+      const display = this.convertToDisplay(lastReading.sgv, settings.units);
+      const trend = this.getTrendArrow(lastReading.direction);
+      const langSettings = this.getLanguageSettings(settings);
+      const timezone = settings.timezone ? this.validateTimezone(settings.timezone) : langSettings.timezone;
+      const readingTime = new Date(lastReading.date);
+      const timeStr = readingTime.toLocaleTimeString(langSettings.locale, {
+        timeZone: timezone, hour: '2-digit', minute: '2-digit'
+      });
+      const minutesAgo = Math.floor((Date.now() - lastReading.date) / 60000);
+      const lang = settings.language || 'en';
+      const timeAgo = minutesAgo <= 1 ? (lang === 'es' ? 'ahora' : 'now') : (lang === 'es' ? `hace ${minutesAgo}m` : `${minutesAgo}m ago`);
+      return { line1: `${display} ${settings.units} ${trend}`, line2: `${timeStr} (${timeAgo})` };
+    })()) };
+
+    // Render texto (escala 2 para línea 1, escala 1 para línea 2)
+    const s2 = LAYOUT.text.scale;
+    this.drawString5x7(bitmap, BMP_WIDTH, BMP_HEIGHT, LAYOUT.text.x, LAYOUT.text.y, line1, s2, 1);
+    this.drawString5x7(bitmap, BMP_WIDTH, BMP_HEIGHT, LAYOUT.text.x, LAYOUT.text.y + 9 * s2 + 6, line2, 1, 1);
+
+    // Sparkline a la derecha (usa el mismo motor que la versión independiente)
+    const bmpWithSpark = this.generateSparklineBitmap(history, settings, BMP_WIDTH, BMP_HEIGHT);
+    // generateSparklineBitmap ya devuelve el BMP completo en base64;
+    // pero como hemos dibujado texto antes, necesitamos fusionar en el mismo lienzo.
+    // Para evitar doble pasada costosa, re-dibujamos sparkline directamente aquí:
+
+    // Volvemos a pintar sparkline (sin re-crear BMP):
+    const points = this.downsample((history || []).map(h => ({ sgv: h.sgv })), 64);
+    if (points.length >= 2) {
+      const values = points.map(p => p.sgv);
+      const minValue = Math.min(...values);
+      const maxValue = Math.max(...values);
+      const range = maxValue - minValue || 1;
+      const sx = LAYOUT.spark.x, sy = LAYOUT.spark.y, sw = LAYOUT.spark.width, sh = LAYOUT.spark.height;
+
+      // Marco
+      this.drawRect(bitmap, BMP_WIDTH, BMP_HEIGHT, sx, sy, sw - 1, sh - 1);
+      // Zonas
+      const limits = this.getAlertLimits(settings);
+      this.drawAlertZones(bitmap, BMP_WIDTH, BMP_HEIGHT, { x: sx + 1, y: sy + 1, w: sw - 2, h: sh - 2 }, limits, minValue, maxValue);
+      // Línea
+      const n = points.length;
+      for (let i = 0; i < n - 1; i++) {
+        const x1 = sx + 1 + Math.round(i * (sw - 3) / (n - 1));
+        const y1 = sy + 1 + (sh - 3) - Math.round(((points[i].sgv - minValue) / range) * (sh - 3));
+        const x2 = sx + 1 + Math.round((i + 1) * (sw - 3) / (n - 1));
+        const y2 = sy + 1 + (sh - 3) - Math.round(((points[i + 1].sgv - minValue) / range) * (sh - 3));
+        this.drawLine(bitmap, BMP_WIDTH, BMP_HEIGHT, x1, y1, x2, y2);
+      }
+      // Punto final
+      const lastX = sx + 1 + Math.round((n - 1) * (sw - 3) / (n - 1));
+      const lastY = sy + 1 + (sh - 3) - Math.round(((points[n - 1].sgv - minValue) / range) * (sh - 3));
+      this.drawCircle(bitmap, BMP_WIDTH, BMP_HEIGHT, lastX, lastY, 2);
+    }
+
+    return this.bitmapToBase64(bitmap, BMP_WIDTH, BMP_HEIGHT);
   }
 
   /* ---------------- settings (lectura directa del store) ---------------- */
@@ -340,51 +577,6 @@ class NightscoutMentraApp extends AppServer {
     };
   }
 
-  /* ---------------- utils ---------------- */
-  convertToDisplay(mgdlValue, targetUnit) {
-    if (targetUnit === UNITS.MMOL) return (mgdlValue / 18).toFixed(1);
-    return Math.round(mgdlValue);
-  }
-  getTrendArrow(dir) {
-    const map = {
-      'DoubleUp': '⇈', 'SingleUp': '↑', 'FortyFiveUp': '↗',
-      'Flat': '→', 'FortyFiveDown': '↘', 'SingleDown': '↓', 'DoubleDown': '⇊',
-      'NONE': '-', 'NOT COMPUTABLE': '→',
-    };
-    return map[dir] || '→';
-  }
-  getLanguageSettings(settings) {
-    const langMap = {
-      es: { locale: 'es-ES', timezone: 'Europe/Madrid' },
-      en: { locale: 'en-US', timezone: 'America/New_York' },
-    };
-    return langMap[settings.language] || langMap['en'];
-  }
-  validateTimezone(tz) {
-    const valid = [
-      'Europe/Madrid', 'Atlantic/Canary', 'Europe/London', 'Europe/Paris',
-      'Europe/Berlin', 'Europe/Rome', 'America/New_York', 'America/Chicago',
-      'America/Los_Angeles', 'America/Mexico_City', 'America/Argentina/Buenos_Aires',
-      'America/Sao_Paulo', 'Asia/Tokyo', 'Australia/Sydney', 'UTC',
-    ];
-    return valid.includes(tz) ? tz : 'UTC';
-  }
-  async formatForG1(data, settings) {
-    const display = this.convertToDisplay(data.sgv, settings.units);
-    const trend = this.getTrendArrow(data.direction);
-    const langSettings = this.getLanguageSettings(settings);
-    const timezone = settings.timezone ? this.validateTimezone(settings.timezone) : langSettings.timezone;
-    const readingTime = new Date(data.date);
-    const timeStr = readingTime.toLocaleTimeString(langSettings.locale, {
-      timeZone: timezone, hour: '2-digit', minute: '2-digit'
-    });
-    const minutesAgo = Math.floor((Date.now() - data.date) / 60000);
-    const lang = settings.language || 'en';
-    const timeAgo = minutesAgo <= 1 ? (lang === 'es' ? 'ahora' : 'now') : (lang === 'es' ? `hace ${minutesAgo}m` : `${minutesAgo}m ago`);
-    return `${display} ${settings.units} ${trend}
-${timeStr} (${timeAgo})`;
-  }
-
   /* ---------------- Glucose History Management ---------------- */
   addToGlucoseHistory(sessionId, reading) {
     if (!this.glucoseHistory.has(sessionId)) {
@@ -392,7 +584,7 @@ ${timeStr} (${timeAgo})`;
     }
     const history = this.glucoseHistory.get(sessionId);
     history.push({ sgv: reading.sgv, date: reading.date });
-    if (history.length > 24) history.splice(0, history.length - 24);
+    if (history.length > 120) history.splice(0, history.length - 120); // ~10h si cada 5min
     this.glucoseHistory.set(sessionId, history);
   }
 
@@ -400,7 +592,6 @@ ${timeStr} (${timeAgo})`;
   async preloadHistory(sessionId, settings, points = 24) {
     try {
       const readings = await this.getGlucoseData(settings, points);
-      // Orden de más antiguo a más reciente
       readings.reverse().forEach(r => this.addToGlucoseHistory(sessionId, r));
     } catch (e) {
       this.sessions.get(sessionId)?.session?.logger?.debug?.('Preload history failed', { err: e?.message });
@@ -424,7 +615,7 @@ ${timeStr} (${timeAgo})`;
         console.log(`🔍 Trying endpoint: ${endpoint}`);
         const params = settings.nightscoutToken ? { token: settings.nightscoutToken } : {};
         const { data } = await axios.get(endpoint, {
-          params, timeout: 10000, headers: { 'User-Agent': 'MentraOS-Nightscout/2.9.5-patch1' }
+          params, timeout: 10000, headers: { 'User-Agent': 'MentraOS-Nightscout/2.10.0-combined' }
         });
         const arr = Array.isArray(data) ? data : (data ? [data] : []);
         if (arr.length === 0) throw new Error('Empty response');
@@ -448,21 +639,11 @@ ${timeStr} (${timeAgo})`;
   /* ---------------- Manejador de errores para displays ---------------- */
   handleDisplayError(session, error, settings, duration, isAlert = false) {
     const errorMsg =
-      error.message.includes('URL no configurada') ? { en: `Nightscout URL not set
-Check settings`, es: `URL de Nightscout no configurada
-Revisa ajustes` } :
-      (error.message.includes('Sin datos') || error.message.includes('Empty response')) ? { en: `No glucose data available
-Check your settings`, es: `No hay datos de glucosa
-Revisa tus ajustes` } :
-      (error.message.includes('timeout') || error.message.includes('ECONNABORTED') || error.message.includes('connect') || error.message.includes('ECONNREFUSED')) ? { en: `Cannot connect to Nightscout
-Check URL and token`, es: `No se puede conectar
-Revisa URL y token` } :
-      (error.message.includes('Auth Error')) ? { en: `Invalid token or permissions
-Check your settings`, es: `Token o permisos inválidos
-Revisa tus ajustes` } :
-      { en: `Error loading glucose data
-Check your settings`, es: `Error cargando datos
-Revisa tu configuración` };
+      error.message.includes('URL no configurada') ? { en: `Nightscout URL not set\nCheck settings`, es: `URL de Nightscout no configurada\nRevisa ajustes` } :
+      (error.message.includes('Sin datos') || error.message.includes('Empty response')) ? { en: `No glucose data available\nCheck your settings`, es: `No hay datos de glucosa\nRevisa tus ajustes` } :
+      (error.message.includes('timeout') || error.message.includes('ECONNABORTED') || error.message.includes('connect') || error.message.includes('ECONNREFUSED')) ? { en: `Cannot connect to Nightscout\nCheck URL and token`, es: `No se puede conectar\nRevisa URL y token` } :
+      (error.message.includes('Auth Error')) ? { en: `Invalid token or permissions\nCheck your settings`, es: `Token o permisos inválidos\nRevisa tus ajustes` } :
+      { en: `Error loading glucose data\nCheck your settings`, es: `Error cargando datos\nRevisa tu configuración` };
     const msg = errorMsg[settings.language] || errorMsg.en;
     session.layouts.showTextWall(msg, { durationMs: duration });
     session.logger?.error(error, isAlert ? 'Failed to show alert' : 'Failed to show display');
@@ -470,46 +651,40 @@ Revisa tu configuración` };
 
   /* ---------------- Display Methods ---------------- */
   async showGlucoseDisplay(session, sessionId, settings, opts = {}) {
-    const { duration = null, isAlert = false, mode = 'text' } = opts;
+    const { duration = null, isAlert = false, mode = 'auto' } = opts;
     const actualDuration = duration || (isAlert ? settings.alert_duration_ms : settings.display_duration_ms);
     try {
       const readings = await this.getGlucoseData(settings, 1);
       const lastReading = readings[0];
       this.addToGlucoseHistory(sessionId, lastReading);
 
-      // Solo intentamos sparkline si nos lo piden explícitamente (modo 'sparkline')
-      if (mode === 'sparkline' && !isAlert) {
-        const history = this.glucoseHistory.get(sessionId) || [];
-        if (history.length > 1) {
-          let bmp = null;
-          try {
-            const sdkBmp = await session.layouts.createSparkline(history.map(h => h.sgv));
-            if (sdkBmp && typeof sdkBmp === 'string' && sdkBmp.length > 0) bmp = sdkBmp;
-          } catch (_) {}
-          if (!bmp) {
-            try { bmp = this.generateSparklineBitmap(history, settings); } catch (_) {}
-          }
+      const history = this.glucoseHistory.get(sessionId) || [];
+
+      // Si el usuario quiere sparkline y tenemos historial suficiente → vista combinada
+      if (!isAlert && settings.enable_sparkline_display && history.length > 1 && mode !== 'textOnly') {
+        try {
+          const bmp = this.generateCombinedBitmap(history, lastReading, settings);
           if (bmp) {
             await session.layouts.showBitmapView(bmp, { durationMs: actualDuration });
             return;
           }
-        }
+        } catch (_) { /* fallback abajo */ }
       }
 
-      // Texto por defecto (valor + tendencia + hora)
-      const formattedData = await this.formatForG1(lastReading, settings);
-      session.layouts.showTextWall(formattedData, { durationMs: actualDuration });
+      // Fallback: solo texto
+      const formatted = await this.formatForG1(lastReading, settings);
+      const text = `${formatted.line1}\n${formatted.line2}`;
+      session.layouts.showTextWall(text, { durationMs: actualDuration });
     } catch (error) {
       this.handleDisplayError(session, error, settings, actualDuration, isAlert);
     }
   }
+
   async showInitialAndStart(session, sessionId, userId) {
     try {
       const settings = await this.getUserSettings(session);
       if (!settings.nightscoutUrl || !settings.nightscoutToken) {
-        const msg = { en: `Please configure Nightscout
-URL and token in settings`, es: `Configura URL y token
-de Nightscout en ajustes` };
+        const msg = { en: `Please configure Nightscout\nURL and token in settings`, es: `Configura URL y token\nde Nightscout en ajustes` };
         session.layouts.showTextWall(msg[settings.language] || msg.en);
         return;
       }
@@ -517,7 +692,7 @@ de Nightscout en ajustes` };
       // Pre-carga historial para que la gráfica esté disponible desde el primer minuto
       await this.preloadHistory(sessionId, settings, 24);
       this.setupEventHandlers(session, sessionId);
-      await this.showGlucoseDisplay(session, sessionId, settings);
+      await this.showGlucoseDisplay(session, sessionId, settings, { mode: 'auto' });
       this.startNormalOperation(session, sessionId, settings);
     } catch (err) {
       session.layouts.showTextWall('Error starting app. Check settings.');
@@ -538,11 +713,12 @@ de Nightscout en ajustes` };
   /* ---------------- Handlers de eventos ---------------- */
   setupEventHandlers(session, sessionId) {
     try {
+      // Botón manual → misma lógica (auto: combinado si hay historial)
       session.events?.onButtonPress?.(async () => {
         const sd = this.sessions.get(sessionId);
         if (!sd) return;
         const s = sd.settings;
-        await this.showGlucoseDisplay(session, sessionId, s);
+        await this.showGlucoseDisplay(session, sessionId, s, { mode: 'auto' });
       });
 
       const settingsHandler = async (settingsData) => {
@@ -570,6 +746,7 @@ de Nightscout en ajustes` };
       session.events?.onSettingsUpdate?.(settingsHandler);
       session.events?.onSettingsChange?.(settingsHandler);
 
+      // Head-up: secuencia UP → DOWN en ≤ 2500ms
       session.events?.onHeadPosition?.(async (data) => {
         try {
           const pos = data?.position; if (pos !== 'up' && pos !== 'down') return;
@@ -577,62 +754,42 @@ de Nightscout en ajustes` };
           const s = sd?.settings;
           if (!s?.enable_head_up_display) return;
           const now = Date.now();
-          // Secuencia: primero UP, luego DOWN en ≤ 2500 ms
           if (pos === 'up') { this.lastHeadUp.set(sessionId, now); return; }
           const lastUp = this.lastHeadUp.get(sessionId) || 0;
           if (pos === 'down' && (now - lastUp) > 2500) return;
 
-          // Cooldown 5s para no saturar
+          // Cooldown 5s
           const last = this.headUpLastShown.get(sessionId) || 0;
-          if (now - last < 5000) return; // cooldown
+          if (now - last < 5000) return;
           this.headUpLastShown.set(sessionId, now);
 
-          // Asegurar que tenemos al menos una lectura reciente
+          // Asegurar lectura reciente
           let lastReading = (this.glucoseHistory.get(sessionId) || []).slice(-1)[0];
           const ensureRecent = !lastReading ? true : (Date.now() - lastReading.date) > 10 * 60 * 1000;
           if (!lastReading || ensureRecent) {
             const r = await this.getGlucoseData(s, 1);
             if (r && r[0]) { lastReading = r[0]; this.addToGlucoseHistory(sessionId, lastReading); }
           }
-
-          // Si el usuario tiene activado sparkline y hay historial, mostramos primero la gráfica unos segundos y luego el texto
-          let sparkDuration = 0;
-          if (s?.enable_sparkline_display) {
-            const history = this.glucoseHistory.get(sessionId) || [];
-            if (history.length > 1) {
-              try {
-                let bmp = null;
-                try {
-                  const sdkBmp = await session.layouts.createSparkline(history.map(h => h.sgv));
-                  if (sdkBmp && typeof sdkBmp === 'string' && sdkBmp.length > 0) bmp = sdkBmp;
-                } catch {}
-                if (!bmp) {
-                  try { bmp = this.generateSparklineBitmap(history, s); } catch {}
-                }
-                if (bmp) {
-                  sparkDuration = Math.min(2500, s.dashboard_duration_ms);
-                  await session.layouts.showBitmapView(bmp, { durationMs: sparkDuration });
-                }
-              } catch {}
-            }
+          if (!lastReading) {
+            session.layouts.showTextWall('No hay datos disponibles.', { durationMs: 3000 });
+            return;
           }
 
-          // Fallback/seguido: siempre mostramos texto (valor + hora) para el tiempo restante
-          const remaining = Math.max(0, s.dashboard_duration_ms - sparkDuration);
-          if (lastReading) {
-            const text = await this.formatForG1(lastReading, s);
-            await session.layouts.showTextWall(`
-
-${text}`, { durationMs: remaining || 1500 });
+          // Vista combinada durante dashboard_duration_ms, si posible
+          const history = this.glucoseHistory.get(sessionId) || [];
+          if (s?.enable_sparkline_display && history.length > 1) {
+            try {
+              const bmp = this.generateCombinedBitmap(history, lastReading, s);
+              if (bmp) {
+                await session.layouts.showBitmapView(bmp, { durationMs: s.dashboard_duration_ms });
+                return;
+              }
+            } catch {}
           }
 
-          // Fallback: solo texto (valor + hora)
-          if (lastReading) {
-            const text = await this.formatForG1(lastReading, s);
-            await session.layouts.showTextWall(`
-
-${text}`, { durationMs: s.dashboard_duration_ms });
-          }
+          // Fallback a texto si algo falla
+          const f = await this.formatForG1(lastReading, s);
+          await session.layouts.showTextWall(`${f.line1}\n${f.line2}`, { durationMs: s.dashboard_duration_ms });
         } catch (e) {
           session.logger?.error(e, 'Head up display failed');
           try { session.layouts.showTextWall('Error al cargar', { durationMs: 4000 }); } catch {}
@@ -688,9 +845,12 @@ ${text}`, { durationMs: s.dashboard_duration_ms });
       let sidForSession = null;
       for (const [sid, sd] of this.sessions) { if (sd.session === session) { sidForSession = sid; break; } }
       if (sidForSession) this.stopNormalOperation(sidForSession);
-      session.layouts.showTextWall(`
-${lines.join('\n')}`, { durationMs: 4000 });
-      if (sidForSession) setTimeout(() => { try { this.startNormalOperation(this.sessions.get(sidForSession).session, sidForSession, this.sessions.get(sidForSession).settings); } catch(_){} }, 4100);
+      session.layouts.showTextWall(`\n${lines.join('\n')}`, { durationMs: 4000 });
+      if (sidForSession) setTimeout(() => {
+        try {
+          this.startNormalOperation(this.sessions.get(sidForSession).session, sidForSession, this.sessions.get(sidForSession).settings);
+        } catch(_) {}
+      }, 4100);
     } catch (e) {
       session.logger?.debug('Store persistence skipped/failed', { err: e?.message });
     }
@@ -708,9 +868,8 @@ ${lines.join('\n')}`, { durationMs: 4000 });
         if (d && d.length > 0) {
           this.addToGlucoseHistory(sessionId, d[0]);
           if (sd.settings.alertsEnabled) await this.checkAlerts(session, sessionId, d[0], sd.settings);
-
-          // Refresco de pantalla en cada ciclo para que reaparezca la gráfica/texto
-          await this.showGlucoseDisplay(session, sessionId, sd.settings, { mode: 'text' });
+          // Refresco de pantalla: usa vista combinada si hay historial
+          await this.showGlucoseDisplay(session, sessionId, sd.settings, { mode: 'auto' });
         }
       } catch (error) {
         session.logger?.debug('Normal operation cycle failed', { error: error.message });
@@ -746,10 +905,8 @@ ${lines.join('\n')}`, { durationMs: 4000 });
     const lang = settings.language || 'en';
     let msg = null;
     let title = null;
-    if (mgdl <= limits.low) { title = msgs[lang]?.low || msgs.en.low; msg = `
-${display} ${settings.units}`; this.alertHistory.set(sessionId, Date.now()); }
-    else if (mgdl >= limits.high) { title = msgs[lang]?.high || msgs.en.high; msg = `
-${display} ${settings.units}`; this.alertHistory.set(sessionId, Date.now()); }
+    if (mgdl <= limits.low) { title = msgs[lang]?.low || msgs.en.low; msg = `${display} ${settings.units}`; this.alertHistory.set(sessionId, Date.now()); }
+    else if (mgdl >= limits.high) { title = msgs[lang]?.high || msgs.en.high; msg = `${display} ${settings.units}`; this.alertHistory.set(sessionId, Date.now()); }
     if (msg) {
       session.layouts.showReferenceCard(title, msg, { durationMs: settings.alert_duration_ms });
       session.logger?.warn('Alert sent', { type: mgdl <= limits.low ? 'low' : 'high', value: mgdl });
@@ -847,15 +1004,15 @@ server.start().catch(err => {
   process.exit(1);
 });
 
-console.log('🚀 Nightscout MentraOS v2.9.5-patch1 — ROBUST + FALLBACK + HEAD-UP + SYNC + SPARKLINE CHARTS + CACHING (LOCAL HISTORY)');
+console.log('🚀 Nightscout MentraOS v2.10.0-combined — COMBINED VIEW + faster BMPs + robust fallbacks');
 
 const KEEP_ALIVE_URL = process.env.RENDER_URL || 'https://mentra-nightscout.onrender.com';
 server.app.get('/health', (_, res) => res.json({
   status: 'alive',
   timestamp: new Date().toISOString(),
-  version: '2.9.5-patch1',
+  version: '2.10.0-combined',
   activeSessions: server.sessions.size,
-  features: ['sparkline', 'head-up', 'alerts', 'mg-mmol-sync', 'fallback-endpoints']
+  features: ['combined-bmp-576x135', 'sparkline', 'head-up', 'alerts', 'mg-mmol-sync', 'fallback-endpoints']
 }));
 
 setInterval(() => axios.get(`${KEEP_ALIVE_URL}/health`).catch(() => {}), 3 * 60 * 1000);
