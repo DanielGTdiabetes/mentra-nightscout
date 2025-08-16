@@ -1,79 +1,75 @@
 "use strict";
-// src/index.js — Nightscout MentraOS v2.10.3-combined
-// SDK 2.1.18 — ROBUST + FALLBACK ENDPOINTS + HEAD-UP DISPLAY + MG/MMOL SYNC
-// + SPARKLINE CHARTS + CACHING (LOCAL HISTORY) + COMBINED VIEW (TEXT+SPARKLINE) BMP 576x135
-// v2.10.3 — FIXED: Render fallback logic for empty data & improved rendering flow.
+/**
+ * Nightscout MentraOS — v2.10.2-combined-safe
+ * - Combined view (text + sparkline) 526x128 con márgenes seguros
+ * - Fallback robusto a texto
+ * - Echos de ajustes reforzados + limpieza de pantalla
+ * - Wrappers seguros para mostrar en las G1B (evita crasheos)
+ */
 
 require("dotenv").config();
-
 const { AppServer } = require("@mentra/sdk");
 const axios = require("axios");
 
-/* ---------- HARD SHIM: evita crash si el SDK invoca método inexistente ---------- */
-// Mantener como PRIMER bloque del archivo.
+/* ---------- SHIM de compatibilidad ---------- */
 if (typeof Object.prototype.updateSettingsForTesting !== "function") {
   Object.defineProperty(Object.prototype, "updateSettingsForTesting", {
-    value: async function () { /* noop compat */ },
-    writable: true,
-    configurable: true,
-    enumerable: false,
+    value: async function () {},
+    writable: true, configurable: true, enumerable: false,
   });
 }
-/* ------------------------------------------------------------------------------- */
+/* ------------------------------------------- */
 
-const PACKAGE_NAME = process.env.PACKAGE_NAME || "com.tucompania.nightscout-glucose";
-const PORT = parseInt(process.env.PORT || "3000", 10);
+const PACKAGE_NAME   = process.env.PACKAGE_NAME || "com.tucompania.nightscout-glucose";
+const PORT           = parseInt(process.env.PORT || "3000", 10);
 const MENTRAOS_API_KEY = process.env.MENTRAOS_API_KEY;
 
 if (!MENTRAOS_API_KEY) {
-  console.error("❌ MENTRAOS_API_KEY environment variable is required");
+  console.error("❌ MENTRAOS_API_KEY is required");
   process.exit(1);
 }
 
 const UNITS = { MGDL: "mg/dL", MMOL: "mmol/L" };
+const CRITICAL_THRESHOLDS = { LOW_MGDL: 70, HIGH_MGDL: 250 };
 
-// Umbrales críticos de seguridad (hard-coded para protección del usuario)
-const CRITICAL_THRESHOLDS = {
-  LOW_MGDL: 70,
-  HIGH_MGDL: 250
-};
+/* ------ Dimensiones seguras y layout ------ */
+const BMP_WIDTH  = 526;
+const BMP_HEIGHT = 128;
+const SAFE_TOP = 16, SAFE_BOTTOM = 12, SAFE_LEFT = 10, SAFE_RIGHT = 10;
 
-// --- Dimensiones de bitmaps optimizadas para G1B ---
-const BMP_WIDTH = 576;
-const BMP_HEIGHT = 135;
-
-// Zona de layout (texto a la izquierda, sparkline a la derecha)
 const LAYOUT = {
-  padding: 8,
-  // Ajuste las coordenadas Y para bajar el contenido
-  text: { x: 12, y: 55, line: 10, scale: 2 }, 
-  spark: { x: 280, y: 40, width: 576 - 280 - 8, height: 90 }, // ~288px de ancho
-  // Habilita el modo de depuración para dibujar bordes de los elementos
-  DEBUG: false,
+  text:  { x: SAFE_LEFT, y: SAFE_TOP + 2, scale: 2 },
+  spark: {
+    x: Math.floor(BMP_WIDTH * 0.48),
+    y: SAFE_TOP + 2,
+    width: BMP_WIDTH - Math.floor(BMP_WIDTH * 0.48) - SAFE_RIGHT,
+    height: BMP_HEIGHT - (SAFE_TOP + 2) - SAFE_BOTTOM - 1,
+  }
 };
 
+const MIN_HISTORY_FOR_SPARKLINE = 6;
+
+/* ===================================================== */
 class NightscoutMentraApp extends AppServer {
   constructor(opts) {
     super(opts);
     this.sessions = new Map();
     this.alertHistory = new Map();
-    this.headUpLastShown = new Map();
     this.glucoseHistory = new Map();
-    this.headUpTimeout = new Map(); // Para controlar el auto-ocultado
+    this.lastHeadUp = new Map();
+    this.headUpLastShown = new Map();
   }
 
-  /* ---------------- helpers ---------------- */
-  parseSlicerValue(val, fallback) {
-    const n = (typeof val === 'object' && val !== null) ? parseFloat(val.value) : parseFloat(val);
-    return Number.isFinite(n) ? n : fallback;
+  /* ---------- Helpers de settings/validación ---------- */
+  parseSlicerValue(v, fb) {
+    const n = (typeof v === "object" && v) ? parseFloat(v.value) : parseFloat(v);
+    return Number.isFinite(n) ? n : fb;
   }
-  validateSlicerValue(val, min, max, fallback) {
-    const v = this.parseSlicerValue(val, fallback);
-    if (!Number.isFinite(v)) return fallback;
-    return Math.max(min, Math.min(max, v));
+  validateSlicerValue(v, min, max, fb) {
+    const n = this.parseSlicerValue(v, fb);
+    if (!Number.isFinite(n)) return fb;
+    return Math.max(min, Math.min(max, n));
   }
-
-  // --- Helpers de sincronización mg/dL <-> mmol/L ---
   syncFromMmolToMg(mmol, min = 40, max = 400) {
     const mg = Math.round((Number(mmol) || 0) * 18);
     return Math.max(min, Math.min(max, mg));
@@ -82,364 +78,218 @@ class NightscoutMentraApp extends AppServer {
     const mmol = Number(((Number(mg) || 0) / 18).toFixed(1));
     return Math.max(min, Math.min(max, mmol));
   }
-  isDifferent(a, b, tol = 0.1) {
-    return Math.abs(Number(a) - Number(b)) > tol;
+  isDifferent(a,b,t=0.1){return Math.abs(Number(a)-Number(b))>t;}
+
+  getAlertLimits(s) {
+    if (s.units === UNITS.MMOL) return { low: Math.round(s.low_alert_mmol*18), high: Math.round(s.high_alert_mmol*18) };
+    return { low: Math.round(s.low_alert_mg), high: Math.round(s.high_alert_mg) };
+  }
+  alertLimitsChanged(a,b){
+    if(!a) return true;
+    return a.low_alert_mg!==b.low_alert_mg || a.high_alert_mg!==b.high_alert_mg ||
+           a.low_alert_mmol!==b.low_alert_mmol || a.high_alert_mmol!==b.high_alert_mmol ||
+           a.units!==b.units;
   }
 
-  /* ---------------- Util para alarmas ---------------- */
-  getAlertLimits(settings) {
-    if (settings.units === UNITS.MMOL) {
-      return { low: Math.round(settings.low_alert_mmol * 18), high: Math.round(settings.high_alert_mmol * 18) };
-    }
-    return { low: Math.round(settings.low_alert_mg), high: Math.round(settings.high_alert_mg) };
+  /* ----------------- Motor BMP 1-bit ----------------- */
+  createBitmapCanvas(w,h){const bpr=Math.ceil(w/8);return new Uint8Array(bpr*h).fill(0);}
+  setPixel(b,w,h,x,y,on=true){
+    if(x<0||x>=w||y<0||y>=h) return;
+    const bpr=Math.ceil(w/8), i=y*bpr+Math.floor(x/8), bit=7-(x%8);
+    if(on) b[i]|=(1<<bit); else b[i]&=~(1<<bit);
   }
-
-  alertLimitsChanged(oldSettings, newSettings) {
-    if (!oldSettings) return false;
-    return (
-      oldSettings.low_alert_mg !== newSettings.low_alert_mg ||
-      oldSettings.high_alert_mg !== newSettings.high_alert_mg ||
-      oldSettings.low_alert_mmol !== newSettings.low_alert_mmol ||
-      oldSettings.high_alert_mmol !== newSettings.high_alert_mmol ||
-      oldSettings.units !== newSettings.units
-    );
-  }
-
-  /* ---------------- Motor BMP + Fuente 5×7 ---------------- */
-
-  createBitmapCanvas(width, height) {
-    const bytesPerRow = Math.ceil(width / 8);
-    const totalBytes = bytesPerRow * height;
-    return new Uint8Array(totalBytes).fill(0);
-  }
-
-  setPixel(bitmap, width, height, x, y, white = true) {
-    if (x < 0 || x >= width || y < 0 || y >= height) return;
-    const bytesPerRow = Math.ceil(width / 8);
-    const byteIndex = y * bytesPerRow + Math.floor(x / 8);
-    const bitIndex = 7 - (x % 8);
-    if (byteIndex < 0 || byteIndex >= bitmap.length) return;
-    if (white) bitmap[byteIndex] |= (1 << bitIndex);
-    else bitmap[byteIndex] &= ~(1 << bitIndex);
-  }
-
-  drawLine(bitmap, width, height, x1, y1, x2, y2) {
-    let dx = Math.abs(x2 - x1), sx = x1 < x2 ? 1 : -1;
-    let dy = -Math.abs(y2 - y1), sy = y1 < y2 ? 1 : -1;
-    let err = dx + dy, e2;
-    while (true) {
-      this.setPixel(bitmap, width, height, x1, y1, true);
-      if (x1 === x2 && y1 === y2) break;
-      e2 = 2 * err;
-      if (e2 >= dy) { err += dy; x1 += sx; }
-      if (e2 <= dx) { err += dx; y1 += sy; }
+  drawLine(b,w,h,x1,y1,x2,y2){
+    let dx=Math.abs(x2-x1), sx=x1<x2?1:-1;
+    let dy=-Math.abs(y2-y1), sy=y1<y2?1:-1;
+    let err=dx+dy;
+    while(true){
+      this.setPixel(b,w,h,x1,y1,true);
+      if(x1===x2&&y1===y2) break;
+      const e2=2*err;
+      if(e2>=dy){err+=dy; x1+=sx;}
+      if(e2<=dx){err+=dx; y1+=sy;}
     }
   }
-
-  drawRect(bitmap, width, height, x, y, w, h) {
-    this.drawLine(bitmap, width, height, x, y, x + w, y);
-    this.drawLine(bitmap, width, height, x, y + h, x + w, y + h);
-    this.drawLine(bitmap, width, height, x, y, x, y + h);
-    this.drawLine(bitmap, width, height, x + w, y, x + w, y + h);
+  drawRect(b,w,h,x,y,W,H){
+    this.drawLine(b,w,h,x,y,x+W,y);
+    this.drawLine(b,w,h,x,y+H,x+W,y+H);
+    this.drawLine(b,w,h,x,y,x,y+H);
+    this.drawLine(b,w,h,x+W,y,x+W,y+H);
+  }
+  drawCircle(b,w,h,cx,cy,r){
+    for(let x=-r;x<=r;x++) for(let y=-r;y<=r;y++)
+      if(x*x+y*y<=r*r) this.setPixel(b,w,h,cx+x,cy+y,true);
   }
 
-  drawCircle(bitmap, width, height, cx, cy, r) {
-    for (let x = -r; x <= r; x++) {
-      for (let y = -r; y <= r; y++) {
-        if (x * x + y * y <= r * r) this.setPixel(bitmap, width, height, cx + x, cy + y, true);
+  /* ------- Fuente 5x7 compacta (subset útil) ------- */
+  FONT5x7 = (()=>{const m={},d={
+    "0":[30,33,35,37,41,49,30],"1":[0,33,63,1,0,0,0],"2":[35,37,41,41,41,41,49],
+    "3":[34,65,73,73,73,73,54],"4":[12,20,36,36,63,4,4],"5":[114,81,81,81,81,81,78],
+    "6":[30,41,73,73,73,73,6],"7":[64,71,72,80,96,64,64],"8":[54,73,73,73,73,73,54],
+    "9":[48,73,73,73,73,74,60],"A":[63,72,72,72,72,72,63],"B":[63,73,73,73,73,73,54],
+    "C":[30,33,65,65,65,65,34],"D":[63,65,65,65,65,34,28],"E":[63,73,73,73,73,65,65],
+    "F":[63,72,72,72,72,64,64],"G":[30,33,65,73,73,47,14],"H":[63,8,8,8,8,8,63],
+    "I":[0,65,65,63,65,65,0],"J":[2,1,1,1,1,62,0],"L":[63,1,1,1,1,1,1],
+    "N":[63,32,16,8,4,2,63],"O":[30,33,65,65,65,33,30],
+    "P":[63,72,72,72,72,48,0],"R":[63,72,76,74,73,49,0],
+    "S":[50,73,73,73,73,73,38],"T":[64,64,64,63,64,64,64],
+    "U":[62,1,1,1,1,1,62],"V":[60,2,1,1,1,2,60],
+    "W":[62,1,6,24,6,1,62],"X":[34,20,8,8,20,34,0],
+    "Y":[32,16,8,7,8,16,32],"Z":[35,37,41,49,33,33,33],
+    " ":[0,0,0,0,0,0,0],":":[0,0,36,0,36,0,0],"/":[1,2,4,8,16,32,0],"-":[0,0,4,4,4,0,0],
+    ".":[0,0,0,32,0,0,0],
+    "m":[0,31,16,15,16,15,0],"g":[0,12,18,18,14,1,30],"d":[0,15,16,16,16,15,0],
+    "h":[0,63,8,8,8,7,0],"a":[0,12,18,18,18,30,0],"c":[0,12,18,18,18,0,0],
+    "e":[0,12,26,26,18,4,0],"s":[0,20,26,26,18,0,0],
+    "(": [0,0,30,33,0,0,0], ")":[0,0,33,30,0,0,0],
+    "↑":[4,6,5,28,5,6,4],"↓":[16,48,80,15,80,48,16],
+    "→":[0,8,12,126,12,8,0],"↗":[0,6,5,120,0,0,0],"↘":[0,0,0,120,5,6,0],
+    "⇈":[4,6,5,28,5,6,4],"⇊":[16,48,80,15,80,48,16]
+  }; Object.keys(d).forEach(k=>m[k]=d[k]); return m; })();
+
+  drawChar5x7(b,w,h,x,y,ch,scale=1){
+    const g=this.FONT5x7[ch]||this.FONT5x7[" "];
+    for(let r=0;r<7;r++){
+      const row=g[r]||0;
+      for(let c=0;c<5;c++){
+        const on=(row>>(4-c))&1;
+        if(on) for(let dy=0;dy<scale;dy++) for(let dx=0;dx<scale;dx++)
+          this.setPixel(b,w,h,x+c*scale+dx,y+r*scale+dy,true);
       }
     }
+    return 5*scale;
+  }
+  drawString5x7(b,w,h,x,y,txt,scale=1,ls=1){
+    let cur=x; for(const ch of String(txt)){ cur+=this.drawChar5x7(b,w,h,cur,y,ch,scale)+ls; } return cur-x;
+  }
+  bitmapToBase64(bitmap,w,h){
+    const bytesPerRowNoPad=Math.ceil(w/8), rowSize=Math.ceil(w/32)*4, imageSize=rowSize*h, fileSize=62+imageSize;
+    const header=new Uint8Array(62), view=new DataView(header.buffer);
+    header[0]=0x42; header[1]=0x4D; view.setUint32(2,fileSize,true); view.setUint32(10,62,true);
+    view.setUint32(14,40,true); view.setInt32(18,w,true); view.setInt32(22,h,true);
+    view.setUint16(26,1,true); view.setUint16(28,1,true); view.setUint32(30,0,true);
+    view.setUint32(34,imageSize,true); view.setInt32(38,2835,true); view.setInt32(42,2835,true);
+    view.setUint32(46,2,true); view.setUint32(50,2,true);
+    const result=new Uint8Array(fileSize); result.set(header,0);
+    for(let y=0;y<h;y++){ const src=y*bytesPerRowNoPad, dst=62+(h-1-y)*rowSize; result.set(bitmap.subarray(src,src+bytesPerRowNoPad),dst); }
+    return Buffer.from(result.buffer).toString("base64");
   }
 
-  // Fuente 5x7
-  FONT5x7 = (() => {
-    const map = {};
-    const def = (ch, rows) => { map[ch] = rows; };
-    const D = {
-      "0":[0x1E,0x21,0x23,0x25,0x29,0x31,0x1E], "1":[0x00,0x21,0x3F,0x01,0x00,0x00,0x00],
-      "2":[0x23,0x25,0x29,0x29,0x29,0x29,0x31], "3":[0x22,0x41,0x49,0x49,0x49,0x49,0x36],
-      "4":[0x0C,0x14,0x24,0x24,0x3F,0x04,0x04], "5":[0x72,0x51,0x51,0x51,0x51,0x51,0x4E],
-      "6":[0x1E,0x29,0x49,0x49,0x49,0x49,0x06], "7":[0x40,0x47,0x48,0x50,0x60,0x40,0x40],
-      "8":[0x36,0x49,0x49,0x49,0x49,0x49,0x36], "9":[0x30,0x49,0x49,0x49,0x49,0x4A,0x3C],
-      "A":[0x3F,0x48,0x48,0x48,0x48,0x48,0x3F], "B":[0x3F,0x49,0x49,0x49,0x49,0x49,0x36],
-      "C":[0x1E,0x21,0x41,0x41,0x41,0x41,0x22], "D":[0x3F,0x41,0x41,0x41,0x41,0x22,0x1C],
-      "E":[0x3F,0x49,0x49,0x49,0x49,0x41,0x41], "F":[0x3F,0x48,0x48,0x48,0x48,0x40,0x40],
-      "G":[0x1E,0x21,0x41,0x49,0x49,0x2F,0x0E], "H":[0x3F,0x08,0x08,0x08,0x08,0x08,0x3F],
-      "I":[0x00,0x41,0x41,0x3F,0x41,0x41,0x00], "J":[0x02,0x01,0x01,0x01,0x01,0x3E,0x00],
-      "K":[0x3F,0x08,0x14,0x22,0x41,0x00,0x00], "L":[0x3F,0x01,0x01,0x01,0x01,0x01,0x01],
-      "M":[0x3F,0x20,0x10,0x08,0x10,0x20,0x3F], "N":[0x3F,0x20,0x10,0x08,0x04,0x02,0x3F],
-      "O":[0x1E,0x21,0x41,0x41,0x41,0x21,0x1E], "P":[0x3F,0x48,0x48,0x48,0x48,0x30,0x00],
-      "Q":[0x1E,0x21,0x41,0x45,0x42,0x21,0x1E], "R":[0x3F,0x48,0x4C,0x4A,0x49,0x31,0x00],
-      "S":[0x32,0x49,0x49,0x49,0x49,0x49,0x26], "T":[0x40,0x40,0x40,0x3F,0x40,0x40,0x40],
-      "U":[0x3E,0x01,0x01,0x01,0x01,0x01,0x3E], "V":[0x3C,0x02,0x01,0x01,0x01,0x02,0x3C],
-      "W":[0x3E,0x01,0x06,0x18,0x06,0x01,0x3E], "X":[0x22,0x14,0x08,0x08,0x14,0x22,0x00],
-      "Y":[0x20,0x10,0x08,0x07,0x08,0x10,0x20], "Z":[0x23,0x25,0x29,0x31,0x21,0x21,0x21],
-      " ":[0x00,0x00,0x00,0x00,0x00,0x00,0x00], ":":[0x00,0x00,0x24,0x00,0x24,0x00,0x00],
-      "/":[0x01,0x02,0x04,0x08,0x10,0x20,0x00], "-":[0x00,0x00,0x04,0x04,0x04,0x00,0x00],
-      ".":[0x00,0x00,0x00,0x20,0x00,0x00,0x00], "m":[0x00,0x1F,0x10,0x0F,0x10,0x0F,0x00],
-      "g":[0x00,0x0C,0x12,0x12,0x0E,0x01,0x1E], "d":[0x00,0x0F,0x10,0x10,0x10,0x0F,0x00],
-      "L":[0x3F,0x01,0x01,0x01,0x01,0x01,0x01], "h":[0x00,0x3F,0x08,0x08,0x08,0x07,0x00],
-      "a":[0x00,0x0C,0x1A,0x1A,0x12,0x04,0x00], "c":[0x00,0x0C,0x12,0x12,0x12,0x00,0x00],
-      "e":[0x00,0x0C,0x1A,0x1A,0x12,0x04,0x00], "s":[0x00,0x14,0x1A,0x1A,0x12,0x00,0x00],
-      "(": [0x00,0x00,0x1E,0x21,0x00,0x00,0x00], ")": [0x00,0x00,0x21,0x1E,0x00,0x00,0x00],
-      "↑":[0x04,0x06,0x05,0x1C,0x05,0x06,0x04], "↓":[0x10,0x30,0x50,0x0F,0x50,0x30,0x10],
-      "→":[0x00,0x08,0x0C,0x7E,0x0C,0x08,0x00], "↗":[0x00,0x06,0x05,0x78,0x00,0x00,0x00],
-      "↘":[0x00,0x00,0x00,0x78,0x05,0x06,0x00], "⇈":[0x04,0x06,0x05,0x1C,0x05,0x06,0x04],
-      "⇊":[0x10,0x30,0x50,0x0F,0x50,0x30,0x10]
-    };
-    Object.keys(D).forEach(k => def(k, D[k]));
-    return map;
-  })();
-
-  drawChar5x7(bitmap, width, height, x, y, ch, scale = 1) {
-    const glyph = this.FONT5x7[ch] || this.FONT5x7[" "];
-    for (let row = 0; row < 7; row++) {
-      const rowBits = glyph[row] || 0;
-      for (let col = 0; col < 5; col++) {
-        const on = (rowBits >> (4 - col)) & 1;
-        if (on) {
-          for (let dy = 0; dy < scale; dy++) {
-            for (let dx = 0; dx < scale; dx++) {
-              this.setPixel(bitmap, width, height, x + col * scale + dx, y + row * scale + dy, true);
-            }
-          }
-        }
-      }
-    }
-    return 5 * scale;
-  }
-
-  drawString5x7(bitmap, width, height, x, y, text, scale = 1, letterSpacing = 1) {
-    let cursor = x;
-    for (const ch of String(text)) {
-      cursor += this.drawChar5x7(bitmap, width, height, cursor, y, ch, scale) + letterSpacing;
-    }
-    return cursor - x;
-  }
-
-  bitmapToBase64(bitmap, width, height) {
-    const bytesPerRowNoPad = Math.ceil(width / 8);
-    const rowSize = Math.ceil(width / 32) * 4;
-    const imageSize = rowSize * height;
-    const fileSize = 62 + imageSize;
-    const header = new Uint8Array(62);
-    const view = new DataView(header.buffer);
-    header[0] = 0x42; header[1] = 0x4D;
-    view.setUint32(2, fileSize, true);
-    view.setUint32(6, 0, true);
-    view.setUint32(10, 62, true);
-    view.setUint32(14, 40, true);
-    view.setInt32(18, width, true);
-    view.setInt32(22, height, true);
-    view.setUint16(26, 1, true);
-    view.setUint16(28, 1, true);
-    view.setUint32(30, 0, true);
-    view.setUint32(34, imageSize, true);
-    view.setInt32(38, 2835, true);
-    view.setInt32(42, 2835, true);
-    view.setUint32(46, 2, true);
-    view.setUint32(50, 2, true);
-    header[54] = 0x00; header[55] = 0x00; header[56] = 0x00; header[57] = 0x00;
-    header[58] = 0xFF; header[59] = 0xFF; header[60] = 0xFF; header[61] = 0x00;
-    const result = new Uint8Array(fileSize);
-    result.set(header, 0);
-    for (let y = 0; y < height; y++) {
-      const srcOffset = y * bytesPerRowNoPad;
-      const dstOffset = 62 + (height - 1 - y) * rowSize;
-      result.set(bitmap.subarray(srcOffset, srcOffset + bytesPerRowNoPad), dstOffset);
-    }
-    return Buffer.from(result.buffer).toString('base64');
-  }
-
-  /* ---------------- Sparkline Chart Generation (optimizada) ---------------- */
-
-  // Downsample simple (mantén como máximo N puntos equiespaciados)
-  downsample(points, maxPoints) {
-    if (!points || points.length <= maxPoints) return points || [];
-    const out = [];
-    const step = (points.length - 1) / (maxPoints - 1);
-    for (let i = 0; i < maxPoints; i++) {
-      out.push(points[Math.round(i * step)]);
-    }
+  /* ---------------- Sparkline ---------------- */
+  downsample(points,maxPoints){
+    if(!points||points.length<=maxPoints) return points||[];
+    const out=[], step=(points.length-1)/(maxPoints-1);
+    for(let i=0;i<maxPoints;i++) out.push(points[Math.round(i*step)]);
     return out;
   }
-
-  drawAlertZones(bitmap, width, height, rect, limits, minValue, maxValue) {
-    const { x, y, w, h } = rect;
-    const range = maxValue - minValue || 1;
-    // LOW (rayado inferior)
-    if (limits.low > minValue) {
-      const lowY = y + h - Math.round(((limits.low - minValue) / range) * h);
-      for (let yy = lowY; yy < y + h; yy += 3) {
-        for (let xx = x; xx < x + w; xx += 6) this.setPixel(bitmap, width, height, xx, yy, true);
-      }
+  drawAlertZones(b,w,h,rect,limits,min,max){
+    const {x,y,W,H}=rect, range=max-min||1;
+    if(limits.low>min){
+      const lowY=y+H-Math.round(((limits.low-min)/range)*H);
+      for(let yy=lowY; yy<y+H; yy+=3) for(let xx=x; xx<x+W; xx+=6) this.setPixel(b,w,h,xx,yy,true);
     }
-    // HIGH (rayado superior)
-    if (limits.high < maxValue) {
-      const highY = y + h - Math.round(((limits.high - minValue) / range) * h);
-      for (let yy = y; yy < highY; yy += 3) {
-        for (let xx = x; xx < x + w; xx += 6) this.setPixel(bitmap, width, height, xx, yy, true);
-      }
+    if(limits.high<max){
+      const highY=y+H-Math.round(((limits.high-min)/range)*H);
+      for(let yy=y; yy<highY; yy+=3) for(let xx=x; xx<x+W; xx+=6) this.setPixel(b,w,h,xx,yy,true);
     }
   }
 
-  generateSparklineBitmap(history, settings, canvasW = BMP_WIDTH, canvasH = BMP_HEIGHT) {
-    const bitmap = this.createBitmapCanvas(canvasW, canvasH);
-    const sx = LAYOUT.spark.x, sy = LAYOUT.spark.y, sw = LAYOUT.spark.width, sh = LAYOUT.spark.height;
+  generateSparklineInto(bitmap, history, settings){
+    const w=BMP_WIDTH,h=BMP_HEIGHT;
+    const sx=LAYOUT.spark.x, sy=LAYOUT.spark.y, sw=LAYOUT.spark.width, sh=LAYOUT.spark.height;
 
-    const points = (history || []).map(h => ({ sgv: h.sgv }));
-    const ds = this.downsample(points, 64); // 64 puntos máx para reducir CPU
-    if (ds.length < 2) return this.bitmapToBase64(bitmap, canvasW, canvasH);
+    const pts = this.downsample((history||[]).map(p=>({sgv:p.sgv})), 64);
+    if(pts.length<2) return;
 
-    const values = ds.map(p => p.sgv);
-    const minValue = Math.min(...values);
-    const maxValue = Math.max(...values);
-    const range = maxValue - minValue || 1;
+    const vals=pts.map(p=>p.sgv), min=Math.min(...vals), max=Math.max(...vals), range=max-min||1;
 
-    // Marco de sparkline
-    this.drawRect(bitmap, canvasW, canvasH, sx, sy, sw - 1, sh - 1);
+    this.drawRect(bitmap,w,h,sx,sy,sw-1,sh-1);
+    const limits=this.getAlertLimits(settings);
+    this.drawAlertZones(bitmap,w,h,{x:sx+1,y:sy+1,W:sw-2,H:sh-2},limits,min,max);
 
-    // Zonas LOW/HIGH (rayadas)
-    const limits = this.getAlertLimits(settings);
-    this.drawAlertZones(bitmap, canvasW, canvasH, { x: sx + 1, y: sy + 1, w: sw - 2, h: sh - 2 }, limits, minValue, maxValue);
-
-    // Línea
-    const n = ds.length;
-    for (let i = 0; i < n - 1; i++) {
-      const x1 = sx + 1 + Math.round(i * (sw - 3) / (n - 1));
-      const y1 = sy + 1 + (sh - 3) - Math.round(((ds[i].sgv - minValue) / range) * (sh - 3));
-      const x2 = sx + 1 + Math.round((i + 1) * (sw - 3) / (n - 1));
-      const y2 = sy + 1 + (sh - 3) - Math.round(((ds[i + 1].sgv - minValue) / range) * (sh - 3));
-      this.drawLine(bitmap, canvasW, canvasH, x1, y1, x2, y2);
+    const n=pts.length;
+    for(let i=0;i<n-1;i++){
+      const x1=sx+1+Math.round(i*(sw-3)/(n-1));
+      const y1=sy+1+(sh-3)-Math.round(((pts[i].sgv-min)/range)*(sh-3));
+      const x2=sx+1+Math.round((i+1)*(sw-3)/(n-1));
+      const y2=sy+1+(sh-3)-Math.round(((pts[i+1].sgv-min)/range)*(sh-3));
+      this.drawLine(bitmap,w,h,x1,y1,x2,y2);
     }
-
-    // Punto final
-    const lastX = sx + 1 + Math.round((n - 1) * (sw - 3) / (n - 1));
-    const lastY = sy + 1 + (sh - 3) - Math.round(((ds[n - 1].sgv - minValue) / range) * (sh - 3));
-    this.drawCircle(bitmap, canvasW, canvasH, lastX, lastY, 2);
-
-    return this.bitmapToBase64(bitmap, canvasW, canvasH);
+    const lastX=sx+1+Math.round((n-1)*(sw-3)/(n-1));
+    const lastY=sy+1+(sh-3)-Math.round(((pts[n-1].sgv-min)/range)*(sh-3));
+    this.drawCircle(bitmap,w,h,lastX,lastY,2);
   }
 
-  /* ---------------- Vista combinada (texto + sparkline en un BMP) ---------------- */
+  /* --------------- Texto + utilidades --------------- */
+  getTrendArrow(d){const m={'DoubleUp':'⇈','SingleUp':'↑','FortyFiveUp':'↗','Flat':'→','FortyFiveDown':'↘','SingleDown':'↓','DoubleDown':'⇊','NONE':'-','NOT COMPUTABLE':'→'}; return m[d]||'→';}
+  convertToDisplay(mg,unit){return unit===UNITS.MMOL? (mg/18).toFixed(1) : Math.round(mg);}
+  getLanguageSettings(s){return (s.language==='es')?{locale:'es-ES',timezone:'Europe/Madrid'}:{locale:'en-US',timezone:'America/New_York'};}
+  validateTimezone(tz){const ok=['Europe/Madrid','Atlantic/Canary','Europe/London','Europe/Paris','Europe/Berlin','Europe/Rome','America/New_York','America/Chicago','America/Los_Angeles','America/Mexico_City','UTC']; return ok.includes(tz)?tz:'UTC';}
 
-  getTrendArrow(dir) {
-    const map = {
-      'DoubleUp': '⇈', 'SingleUp': '↑', 'FortyFiveUp': '↗',
-      'Flat': '→', 'FortyFiveDown': '↘', 'SingleDown': '↓', 'DoubleDown': '⇊',
-      'NONE': '-', 'NOT COMPUTABLE': '→',
-    };
-    return map[dir] || '→';
-  }
-  convertToDisplay(mgdlValue, targetUnit) {
-    if (targetUnit === UNITS.MMOL) return (mgdlValue / 18).toFixed(1);
-    return Math.round(mgdlValue);
-  }
-  getLanguageSettings(settings) {
-    const langMap = {
-      es: { locale: 'es-ES', timezone: 'Europe/Madrid' },
-      en: { locale: 'en-US', timezone: 'America/New_York' },
-    };
-    return langMap[settings.language] || langMap['en'];
-  }
-  validateTimezone(tz) {
-    const valid = [
-      'Europe/Madrid', 'Atlantic/Canary', 'Europe/London', 'Europe/Paris',
-      'Europe/Berlin', 'Europe/Rome', 'America/New_York', 'America/Chicago',
-      'America/Los_Angeles', 'America/Mexico_City', 'America/Argentina/Buenos_Aires',
-      'America/Sao_Paulo', 'Asia/Tokyo', 'Australia/Sydney', 'UTC',
-    ];
-    return valid.includes(tz) ? tz : 'UTC';
+  async formatLines(reading, settings){
+    const display=this.convertToDisplay(reading.sgv, settings.units);
+    const trend=this.getTrendArrow(reading.direction);
+    const lang=this.getLanguageSettings(settings);
+    const tz=settings.timezone?this.validateTimezone(settings.timezone):lang.timezone;
+    const t=new Date(reading.date).toLocaleTimeString(lang.locale,{timeZone:tz,hour:'2-digit',minute:'2-digit'});
+    const mins=Math.floor((Date.now()-reading.date)/60000);
+    const ago = mins<=1 ? (settings.language==='es'?'ahora':'now') :
+      (settings.language==='es'?`hace ${mins}m`:`${mins}m ago`);
+    return [`${display} ${settings.units} ${trend}`, `${t} (${ago})`];
   }
 
-  async formatForG1(data, settings) {
-    const display = this.convertToDisplay(data.sgv, settings.units);
-    const trend = this.getTrendArrow(data.direction);
-    const langSettings = this.getLanguageSettings(settings);
-    const timezone = settings.timezone ? this.validateTimezone(settings.timezone) : langSettings.timezone;
-    const readingTime = new Date(data.date);
-    const timeStr = readingTime.toLocaleTimeString(langSettings.locale, {
-      timeZone: timezone, hour: '2-digit', minute: '2-digit'
-    });
-    const minutesAgo = Math.floor((Date.now() - data.date) / 60000);
-    const lang = settings.language || 'en';
-    const timeAgo = minutesAgo <= 1 ? (lang === 'es' ? 'ahora' : 'now') : (lang === 'es' ? `hace ${minutesAgo}m` : `${minutesAgo}m ago`);
-    return { line1: `${display} ${settings.units} ${trend}`, line2: `${timeStr} (${timeAgo})` };
+  generateCombinedBitmap(history, reading, settings){
+    const b=this.createBitmapCanvas(BMP_WIDTH,BMP_HEIGHT);
+
+    // Texto
+    const [l1,l2] = (()=>{ // sync formatter para evitar await
+      const disp=this.convertToDisplay(reading.sgv, settings.units);
+      const tr=this.getTrendArrow(reading.direction);
+      const lang=this.getLanguageSettings(settings);
+      const tz=settings.timezone?this.validateTimezone(settings.timezone):lang.timezone;
+      const t=new Date(reading.date).toLocaleTimeString(lang.locale,{timeZone:tz,hour:'2-digit',minute:'2-digit'});
+      const mins=Math.floor((Date.now()-reading.date)/60000);
+      const ago=mins<=1?(settings.language==='es'?'ahora':'now'):(settings.language==='es'?`hace ${mins}m`:`${mins}m ago`);
+      return [`${disp} ${settings.units} ${tr}`, `${t} (${ago})`];
+    })();
+
+    const s2=LAYOUT.text.scale;
+    this.drawString5x7(b,BMP_WIDTH,BMP_HEIGHT,LAYOUT.text.x,LAYOUT.text.y,l1,s2,1);
+    this.drawString5x7(b,BMP_WIDTH,BMP_HEIGHT,LAYOUT.text.x,LAYOUT.text.y+9*s2+6,l2,1,1);
+
+    // Sparkline si hay historial suficiente
+    if ((history||[]).length >= 2) this.generateSparklineInto(b, history, settings);
+
+    return this.bitmapToBase64(b,BMP_WIDTH,BMP_HEIGHT);
   }
 
-  generateCombinedBitmap(history, lastReading, settings) {
-    const bitmap = this.createBitmapCanvas(BMP_WIDTH, BMP_HEIGHT);
-    const lang = settings.language || 'en';
-    
-    // --- DEBUG: Dibuja un borde de depuración para visualizar el bitmap y las zonas de layout ---
-    if (LAYOUT.DEBUG) {
-        this.drawRect(bitmap, BMP_WIDTH, BMP_HEIGHT, 0, 0, BMP_WIDTH - 1, BMP_HEIGHT - 1);
-        const { x, y, width, height } = LAYOUT.spark;
-        this.drawRect(bitmap, BMP_WIDTH, BMP_HEIGHT, x, y, width - 1, height - 1);
-    }
-
-    // Lógica de fallback: si no hay datos de lectura, muestra un mensaje de estado
-    if (!lastReading) {
-      const statusMessage = lang === 'es' ? "Cargando..." : "Loading...";
-      const x = Math.floor((BMP_WIDTH - statusMessage.length * (5 * LAYOUT.text.scale + 1)) / 2);
-      this.drawString5x7(bitmap, BMP_WIDTH, BMP_HEIGHT, x, LAYOUT.text.y, statusMessage, LAYOUT.text.scale, 1);
-      return this.bitmapToBase64(bitmap, BMP_WIDTH, BMP_HEIGHT);
-    }
-    
-    // Texto principal
-    const { line1, line2 } = { ...{ line1: '', line2: '' }, ...((() => {
-      // utilizamos la versión sync del formatter (mismos cálculos pero inline)
-      const display = this.convertToDisplay(lastReading.sgv, settings.units);
-      const trend = this.getTrendArrow(lastReading.direction);
-      const langSettings = this.getLanguageSettings(settings);
-      const timezone = settings.timezone ? this.validateTimezone(settings.timezone) : langSettings.timezone;
-      const readingTime = new Date(lastReading.date);
-      const timeStr = readingTime.toLocaleTimeString(langSettings.locale, {
-        timeZone: timezone, hour: '2-digit', minute: '2-digit'
-      });
-      const minutesAgo = Math.floor((Date.now() - lastReading.date) / 60000);
-      const timeAgo = minutesAgo <= 1 ? (lang === 'es' ? 'ahora' : 'now') : (lang === 'es' ? `${minutesAgo}m ago` : `${minutesAgo}m ago`);
-      return { line1: `${display} ${settings.units} ${trend}`, line2: `${timeStr} (${timeAgo})` };
-    })()) };
-    // Render texto (escala 2 para línea 1, escala 1 para línea 2)
-    const s2 = LAYOUT.text.scale;
-    this.drawString5x7(bitmap, BMP_WIDTH, BMP_HEIGHT, LAYOUT.text.x, LAYOUT.text.y, line1, s2, 1);
-    this.drawString5x7(bitmap, BMP_WIDTH, BMP_HEIGHT, LAYOUT.text.x, LAYOUT.text.y + 9 * s2 + 6, line2, 1, 1);
-
-    // Sparkline a la derecha (usa el mismo motor que la versión independiente)
-    const points = this.downsample((history || []).map(h => ({ sgv: h.sgv })), 64);
-    if (points.length >= 2) {
-      const values = points.map(p => p.sgv);
-      const minValue = Math.min(...values);
-      const maxValue = Math.max(...values);
-      const range = maxValue - minValue || 1;
-      const sx = LAYOUT.spark.x, sy = LAYOUT.spark.y, sw = LAYOUT.spark.width, sh = LAYOUT.spark.height;
-      // Marco
-      this.drawRect(bitmap, BMP_WIDTH, BMP_HEIGHT, sx, sy, sw - 1, sh - 1);
-      // Zonas
-      const limits = this.getAlertLimits(settings);
-      this.drawAlertZones(bitmap, BMP_WIDTH, BMP_HEIGHT, { x: sx + 1, y: sy + 1, w: sw - 2, h: sh - 2 }, limits, minValue, maxValue);
-      // Línea
-      const n = points.length;
-      for (let i = 0; i < n - 1; i++) {
-        const x1 = sx + 1 + Math.round(i * (sw - 3) / (n - 1));
-        const y1 = sy + 1 + (sh - 3) - Math.round(((points[i].sgv - minValue) / range) * (sh - 3));
-        const x2 = sx + 1 + Math.round((i + 1) * (sw - 3) / (n - 1));
-        const y2 = sy + 1 + (sh - 3) - Math.round(((points[i + 1].sgv - minValue) / range) * (sh - 3));
-        this.drawLine(bitmap, BMP_WIDTH, BMP_HEIGHT, x1, y1, x2, y2);
-      }
-      // Punto final
-      const lastX = sx + 1 + Math.round((n - 1) * (sw - 3) / (n - 1));
-      const lastY = sy + 1 + (sh - 3) - Math.round(((points[n - 1].sgv - minValue) / range) * (sh - 3));
-      this.drawCircle(bitmap, BMP_WIDTH, BMP_HEIGHT, lastX, lastY, 2);
-    }
-    return this.bitmapToBase64(bitmap, BMP_WIDTH, BMP_HEIGHT);
+  /* --------------- Wrappers y limpieza --------------- */
+  async safeShowText(session, text, ms=3000){
+    try { await session.layouts?.showTextWall?.(text, { durationMs: ms }); }
+    catch(e){ console.error('[safeShowText]', e?.stack||e); }
   }
-
-  /* ---------------- settings (lectura directa del store) ---------------- */
-  async getUserSettings(session) {
+  async safeShowBitmap(session, base64, ms=3000){
+    try { await session.layouts?.showBitmapView?.(base64, { durationMs: ms }); }
+    catch(e){ console.error('[safeShowBitmap]', e?.stack||e); }
+  }
+  async showBlank(session, ms=220){
     try {
-      const [ url, token, updateInterval, lowMg, highMg, lowMmol, highMmol, alertsEnabled, language, timezone, units, enable_head_up_display, enable_sparkline_display, display_duration_ms, dashboard_duration_ms, alert_duration_ms ] = await Promise.all([
+      const b=this.createBitmapCanvas(BMP_WIDTH,BMP_HEIGHT);
+      const base64=this.bitmapToBase64(b,BMP_WIDTH,BMP_HEIGHT);
+      await this.safeShowBitmap(session, base64, ms);
+    } catch(_) {}
+  }
+
+  /* -------------------- Settings -------------------- */
+  async getUserSettings(session){
+    try{
+      const [
+        url, token, updateInterval,
+        lowMg, highMg, lowMmol, highMmol,
+        alertsEnabled, language, timezone, units,
+        enable_head_up_display, enable_sparkline_display,
+        display_duration_ms, dashboard_duration_ms, alert_duration_ms
+      ] = await Promise.all([
         session.settings.get('nightscout_url'),
         session.settings.get('nightscout_token'),
         session.settings.get('update_interval'),
@@ -458,279 +308,339 @@ class NightscoutMentraApp extends AppServer {
         session.settings.get('alert_duration_ms'),
       ]);
 
-      const settings = {
-        nightscout_url: url,
-        nightscout_token: token,
-        update_interval: this.validateSlicerValue(updateInterval, 1, 60, 5),
-        low_alert_mg: this.validateSlicerValue(lowMg, 40, 100, 80),
-        high_alert_mg: this.validateSlicerValue(highMg, 150, 400, 180),
-        low_alert_mmol: this.validateSlicerValue(lowMmol, 2.2, 5.5, 4.4),
-        high_alert_mmol: this.validateSlicerValue(highMmol, 8.3, 22.2, 10.0),
-        alerts_enabled: alertsEnabled === true,
-        language: language || 'en',
-        timezone: timezone || '',
+      const res = {
+        nightscoutUrl: String(url||'').trim(),
+        nightscoutToken: String(token||'').trim(),
+        updateInterval: this.parseSlicerValue(updateInterval, 5),
+        low_alert_mg: this.validateSlicerValue(lowMg, 40, 90, 70),
+        high_alert_mg: this.validateSlicerValue(highMg, 180, 400, 250),
+        low_alert_mmol: this.validateSlicerValue(lowMmol, 2, 5, 3.9),
+        high_alert_mmol: this.validateSlicerValue(highMmol, 8, 30, 13.9),
+        alertsEnabled: (alertsEnabled===true||alertsEnabled==='true'||alertsEnabled===1||alertsEnabled==='1'),
+        language: language || 'es',
+        timezone: timezone || null,
         units: units || UNITS.MGDL,
-        display_duration_ms: this.validateSlicerValue(display_duration_ms, 1, 60, 30) * 1000,
-        dashboard_duration_ms: this.validateSlicerValue(dashboard_duration_ms, 1, 60, 30) * 1000,
-        alert_duration_ms: this.validateSlicerValue(alert_duration_ms, 1, 60, 30) * 1000,
+        enable_head_up_display: (enable_head_up_display===true||enable_head_up_display==='true'||enable_head_up_display===1||enable_head_up_display==='1'),
+        enable_sparkline_display: (enable_sparkline_display===true||enable_sparkline_display==='true'||enable_sparkline_display===1||enable_sparkline_display==='1'),
+        display_duration_ms: this.validateSlicerValue(display_duration_ms, 1000, 30000, 5000),
+        dashboard_duration_ms: this.validateSlicerValue(dashboard_duration_ms, 1000, 30000, 10000),
+        alert_duration_ms: this.validateSlicerValue(alert_duration_ms, 5000, 60000, 15000),
       };
-      
-      // La configuración de los switches es un caso especial
-      const [enable_head_up_display_obj, enable_sparkline_display_obj] = await Promise.all([
-          session.settings.get('enable_head_up_display'),
-          session.settings.get('enable_sparkline_display'),
-      ]);
-      settings.enable_head_up_display = (typeof enable_head_up_display_obj === 'object' && enable_head_up_display_obj !== null) ? enable_head_up_display_obj.value : enable_head_up_display_obj;
-      settings.enable_sparkline_display = (typeof enable_sparkline_display_obj === 'object' && enable_sparkline_display_obj !== null) ? enable_sparkline_display_obj.value : enable_sparkline_display_obj;
 
-
-      if (!settings.nightscout_url) {
-        throw new Error('Nightscout URL no está configurada.');
-      }
-      return settings;
-    } catch (e) {
-      console.error('Error al obtener la configuración del usuario:', e);
-      throw e;
-    }
-  }
-
-  /* ---------------- Handlers de eventos de MentraOS ---------------- */
-  async onHeadPosition(session) {
-    const userId = session.userId;
-    const { enable_head_up_display, display_duration_ms } = await this.getUserSettings(session);
-
-    if (enable_head_up_display) {
-      const now = Date.now();
-      const lastShown = this.headUpLastShown.get(userId) || 0;
-      
-      // La lógica del onHeadPosition se activa cuando levantas la cabeza
-      // Si el display ya está activo y dentro del tiempo de visualización, no hacemos nada.
-      // Si el display está oculto o ha expirado, lo mostramos.
-      if (now - lastShown > display_duration_ms) {
-        this.headUpLastShown.set(userId, now);
-
-        // Limpia el temporizador anterior si existe para evitar conflictos
-        if (this.headUpTimeout.has(userId)) {
-          clearTimeout(this.headUpTimeout.get(userId));
+      // Sincroniza límites entre unidades
+      try {
+        if (res.units===UNITS.MMOL){
+          const mgL=this.syncFromMmolToMg(res.low_alert_mmol);
+          const mgH=this.syncFromMmolToMg(res.high_alert_mmol);
+          if (this.isDifferent(res.low_alert_mg,mgL)||this.isDifferent(res.high_alert_mg,mgH)){
+            await session.settings.set('low_alert_mg', mgL);
+            await session.settings.set('high_alert_mg', mgH);
+            res.low_alert_mg=mgL; res.high_alert_mg=mgH;
+          }
+        } else {
+          const mmolL=this.syncFromMgToMmol(res.low_alert_mg);
+          const mmolH=this.syncFromMgToMmol(res.high_alert_mg);
+          if (this.isDifferent(res.low_alert_mmol,mmolL)||this.isDifferent(res.high_alert_mmol,mmolH)){
+            await session.settings.set('low_alert_mmol', mmolL);
+            await session.settings.set('high_alert_mmol', mmolH);
+            res.low_alert_mmol=mmolL; res.high_alert_mmol=mmolH;
+          }
         }
+      } catch(e){ session.logger?.debug?.('sync fail', {e:e?.message}); }
 
-        // Establece un nuevo temporizador para ocultar el bitmap después de `display_duration_ms`
-        this.headUpTimeout.set(userId, setTimeout(async () => {
-          await this.render(session, { forceHide: true });
-          this.headUpTimeout.delete(userId);
-        }, display_duration_ms));
-
-        // Renderiza el bitmap inmediatamente para mostrarlo
-        await this.render(session, { forceShow: true });
-      }
-    }
-  }
-  
-  async onDashboardExit(session) {
-      // Oculta el HUD cuando el usuario sale del dashboard
-      await this.render(session, { forceHide: true });
-  }
-
-  async onSettingsUpdated(session) {
-    const userId = session.userId;
-    const settings = await this.getUserSettings(session);
-    this.sessions.set(userId, { ...this.sessions.get(userId), settings });
-    this.log(session, 'Configuración actualizada');
-    await this.render(session, { forceShow: false });
-  }
-
-  async onAppReady(session) {
-    this.log(session, "App ready");
-  }
-
-  async onAppStart(session) {
-    const userId = session.userId;
-    this.sessions.set(userId, { session, userId, settings: {} });
-    try {
-      const settings = await this.getUserSettings(session);
-      this.sessions.set(userId, { ...this.sessions.get(userId), settings });
-      this.log(session, 'App iniciada. Configuración cargada.');
-      await this.render(session);
-    } catch (e) {
-      this.log(session, `Error al iniciar: ${e.message}`);
-    }
-  }
-  async onAppExit(session) {
-    const userId = session.userId;
-    this.sessions.delete(userId);
-    this.alertHistory.delete(userId);
-    this.headUpLastShown.delete(userId);
-    this.glucoseHistory.delete(userId);
-    if (this.headUpTimeout.has(userId)) {
-      clearTimeout(this.headUpTimeout.get(userId));
-      this.headUpTimeout.delete(userId);
-    }
-    this.log(session, "App cerrada");
-  }
-  
-  async render(session, { forceHide = false, forceShow = false } = {}) {
-    const userId = session.userId;
-    const { enable_head_up_display, display_duration_ms } = await this.getUserSettings(session);
-    
-    // Si no está activado, o si se fuerza el ocultamiento, oculta el bitmap
-    if (forceHide || !enable_head_up_display || !session.session) {
-      return session.sendBitmap({
-        bitmap: null,
-        position: 'HeadUpDisplay',
-        id: 'glucose-combined',
-      });
-    }
-
-    // Lógica para mostrar el bitmap
-    const now = Date.sno();
-    const lastShown = this.headUpLastShown.get(userId) || 0;
-    const isShowingDueToHeadUp = (now - lastShown) <= display_duration_ms;
-    
-    if (enable_head_up_display && (isShowingDueToHeadUp || forceShow)) {
-      const lastReading = this.glucoseHistory.get(userId)?.lastReading;
-      const history = this.glucoseHistory.get(userId)?.history;
-      
-      const combinedBitmapBase64 = this.generateCombinedBitmap(history, lastReading, await this.getUserSettings(session));
-
-      await session.sendBitmap({
-        bitmap: combinedBitmapBase64,
-        position: 'HeadUpDisplay',
-        id: 'glucose-combined',
-      });
+      return res;
+    }catch(e){
+      console.error('getUserSettings error', e?.stack||e);
+      return {
+        nightscoutUrl:'', nightscoutToken:'',
+        updateInterval:5, low_alert_mg:70, high_alert_mg:250,
+        low_alert_mmol:3.9, high_alert_mmol:13.9,
+        alertsEnabled:true, language:'es', timezone:null, units:UNITS.MGDL,
+        enable_head_up_display:false, enable_sparkline_display:false,
+        display_duration_ms:5000, dashboard_duration_ms:10000, alert_duration_ms:15000
+      };
     }
   }
 
-
-  async onDataUpdated(session, { nightscoutData }) {
-    const userId = session.userId;
-    const { settings } = this.sessions.get(userId);
-    if (!settings) {
-      this.log(session, "No se encontró la configuración, re-cargando...");
-      await this.onAppStart(session);
-      return;
-    }
-    const oldReading = this.glucoseHistory.get(userId)?.lastReading || null;
-    const currentReading = nightscoutData.currentReading;
-    const history = nightscoutData.history;
-
-    if (!currentReading) {
-      this.log(session, "No hay datos de glucosa disponibles. Intente de nuevo más tarde.");
-      // Renderiza con un mensaje de error o estado de "cargando..."
-      await this.render(session, { forceShow: false }); 
-      return;
-    }
-
-    this.glucoseHistory.set(userId, { lastReading: currentReading, history });
-
-    await this.render(session, { forceShow: false }); // Renderiza la pantalla principal si se actualiza el dashboard
-
-    // Lógica de alertas
-    const limits = this.getAlertLimits(settings);
-    const mgdlValue = currentReading.sgv;
-
-    if (settings.alerts_enabled) {
-      const isLowAlert = mgdlValue <= limits.low && (!oldReading || oldReading.sgv > limits.low);
-      const isHighAlert = mgdlValue >= limits.high && (!oldReading || oldReading.sgv < limits.high);
-
-      if (isLowAlert || isHighAlert) {
-        // Envia alerta, ya sea de voz o visual
-        const alertType = isLowAlert ? 'low' : 'high';
-        const msg = alertType === 'low'
-          ? (settings.language === 'es' ? `Glucosa baja: ${this.convertToDisplay(mgdlValue, settings.units)} ${settings.units}` : `Low glucose: ${this.convertToDisplay(mgdlValue, settings.units)} ${settings.units}`)
-          : (settings.language === 'es' ? `Glucosa alta: ${this.convertToDisplay(mgdlValue, settings.units)} ${settings.units}` : `High glucose: ${this.convertToDisplay(mgdlValue, settings.units)} ${settings.units}`);
-
-        await session.sendAudio({
-          text: msg,
-          priority: 'high',
-          duration_ms: settings.alert_duration_ms
-        });
-
-        // Limpia el historial para que la alerta no se dispare de nuevo inmediatamente
-        this.alertHistory.set(userId, { type: alertType, timestamp: Date.now() });
-      }
-    }
-  }
-
-  async onVoiceCommand(session, command) {
-    const lang = session.settings.language || 'en';
-    const lastReading = this.glucoseHistory.get(session.userId)?.lastReading;
-
-    if (command.toLowerCase().includes(lang === 'es' ? 'glucosa' : 'glucose')) {
-      if (!lastReading) {
-        return session.sendAudio({ text: lang === 'es' ? 'No hay datos de glucosa disponibles.' : 'No glucose data available.' });
-      }
-
-      const { line1, line2 } = await this.formatForG1(lastReading, await this.getUserSettings(session));
-      return session.sendAudio({ text: `${line1}. ${line2}.` });
-    }
-  }
-
-  async fetchGlucoseData(session) {
-    const { nightscout_url, nightscout_token, update_interval } = await this.getUserSettings(session);
-    const userId = session.userId;
-    const historyMins = 60 * 3; // 3 horas de historial
-    const url = `${nightscout_url}/api/v1/entries.json?token=${nightscout_token}&count=${Math.ceil(historyMins / update_interval)}`;
-    const errorMessages = {
-      es: {
-        networkError: 'Error de red al conectar con Nightscout.',
-        invalidToken: 'Token de Nightscout inválido.',
-        connectionFailed: 'No se pudo conectar con Nightscout.',
-      },
-      en: {
-        networkError: 'Network error connecting to Nightscout.',
-        invalidToken: 'Invalid Nightscout token.',
-        connectionFailed: 'Failed to connect to Nightscout.',
-      }
+  parseSettingsFromArray(arr){
+    const o={}; (arr||[]).forEach(s=>o[s.key]=s.value);
+    return {
+      nightscoutUrl: String(o.nightscout_url||'').trim(),
+      nightscoutToken: String(o.nightscout_token||'').trim(),
+      updateInterval: this.parseSlicerValue(o.update_interval,5),
+      low_alert_mg: this.validateSlicerValue(o.low_alert_mg,40,90,70),
+      high_alert_mg: this.validateSlicerValue(o.high_alert_mg,180,400,250),
+      low_alert_mmol: this.validateSlicerValue(o.low_alert_mmol,2,5,3.9),
+      high_alert_mmol: this.validateSlicerValue(o.high_alert_mmol,8,30,13.9),
+      alertsEnabled: (o.alerts_enabled===true||o.alerts_enabled==='true'||o.alerts_enabled===1||o.alerts_enabled==='1'),
+      language: o.language||'es',
+      timezone: o.timezone||null,
+      units: o.units||UNITS.MGDL,
+      enable_head_up_display:(o.enable_head_up_display===true||o.enable_head_up_display==='true'||o.enable_head_up_display===1||o.enable_head_up_display==='1'),
+      enable_sparkline_display:(o.enable_sparkline_display===true||o.enable_sparkline_display==='true'||o.enable_sparkline_display===1||o.enable_sparkline_display==='1'),
+      display_duration_ms:this.validateSlicerValue(o.display_duration_ms,1000,30000,5000),
+      dashboard_duration_ms:this.validateSlicerValue(o.dashboard_duration_ms,1000,30000,10000),
+      alert_duration_ms:this.validateSlicerValue(o.alert_duration_ms,5000,60000,15000)
     };
-    const lang = (await this.getUserSettings(session)).language || 'en';
+  }
 
-    try {
-      const response = await axios.get(url, { timeout: 10000 });
-      if (response.status !== 200 || !Array.isArray(response.data)) {
-        throw new Error('Respuesta de Nightscout inválida.');
-      }
-      const allReadings = response.data.map(d => ({
-        sgv: d.sgv,
-        date: d.date,
-        direction: d.direction,
-      }));
-      const lastReading = allReadings[0];
-      const history = allReadings.slice(1);
+  /* ----------------- Data Nightscout ----------------- */
+  async getGlucoseData(s, count=1){
+    let u=s.nightscoutUrl; if(!u) throw new Error('URL no configurada');
+    if(!u.startsWith('http')) u='https://'+u;
+    u=u.replace(/\/$/,'');
+    const endpoints=[
+      `${u}/api/v1/entries/sgv.json?count=${count}`,
+      `${u}/api/v1/entries.json?count=${count}`,
+      count===1?`${u}/api/v1/entries/current.json`:null
+    ].filter(Boolean);
+    let lastErr;
+    for(const ep of endpoints){
+      try{
+        const params=s.nightscoutToken?{token:s.nightscoutToken}:{};
+        const {data}=await axios.get(ep,{params,timeout:10000,headers:{'User-Agent':'MentraOS-Nightscout/2.10.2'}});
+        const arr=Array.isArray(data)?data:(data?[data]:[]);
+        if(arr.length===0) throw new Error('Empty response');
+        return arr.map(r=>({ sgv:Number(r.sgv??r.glucose), date:typeof r.date==='string'?new Date(r.date).getTime():r.date, direction:r.direction||r.trend||'NONE' }))
+                  .filter(r=>Number.isFinite(r.sgv)&&r.date);
+      }catch(e){ lastErr=e; continue; }
+    }
+    throw new Error(`All endpoints failed. Last error: ${lastErr?.message||'unknown'}`);
+  }
 
-      return { success: true, data: { currentReading: lastReading, history } };
-    } catch (e) {
-      let errorMsg = errorMessages[lang].connectionFailed;
-      if (e.response) {
-        if (e.response.status === 401) errorMsg = errorMessages[lang].invalidToken;
-      } else if (e.code === 'ECONNABORTED' || e.code === 'ETIMEDOUT' || e.code === 'ENOTFOUND') {
-        errorMsg = errorMessages[lang].networkError;
-      } else if (e.message.includes('No hay datos')) { // Manejar el caso de "No hay datos"
-        errorMsg = lang === 'es' ? "No hay datos de glucosa disponibles." : "No glucose data available.";
+  /* ----------------- Gestión historial ----------------- */
+  addToGlucoseHistory(sessionId, r){
+    if(!this.glucoseHistory.has(sessionId)) this.glucoseHistory.set(sessionId,[]);
+    const h=this.glucoseHistory.get(sessionId); h.push({sgv:r.sgv,date:r.date});
+    if(h.length>120) h.splice(0,h.length-120);
+  }
+  async preloadHistory(sessionId, s, points=24){
+    try{ const arr=await this.getGlucoseData(s,points); arr.reverse().forEach(r=>this.addToGlucoseHistory(sessionId,r)); }
+    catch(e){ this.sessions.get(sessionId)?.session?.logger?.debug?.('preload fail',{e:e?.message}); }
+  }
+
+  /* ----------------- Pantallas / errores ----------------- */
+  handleDisplayError(session, error, settings, duration, isAlert=false){
+    const msg =
+      error.message.includes('URL no configurada') ? {es:'URL de Nightscout no configurada\nRevisa ajustes',en:'Nightscout URL not set\nCheck settings'} :
+      (error.message.includes('Empty')||error.message.includes('Sin datos')) ? {es:'No hay datos de glucosa\nRevisa ajustes',en:'No glucose data available\nCheck settings'} :
+      (error.message.includes('timeout')||error.code==='ECONNABORTED'||error.message.includes('connect')||error.message.includes('ECONNREFUSED')) ? {es:'No se puede conectar\nRevisa URL/token',en:'Cannot connect\nCheck URL/token'} :
+      (error.message.includes('401')||error.message.includes('403')||error.message.includes('Auth')) ? {es:'Token o permisos inválidos\nRevisa ajustes',en:'Invalid token or permissions\nCheck settings'} :
+      {es:'Error cargando datos\nRevisa configuración',en:'Error loading data\nCheck configuration'};
+    this.safeShowText(session, msg[settings.language]||msg.en, duration);
+    setTimeout(()=>this.showBlank(session,220).catch(()=>{}), duration+50);
+    session.logger?.error(error, isAlert?'alert display fail':'display fail');
+  }
+
+  async showGlucoseDisplay(session, sessionId, settings, opts={}){
+    const { duration=null, isAlert=false, mode='auto' } = opts;
+    const ms = duration || (isAlert ? settings.alert_duration_ms : settings.display_duration_ms);
+    try{
+      const r=(await this.getGlucoseData(settings,1))[0];
+      this.addToGlucoseHistory(sessionId,r);
+      const hist=this.glucoseHistory.get(sessionId)||[];
+
+      if(!isAlert && settings.enable_sparkline_display && hist.length>=MIN_HISTORY_FOR_SPARKLINE && mode!=='textOnly'){
+        try{
+          const bmp=this.generateCombinedBitmap(hist,r,settings);
+          await this.safeShowBitmap(session,bmp,ms);
+          return;
+        }catch(e){ console.warn('combined fail, fallback text', e?.message); }
       }
-      return { success: false, error: errorMsg };
+
+      const [l1,l2]=await this.formatLines(r,settings);
+      await this.safeShowText(session, `${l1}\n${l2}`, ms);
+    }catch(e){
+      this.handleDisplayError(session,e,settings,ms,false);
     }
   }
 
-  getGlucoseStatusText(value, settings, lang) {
-    const limits = this.getAlertLimits(settings);
-    if (value < CRITICAL_THRESHOLDS.LOW_MGDL) { return lang === 'es' ? 'Crítico Bajo' : 'Critical Low'; }
-    if (value > CRITICAL_THRESHOLDS.HIGH_MGDL) { return lang === 'es' ? 'Crítico Alto' : 'Critical High'; }
-    if (value <= limits.low) return lang === 'es' ? 'Bajo' : 'Low';
-    if (value >= limits.high) return lang === 'es' ? 'Alto' : 'High';
-    return 'Normal';
+  /* ----------------- Arranque sesión ----------------- */
+  async showInitialAndStart(session, sessionId, userId){
+    let s=null;
+    try{ s=await this.getUserSettings(session); }catch(e){ console.error('settings read fail',e); }
+    if(!s?.nightscoutUrl){
+      await this.safeShowText(session,'URL de Nightscout no configurada\nAbre Ajustes',3500); await this.showBlank(session,220); return;
+    }
+    if(!s?.nightscoutToken){
+      await this.safeShowText(session,'Token no configurado\nAbre Ajustes',3500); await this.showBlank(session,220); return;
+    }
+    try{ await this.getGlucoseData(s,1); }
+    catch(e){
+      await this.safeShowText(session, s.language==='es'?'No se pueden cargar datos\nRevisa URL/token/red':'Cannot load data\nCheck URL/token/network', 4000);
+      await this.showBlank(session,220);
+      // seguimos igualmente
+    }
+    this.sessions.set(sessionId,{session,userId,settings:s,updateInterval:null});
+    await this.preloadHistory(sessionId,s,24);
+    this.setupEventHandlers(session,sessionId);
+    await this.showGlucoseDisplay(session,sessionId,s,{mode:'auto'});
+    this.startNormalOperation(session,sessionId,s);
   }
+
+  /* ----------------- onSession ----------------- */
+  async onSession(session, sessionId, userId){
+    console.log(`🚀 Nueva sesión: ${sessionId} para ${userId}`);
+    try{
+      if(typeof session.updateSettingsForTesting!=='function'){
+        session.updateSettingsForTesting=async()=>{session.logger?.debug?.('compat noop');};
+      }
+      console.log('[diag] layouts:', Object.keys(session.layouts||{}));
+      console.log('[diag] events:', Object.keys(session.events||{}));
+      await this.showInitialAndStart(session,sessionId,userId);
+    }catch(e){
+      console.error('onSession failed:', e?.stack||e);
+      await this.safeShowText(session,'Startup error.\nOpen settings.',3000);
+    }
+  }
+
+  /* ----------------- Event handlers ----------------- */
+  setupEventHandlers(session, sessionId){
+    try{
+      session.events?.onButtonPress?.(async ()=>{
+        const sd=this.sessions.get(sessionId); if(!sd) return;
+        await this.showGlucoseDisplay(session,sessionId,sd.settings,{mode:'auto'});
+      });
+
+      const handler = async (settingsData)=>{
+        try{
+          const parsed=this.parseSettingsFromArray(settingsData||[]);
+          const sd=this.sessions.get(sessionId); if(!sd) return;
+          const old=sd.settings; sd.settings=parsed; this.sessions.set(sessionId,sd);
+
+          if(old.updateInterval!==parsed.updateInterval){ this.stopNormalOperation(sessionId); this.startNormalOperation(session,sessionId,parsed); }
+          if(this.alertLimitsChanged(old,parsed)){ this.alertHistory.delete(sessionId); }
+
+          await this.persistAndEchoSettings(session, parsed);
+        }catch(e){ session.logger?.error(e,'settings handler fail'); }
+      };
+
+      session.events?.onAppSettingsUpdate?.(handler);
+      session.events?.onSettingsUpdate?.(handler);
+      session.events?.onSettingsChange?.(handler);
+
+      // Gesto cabeza arriba→abajo muestra combined si hay historial
+      session.events?.onHeadPosition?.(async ({position})=>{
+        try{
+          if(position!=='up' && position!=='down') return;
+          const sd=this.sessions.get(sessionId); const s=sd?.settings; if(!s?.enable_head_up_display) return;
+          const now=Date.now();
+          if(position==='up'){ this.lastHeadUp.set(sessionId, now); return; }
+          const lastUp=this.lastHeadUp.get(sessionId)||0; if(now-lastUp>2500) return;
+          const cd=this.headUpLastShown.get(sessionId)||0; if(now-cd<5000) return; this.headUpLastShown.set(sessionId, now);
+
+          let last=(this.glucoseHistory.get(sessionId)||[]).slice(-1)[0];
+          if(!last || (Date.now()-last.date)>10*60*1000){
+            const r=await this.getGlucoseData(s,1); if(r&&r[0]){ last=r[0]; this.addToGlucoseHistory(sessionId,last); }
+          }
+          if(!last){ await this.safeShowText(session,'Sin datos',3000); return; }
+
+          const hist=this.glucoseHistory.get(sessionId)||[];
+          if(s.enable_sparkline_display && hist.length>=MIN_HISTORY_FOR_SPARKLINE){
+            const bmp=this.generateCombinedBitmap(hist,last,s);
+            await this.safeShowBitmap(session,bmp,s.dashboard_duration_ms);
+            return;
+          }
+          const [l1,l2]=await this.formatLines(last,s);
+          await this.safeShowText(session, `${l1}\n${l2}`, s.dashboard_duration_ms);
+        }catch(e){
+          session.logger?.error(e,'head-up fail');
+          await this.safeShowText(session,'Error',2000);
+        }
+      });
+
+      session.events?.onDisconnected?.(()=>{
+        this.stopNormalOperation(sessionId);
+        this.sessions.delete(sessionId);
+        this.alertHistory.delete(sessionId);
+        this.glucoseHistory.delete(sessionId);
+      });
+    }catch(e){ console.error('setupEventHandlers fail', e?.stack||e); }
+  }
+
+  async persistAndEchoSettings(session, s){
+    try{
+      await Promise.all([
+        session.settings.set('low_alert_mg', s.low_alert_mg),
+        session.settings.set('high_alert_mg', s.high_alert_mg),
+        session.settings.set('low_alert_mmol', s.low_alert_mmol),
+        session.settings.set('high_alert_mmol', s.high_alert_mmol),
+        session.settings.set('update_interval', s.updateInterval),
+        session.settings.set('alerts_enabled', !!s.alertsEnabled),
+        session.settings.set('units', s.units),
+        session.settings.set('language', s.language),
+        session.settings.set('timezone', s.timezone||''),
+        session.settings.set('enable_head_up_display', !!s.enable_head_up_display),
+        session.settings.set('enable_sparkline_display', !!s.enable_sparkline_display),
+        session.settings.set('display_duration_ms', s.display_duration_ms),
+        session.settings.set('dashboard_duration_ms', s.dashboard_duration_ms),
+        session.settings.set('alert_duration_ms', s.alert_duration_ms),
+      ]);
+
+      const lines=['Ajustes guardados'];
+      if(s.units===UNITS.MMOL){ lines.push(`Low: ${s.low_alert_mmol} mmol/L`, `High: ${s.high_alert_mmol} mmol/L`); }
+      else { lines.push(`Low: ${s.low_alert_mg} mg/dL`, `High: ${s.high_alert_mg} mg/dL`); }
+      lines.push(`Units: ${s.units}`);
+      lines.push(`HeadUp: ${s.enable_head_up_display?'ON':'OFF'}`);
+      lines.push(`Sparkline: ${s.enable_sparkline_display?'ON':'OFF'}`);
+
+      // Pausa ciclo, eco y limpieza
+      let sid=null; for(const [k,v] of this.sessions){ if(v.session===session){ sid=k; break; } }
+      if(sid) this.stopNormalOperation(sid);
+
+      await this.safeShowText(session, `\n${lines.join('\n')}`, 5000);
+      setTimeout(()=>this.showBlank(session,220).catch(()=>{}), 5050);
+
+      if(sid){
+        const sd=this.sessions.get(sid);
+        if(sd) this.startNormalOperation(sd.session, sid, sd.settings);
+      }
+    }catch(e){ session.logger?.debug('persist echo fail',{e:e?.message}); }
+  }
+
+  /* ----------------- Bucle normal ----------------- */
+  startNormalOperation(session, sessionId, s){
+    this.stopNormalOperation(sessionId);
+    const ms=(s.updateInterval||5)*60*1000;
+    const iv=setInterval(async()=>{
+      try{
+        const sd=this.sessions.get(sessionId); if(!sd) return clearInterval(iv);
+        const d=await this.getGlucoseData(sd.settings,1);
+        if(d&&d[0]){
+          this.addToGlucoseHistory(sessionId,d[0]);
+          if(sd.settings.alertsEnabled) await this.checkAlerts(session, sessionId, d[0], sd.settings);
+          await this.showGlucoseDisplay(session,sessionId,sd.settings,{mode:'auto'});
+        }
+      }catch(e){ session.logger?.debug('cycle fail',{e:e?.message}); }
+    }, ms);
+    const sd=this.sessions.get(sessionId); if(sd){ sd.updateInterval=iv; this.sessions.set(sessionId,sd); }
+  }
+  stopNormalOperation(sessionId){ const sd=this.sessions.get(sessionId); if(sd?.updateInterval){ clearInterval(sd.updateInterval); sd.updateInterval=null; } }
+
+  /* ----------------- Alertas ----------------- */
+  async checkAlerts(session, sessionId, data, s){
+    const lim=this.getAlertLimits(s), mg=data.sgv;
+    const last=this.alertHistory.get(sessionId);
+    if(last && Date.now()-last<600000) return; // 10m
+    let title=null; if(mg<=lim.low) title=s.language==='es'?'¡GLUCOSA BAJA!':'LOW GLUCOSE!';
+    else if(mg>=lim.high) title=s.language==='es'?'¡GLUCOSA ALTA!':'HIGH GLUCOSE!';
+    if(!title) return;
+    const disp=this.convertToDisplay(mg,s.units);
+    await this.safeShowText(session, `${title}\n${disp} ${s.units}`, s.alert_duration_ms);
+    this.alertHistory.set(sessionId, Date.now());
+  }
+
+  /* ----------------- Tool calls (opcional) ----------------- */
+  async onToolCall(){ return {success:false,error:'Not implemented in this build'}; }
 }
+/* ===================== init ===================== */
+const server = new NightscoutMentraApp({ packageName: PACKAGE_NAME, apiKey: MENTRAOS_API_KEY, port: PORT });
+server.start().catch(err=>{ console.error('❌ start fail:',err); process.exit(1); });
 
-/* ---------------- init ---------------- */
-const server = new NightscoutMentraApp({
-  packageName: PACKAGE_NAME,
-  apiKey: MENTRAOS_API_KEY,
-  port: PORT,
-});
+console.log('🚀 Nightscout MentraOS v2.10.2-combined-safe — listo');
 
-server.start().catch(err => {
-  console.error('❌ Error iniciando servidor:', err);
-  process.exit(1);
-});
+const KEEP_ALIVE_URL = process.env.RENDER_URL || 'https://mentra-nightscout.onrender.com';
+server.app.get('/health', (_,res)=>res.json({status:'alive',ts:new Date().toISOString(),ver:'2.10.2-combined-safe',sessions:server.sessions.size}));
+setInterval(()=>axios.get(`${KEEP_ALIVE_URL}/health`).catch(()=>{}), 180000);
 
-console.log('🚀 Nightscout MentraOS v2.10.3-combined — FIXED: Render fallback logic & improved rendering flow');
+module.exports = server;
