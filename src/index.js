@@ -1,5 +1,5 @@
 "use strict";
-// src/index.js — Nightscout MentraOS v2.9.5-patch1 (Corregido)
+// src/index.js — Nightscout MentraOS v2.9.5-patch1
 // SDK 2.1.18 — ROBUST + FALLBACK ENDPOINTS + HEAD-UP DISPLAY + MG/MMOL SYNC + SAFETY SHIMS + SPARKLINE CHARTS + CACHING (LOCAL HISTORY)
 
 require("dotenv").config();
@@ -43,6 +43,7 @@ class NightscoutMentraApp extends AppServer {
     this.alertHistory = new Map();
     this.headUpLastShown = new Map();
     this.glucoseHistory = new Map();
+    this.lastHeadUp = new Map(); // secuencia "arriba -> abajo"
   }
 
   /* ---------------- helpers ---------------- */
@@ -468,48 +469,42 @@ Revisa tu configuración` };
   }
 
   /* ---------------- Display Methods ---------------- */
-  async showGlucoseDisplay(session, sessionId, settings, duration = null, isAlert = false) {
+  async showGlucoseDisplay(session, sessionId, settings, opts = {}) {
+    const { duration = null, isAlert = false, mode = 'text' } = opts;
     const actualDuration = duration || (isAlert ? settings.alert_duration_ms : settings.display_duration_ms);
     try {
       const readings = await this.getGlucoseData(settings, 1);
       const lastReading = readings[0];
       this.addToGlucoseHistory(sessionId, lastReading);
 
-      if (settings.enable_sparkline_display && !isAlert) {
+      // Solo intentamos sparkline si nos lo piden explícitamente (modo 'sparkline')
+      if (mode === 'sparkline' && !isAlert) {
         const history = this.glucoseHistory.get(sessionId) || [];
         if (history.length > 1) {
-          const values = history.map(h => h.sgv);
           let bmp = null;
           try {
-            const sdkBmp = await session.layouts.createSparkline(values);
-            if (sdkBmp && typeof sdkBmp === 'string' && sdkBmp.length > 0) {
-              bmp = sdkBmp;
-            }
-          } catch (_) { /* fallback below */ }
+            const sdkBmp = await session.layouts.createSparkline(history.map(h => h.sgv));
+            if (sdkBmp && typeof sdkBmp === 'string' && sdkBmp.length > 0) bmp = sdkBmp;
+          } catch (_) {}
           if (!bmp) {
-            try {
-              const bmpBase64 = this.generateSparklineBitmap(history, settings);
-              bmp = bmpBase64;
-            } catch (_) { /* last resort: text */ }
+            try { bmp = this.generateSparklineBitmap(history, settings); } catch (_) {}
           }
           if (bmp) {
-            session.layouts.showBitmapView(bmp, { durationMs: actualDuration });
-          } else {
-            const formattedData = await this.formatForG1(lastReading, settings);
-            session.layouts.showTextWall(formattedData, { durationMs: actualDuration });
+            await session.layouts.showBitmapView(bmp, { durationMs: actualDuration });
+            return;
           }
-        } else {
-          const formattedData = await this.formatForG1(lastReading, settings);
-          session.layouts.showTextWall(formattedData, { durationMs: actualDuration });
         }
-      } else {
-        const formattedData = await this.formatForG1(lastReading, settings);
-        session.layouts.showTextWall(formattedData, { durationMs: actualDuration });
       }
+
+      // Texto por defecto (valor + tendencia + hora)
+      const formattedData = await this.formatForG1(lastReading, settings);
+      session.layouts.showTextWall(formattedData, { durationMs: actualDuration });
     } catch (error) {
-      this.handleDisplayError(session, error, settings, actualDuration);
+      this.handleDisplayError(session, error, settings, actualDuration, isAlert);
     }
   }
+
+  async showInitialAndStart
 
   async showInitialAndStart(session, sessionId, userId) {
     try {
@@ -585,42 +580,47 @@ de Nightscout en ajustes` };
           const s = sd?.settings;
           if (!s?.enable_head_up_display) return;
           const now = Date.now();
+          // Secuencia: primero UP, luego DOWN en ≤ 2500 ms
+          if (pos === 'up') { this.lastHeadUp.set(sessionId, now); return; }
+          const lastUp = this.lastHeadUp.get(sessionId) || 0;
+          if (pos === 'down' && (now - lastUp) > 2500) return;
+
+          // Cooldown 5s para no saturar
           const last = this.headUpLastShown.get(sessionId) || 0;
-          if (now - last < 5_000) return; // cooldown
+          if (now - last < 5000) return; // cooldown
           this.headUpLastShown.set(sessionId, now);
 
           // Asegurar que tenemos al menos una lectura reciente
           let lastReading = (this.glucoseHistory.get(sessionId) || []).slice(-1)[0];
-          if (!lastReading) {
-            lastReading = (await this.getGlucoseData(s, 1))[0];
-            if (lastReading) this.addToGlucoseHistory(sessionId, lastReading);
+          const ensureRecent = !lastReading ? true : (Date.now() - lastReading.date) > 10 * 60 * 1000;
+          if (!lastReading || ensureRecent) {
+            const r = await this.getGlucoseData(s, 1);
+            if (r && r[0]) { lastReading = r[0]; this.addToGlucoseHistory(sessionId, lastReading); }
           }
 
           // Si el usuario tiene activado sparkline y hay historial, mostramos la gráfica
           if (s?.enable_sparkline_display) {
             const history = this.glucoseHistory.get(sessionId) || [];
             if (history.length > 1) {
-              const values = history.map(h => h.sgv);
               try {
-                const sdkBmp = await session.layouts.createSparkline(values);
+                const sdkBmp = await session.layouts.createSparkline(history.map(h => h.sgv));
                 if (sdkBmp && typeof sdkBmp === 'string' && sdkBmp.length > 0) {
-                  session.layouts.showBitmapView(sdkBmp, { durationMs: s.dashboard_duration_ms });
+                  await session.layouts.showBitmapView(sdkBmp, { durationMs: s.dashboard_duration_ms });
                   return;
                 }
-              } catch (_) { /* fallback abajo */ }
+              } catch {}
               try {
                 const bmp = this.generateSparklineBitmap(history, s);
-                session.layouts.showBitmapView(bmp, { durationMs: s.dashboard_duration_ms });
+                await session.layouts.showBitmapView(bmp, { durationMs: s.dashboard_duration_ms });
                 return;
-              } catch (_) { /* último recurso: texto */ }
+              } catch {}
             }
           }
 
           // Fallback: solo texto (valor + hora)
           if (lastReading) {
             const text = await this.formatForG1(lastReading, s);
-            session.layouts.showTextWall(`
-
+            await session.layouts.showTextWall(`
 
 ${text}`, { durationMs: s.dashboard_duration_ms });
           }
@@ -699,12 +699,9 @@ ${lines.join('\n')}`, { durationMs: 4000 });
         if (d && d.length > 0) {
           this.addToGlucoseHistory(sessionId, d[0]);
           if (sd.settings.alertsEnabled) await this.checkAlerts(session, sessionId, d[0], sd.settings);
-          
-          // --- INICIO DE LA CORRECCIÓN ---
-          // Esta línea refresca la pantalla con la gráfica actualizada en cada ciclo.
-          await this.showGlucoseDisplay(session, sessionId, sd.settings);
-          // --- FIN DE LA CORRECCIÓN ---
 
+          // Refresco de pantalla en cada ciclo para que reaparezca la gráfica/texto
+          await this.showGlucoseDisplay(session, sessionId, sd.settings, { mode: 'text' });
         }
       } catch (error) {
         session.logger?.debug('Normal operation cycle failed', { error: error.message });
