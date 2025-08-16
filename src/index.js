@@ -602,9 +602,7 @@ ${text}`, { durationMs: s.dashboard_duration_ms });
           }
         } catch (e) {
           session.logger?.error(e, 'Head up display failed');
-          try { session.layouts.showTextWall('
-
-Error al cargar', { durationMs: 4000 }); } catch {}
+          try { session.layouts.showTextWall('Error al cargar', { durationMs: 4000 }); } catch {}
         }
       });
 
