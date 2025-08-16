@@ -312,9 +312,8 @@ async function stopApp() {
 }
 
 // Registro de ciclo de vida
-adapter.onStart(startApp);
-adapter.onStop(stopApp);
-
+///////////////////////////////////////////////
+// Adapter Layer – aísla diferencias de SDK  //
 ///////////////////////////////////////////////
 // Adapter Layer – aísla diferencias de SDK  //
 ///////////////////////////////////////////////
@@ -344,11 +343,14 @@ const adapter = {
   // ==== Events ====
   onHeadPosition(handler) {
     if (globalThis.mentra?.events?.onHeadPosition) return globalThis.mentra.events.onHeadPosition(handler);
-    // Fallback: escucha teclas (U/D) para simular
-    window.addEventListener('keydown', (e) => {
-      if (e.key.toLowerCase() === 'u') handler('up');
-      if (e.key.toLowerCase() === 'd') handler('down');
-    });
+    // Fallback: solo en entornos con window (no-Node)
+    if (typeof window !== 'undefined' && window.addEventListener) {
+      window.addEventListener('keydown', (e) => {
+        const k = (e.key || '').toLowerCase();
+        if (k === 'u') handler('up');
+        if (k === 'd') handler('down');
+      });
+    }
   },
 
   // ==== Display ====
@@ -367,10 +369,12 @@ const adapter = {
   },
   async showText(text) {
     if (globalThis.mentra?.display?.showTextWall) return await globalThis.mentra.display.showTextWall(text);
+    if (typeof document === 'undefined') { console.log('[MentraNS][TEXT]', text); return; }
     const el = ensurePad(); el.textContent = text;
   },
   async clearText() {
     if (globalThis.mentra?.display?.clear) return await globalThis.mentra.display.clear();
+    if (typeof document === 'undefined') { return; }
     const el = ensurePad(); el.textContent = '';
   },
   async showToast(text, ms = 2000) {
@@ -405,3 +409,7 @@ function ensurePad() {
   }
   return el;
 }
+
+// Registro de ciclo de vida (colocado aquí para evitar TDZ)
+adapter.onStart(startApp);
+adapter.onStop(stopApp);
