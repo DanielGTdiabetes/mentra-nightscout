@@ -447,21 +447,11 @@ ${timeStr} (${timeAgo})`;
   /* ---------------- Manejador de errores para displays ---------------- */
   handleDisplayError(session, error, settings, duration, isAlert = false) {
     const errorMsg =
-      error.message.includes('URL no configurada') ? { en: 'Nightscout URL not set
-Check settings', es: 'URL de Nightscout no configurada
-Revisa ajustes' } :
-      (error.message.includes('Sin datos') || error.message.includes('Empty response')) ? { en: 'No glucose data available
-Check your settings', es: 'No hay datos de glucosa
-Revisa tus ajustes' } :
-      (error.message.includes('timeout') || error.message.includes('ECONNABORTED') || error.message.includes('connect') || error.message.includes('ECONNREFUSED')) ? { en: 'Cannot connect to Nightscout
-Check URL and token', es: 'No se puede conectar
-Revisa URL y token' } :
-      (error.message.includes('Auth Error')) ? { en: 'Invalid token or permissions
-Check your settings', es: 'Token o permisos inválidos
-Revisa tus ajustes' } :
-      { en: 'Error loading glucose data
-Check your settings', es: 'Error cargando datos
-Revisa tu configuración' };
+      error.message.includes('URL no configurada') ? { en: 'Nightscout URL not set\nCheck settings', es: 'URL de Nightscout no configurada\nRevisa ajustes' } :
+      (error.message.includes('Sin datos') || error.message.includes('Empty response')) ? { en: 'No glucose data available\nCheck your settings', es: 'No hay datos de glucosa\nRevisa tus ajustes' } :
+      (error.message.includes('timeout') || error.message.includes('ECONNABORTED') || error.message.includes('connect') || error.message.includes('ECONNREFUSED')) ? { en: 'Cannot connect to Nightscout\nCheck URL and token', es: 'No se puede conectar\nRevisa URL y token' } :
+      (error.message.includes('Auth Error')) ? { en: 'Invalid token or permissions\nCheck your settings', es: 'Token o permisos inválidos\nRevisa tus ajustes' } :
+      { en: 'Error loading glucose data\nCheck your settings', es: 'Error cargando datos\nRevisa tu configuración' };
     const msg = errorMsg[settings.language] || errorMsg.en;
     session.layouts.showTextWall(msg, { durationMs: duration });
     session.logger?.error(error, isAlert ? 'Failed to show alert' : 'Failed to show display');
@@ -515,9 +505,7 @@ Revisa tu configuración' };
     try {
       const settings = await this.getUserSettings(session);
       if (!settings.nightscoutUrl || !settings.nightscoutToken) {
-        const msg = { en: 'Please configure Nightscout
-URL and token in settings', es: 'Configura URL y token
-de Nightscout en ajustes' };
+        const msg = { en: 'Please configure Nightscout\nURL and token in settings', es: 'Configura URL y token\nde Nightscout en ajustes' };
         session.layouts.showTextWall(msg[settings.language] || msg.en);
         return;
       }
@@ -596,15 +584,11 @@ de Nightscout en ajustes' };
           }
           if (lastReading) {
             const text = await this.formatForG1(lastReading, s);
-            session.layouts.showTextWall(`
-
-${text}`, { durationMs: s.dashboard_duration_ms });
+            session.layouts.showTextWall(`\n\n${text}`, { durationMs: s.dashboard_duration_ms });
           }
         } catch (e) {
           session.logger?.error(e, 'Head up display failed');
-          try { session.layouts.showTextWall('
-
-Error al cargar', { durationMs: 4000 }); } catch {}
+          try { session.layouts.showTextWall('\n\nError al cargar', { durationMs: 4000 }); } catch {}
         }
       });
 
@@ -657,9 +641,8 @@ Error al cargar', { durationMs: 4000 }); } catch {}
       let sidForSession = null;
       for (const [sid, sd] of this.sessions) { if (sd.session === session) { sidForSession = sid; break; } }
       if (sidForSession) this.stopNormalOperation(sidForSession);
-      session.layouts.showTextWall(`
-${lines.join('\\n')}`, { durationMs: 4000 });
-      if (sidForSession) setTimeout(() => { try { this.startNormalOperation(this.sessions.get(sidForSession).session, sidForSession, this.sessions.get(sidForSession).settings); } catch(_){} }, 4100);
+      session.layouts.showTextWall(`\n${lines.join('\n')}`, { durationMs: 4000 });
+      if (sidForSession) setTimeout(() => { try { this.startNormalOperation(this.sessions.get(sidForSession).session, sidForSession, this.sessions.get(sidForSession).settings); } catch(_) {} }, 4100);
     } catch (e) {
       session.logger?.debug('Store persistence skipped/failed', { err: e?.message });
     }
@@ -712,10 +695,8 @@ ${lines.join('\\n')}`, { durationMs: 4000 });
     const lang = settings.language || 'en';
     let msg = null;
     let title = null;
-    if (mgdl <= limits.low) { title = msgs[lang]?.low || msgs.en.low; msg = `
-${display} ${settings.units}`; this.alertHistory.set(sessionId, Date.now()); }
-    else if (mgdl >= limits.high) { title = msgs[lang]?.high || msgs.en.high; msg = `
-${display} ${settings.units}`; this.alertHistory.set(sessionId, Date.now()); }
+    if (mgdl <= limits.low) { title = msgs[lang]?.low || msgs.en.low; msg = `\n${display} ${settings.units}`; this.alertHistory.set(sessionId, Date.now()); }
+    else if (mgdl >= limits.high) { title = msgs[lang]?.high || msgs.en.high; msg = `\n${display} ${settings.units}`; this.alertHistory.set(sessionId, Date.now()); }
     if (msg) {
       session.layouts.showReferenceCard(title, msg, { durationMs: settings.alert_duration_ms });
       session.logger?.warn('Alert sent', { type: mgdl <= limits.low ? 'low' : 'high', value: mgdl });
