@@ -1,22 +1,19 @@
-// src/index.js — Nightscout MentraOS v2.6.1
-// SDK 2.1.18 — ROBUST + FALLBACK ENDPOINTS + HEAD-UP DISPLAY + SAFETY SHIMS
+// src/index.js — Nightscout MentraOS v2.8.0 (HUD texto + Modo Avanzado TIR + ecos + MIRA)
+// Base estructural tomada de v2.6.2 (robusta, con fallback de endpoints y HUD por gesto)
 
 require('dotenv').config();
 
 const { AppServer } = require('@mentra/sdk');
 const axios = require('axios');
 
-/* ---------- HARD SHIM: evita crash si el SDK invoca método inexistente ---------- */
-// Mantener como PRIMER bloque del archivo.
+/* ---------- SHIM: evita crash si el SDK invoca método inexistente ---------- */
 if (typeof Object.prototype.updateSettingsForTesting !== 'function') {
   Object.defineProperty(Object.prototype, 'updateSettingsForTesting', {
     value: async function () { /* noop compat */ },
-    writable: true,
-    configurable: true,
-    enumerable: false
+    writable: true, configurable: true, enumerable: false
   });
 }
-/* ------------------------------------------------------------------------------- */
+/* ------------------------------------------------------------------------- */
 
 const PACKAGE_NAME = process.env.PACKAGE_NAME || 'com.tucompania.nightscout-glucose';
 const PORT = parseInt(process.env.PORT || '3000', 10);
@@ -38,7 +35,7 @@ class NightscoutMentraApp extends AppServer {
     this.headUpLastShown = new Map();  // sessionId -> timestamp (cooldown)
   }
 
-  /* ---------------- helpers ---------------- */
+  /* ---------------- helpers numéricos ---------------- */
   parseSlicerValue(val, fallback) {
     const n = (typeof val === 'object' && val !== null) ? parseFloat(val.value) : parseFloat(val);
     return Number.isFinite(n) ? n : fallback;
@@ -48,13 +45,49 @@ class NightscoutMentraApp extends AppServer {
     if (!Number.isFinite(v)) return fallback;
     return Math.max(min, Math.min(max, v));
   }
+  toBool(x){ return (x===true || x==='true' || x===1 || x==='1'); }
+  isDifferent(a, b, tol = 0.1) { return Math.abs(Number(a) - Number(b)) > tol; }
 
-  /* ---------------- Util para alarmas ---------------- */
+  // mmol/L en consola sin decimales (x10) → normaliza a 1 decimal real
+  normalizeMmol(x){
+    const v = this.parseSlicerValue(x, null);
+    if (v === null || !Number.isFinite(v)) return null;
+    return (v > 30) ? (v/10) : v; // 39 => 3.9 ; si ya viniera 3.9 lo respeta
+  }
+
+  /* ---------------- Umbrales de alertas (mg/dL) ---------------- */
   getAlertLimits(settings) {
-    if (settings.units === 'mmol/L') {
-      return { low: Math.round(settings.low_alert_mmol * 18), high: Math.round(settings.high_alert_mmol * 18) };
+    if (settings.units === UNITS.MMOL) {
+      const lowM = this.normalizeMmol(settings.low_alert_mmol);
+      const highM = this.normalizeMmol(settings.high_alert_mmol);
+      return { low: Math.round(lowM * 18), high: Math.round(highM * 18) };
     }
     return { low: Math.round(settings.low_alert_mg), high: Math.round(settings.high_alert_mg) };
+  }
+
+  /* ---------------- Umbrales de rango (TIR) en mg/dL ---------------- */
+  getTirLimitsMg(settings){
+    // admite dos familias: time_in_range_* o tir_* (usa la que exista)
+    const mgLow  = (settings.time_in_range_low_mg  ?? settings.tir_low_mg);
+    const mgHigh = (settings.time_in_range_high_mg ?? settings.tir_high_mg);
+
+    const mmolLowRaw  = (settings.time_in_range_low_mmol  ?? settings.tir_low_mmol);
+    const mmolHighRaw = (settings.time_in_range_high_mmol ?? settings.tir_high_mmol);
+
+    if (settings.units === UNITS.MMOL) {
+      const lowM  = this.normalizeMmol(mmolLowRaw);   // 39 -> 3.9
+      const highM = this.normalizeMmol(mmolHighRaw);  // 100 -> 10.0
+      const lowMg  = Math.round((Number(lowM)  || 3.9) * 18);
+      const highMg = Math.round((Number(highM) || 10.0)* 18);
+      return { low: lowMg, high: highMg };
+    } else {
+      const low  = Number(mgLow);
+      const high = Number(mgHigh);
+      return {
+        low:  Number.isFinite(low)  ? Math.round(low)  : 70,
+        high: Number.isFinite(high) ? Math.round(high) : 180
+      };
+    }
   }
 
   /* ---------------- settings (lectura directa del store) ---------------- */
@@ -64,7 +97,16 @@ class NightscoutMentraApp extends AppServer {
         url, token, updateInterval,
         lowMg, highMg, lowMmol, highMmol,
         alertsEnabled, language, timezone, units,
-        enable_head_up_display
+        enable_head_up_display,
+
+        // tiempos en ms
+        display_duration_ms, alert_duration_ms, alert_cooldown_ms,
+
+        // modo avanzado + TIR (admite dos nombres de toggle por compatibilidad)
+        enable_advanced_mode, advanced_mode_enabled,
+        // familias de TIR en mg y mmol(x10)
+        tir_low_mg, tir_high_mg, tir_low_mmol, tir_high_mmol,
+        time_in_range_low_mg, time_in_range_high_mg, time_in_range_low_mmol, time_in_range_high_mmol,
       ] = await Promise.all([
         session.settings.get('nightscout_url'),
         session.settings.get('nightscout_token'),
@@ -77,27 +119,94 @@ class NightscoutMentraApp extends AppServer {
         session.settings.get('language'),
         session.settings.get('timezone'),
         session.settings.get('units'),
-        session.settings.get('enable_head_up_display')
+        session.settings.get('enable_head_up_display'),
+
+        session.settings.get('display_duration_ms'),
+        session.settings.get('alert_duration_ms'),
+        session.settings.get('alert_cooldown_ms'),
+
+        session.settings.get('enable_advanced_mode'),
+        session.settings.get('advanced_mode_enabled'),
+
+        session.settings.get('tir_low_mg'),
+        session.settings.get('tir_high_mg'),
+        session.settings.get('tir_low_mmol'),
+        session.settings.get('tir_high_mmol'),
+
+        session.settings.get('time_in_range_low_mg'),
+        session.settings.get('time_in_range_high_mg'),
+        session.settings.get('time_in_range_low_mmol'),
+        session.settings.get('time_in_range_high_mmol'),
       ]);
 
-      const finalUrl = String(url || '').trim() || '';
-      const finalToken = String(token || '').trim() || '';
-      console.log(`🔍 Settings - URL:${finalUrl ? '[SET]' : '[EMPTY]'} Token:${finalToken ? '[SET]' : '[EMPTY]'} Units:${units || 'mg/dL'}`);
+      // update_interval llega como "1"|"5"|"15" (minutos)
+      const uiMin = parseInt(updateInterval, 10);
+      const ui = Number.isFinite(uiMin) ? uiMin : 5;
 
       const result = {
-        nightscoutUrl: finalUrl,
-        nightscoutToken: finalToken,
-        updateInterval: this.parseSlicerValue(updateInterval, 5),
+        nightscoutUrl: String(url || '').trim() || '',
+        nightscoutToken: String(token || '').trim() || '',
+        updateInterval: ui, // en MINUTOS
         low_alert_mg: this.validateSlicerValue(lowMg, 40, 90, 70),
         high_alert_mg: this.validateSlicerValue(highMg, 180, 400, 250),
-        low_alert_mmol: this.validateSlicerValue(lowMmol, 2, 5, 3.9),
-        high_alert_mmol: this.validateSlicerValue(highMmol, 8, 30, 13.9),
-        alertsEnabled: (alertsEnabled === true || alertsEnabled === 'true' || alertsEnabled === 1 || alertsEnabled === '1'),
+        low_alert_mmol: this.normalizeMmol(lowMmol) ?? 3.9,
+        high_alert_mmol: this.normalizeMmol(highMmol) ?? 13.9,
+        alertsEnabled: this.toBool(alertsEnabled),
         language: language || 'en',
         timezone: timezone || null,
-        units: units || 'mg/dL',
-        enable_head_up_display: (enable_head_up_display === true || enable_head_up_display === 'true' || enable_head_up_display === 1 || enable_head_up_display === '1')
+        units: units || UNITS.MGDL,
+        enable_head_up_display: this.toBool(enable_head_up_display),
+
+        display_duration_ms: this.validateSlicerValue(display_duration_ms, 1000, 15000, 5000),
+        alert_duration_ms: this.validateSlicerValue(alert_duration_ms, 2000, 60000, 15000),
+        alert_cooldown_ms: this.validateSlicerValue(alert_cooldown_ms, 60000, 3600000, 600000),
+
+        // toggle avanzado (acepta dos nombres)
+        enable_advanced_mode: this.toBool(enable_advanced_mode) || this.toBool(advanced_mode_enabled),
+
+        // familias TIR aceptadas (no imponemos una; se leerá la que esté configurada)
+        tir_low_mg: this.parseSlicerValue(tir_low_mg, null),
+        tir_high_mg: this.parseSlicerValue(tir_high_mg, null),
+        tir_low_mmol: this.normalizeMmol(tir_low_mmol),
+        tir_high_mmol: this.normalizeMmol(tir_high_mmol),
+
+        time_in_range_low_mg: this.parseSlicerValue(time_in_range_low_mg, null),
+        time_in_range_high_mg: this.parseSlicerValue(time_in_range_high_mg, null),
+        time_in_range_low_mmol: this.normalizeMmol(time_in_range_low_mmol),
+        time_in_range_high_mmol: this.normalizeMmol(time_in_range_high_mmol),
       };
+
+      // --- Sincronización mg<->mmol solo para las ALERTAS (no para TIR de usuario) ---
+      try {
+        if (result.units === UNITS.MMOL) {
+          const mgLow = Math.round(result.low_alert_mmol * 18);
+          const mgHigh = Math.round(result.high_alert_mmol * 18);
+          if (this.isDifferent(result.low_alert_mg, mgLow) || this.isDifferent(result.high_alert_mg, mgHigh)) {
+            await Promise.all([
+              session.settings.set('low_alert_mg', mgLow),
+              session.settings.set('high_alert_mg', mgHigh),
+            ]);
+            result.low_alert_mg = mgLow;
+            result.high_alert_mg = mgHigh;
+          }
+        } else {
+          const mmolLow = Number((result.low_alert_mg / 18).toFixed(1));
+          const mmolHigh = Number((result.high_alert_mg / 18).toFixed(1));
+          if (this.isDifferent(result.low_alert_mmol, mmolLow) || this.isDifferent(result.high_alert_mmol, mmolHigh)) {
+            // si consola no admite decimales, guardamos x10
+            const storeLow  = Math.round(mmolLow * 10);
+            const storeHigh = Math.round(mmolHigh * 10);
+            await Promise.all([
+              session.settings.set('low_alert_mmol', storeLow),
+              session.settings.set('high_alert_mmol', storeHigh),
+            ]);
+            result.low_alert_mmol = mmolLow;
+            result.high_alert_mmol = mmolHigh;
+          }
+        }
+      } catch (e) {
+        session?.logger?.debug?.('Sync (startup) skipped/failed', { err: e?.message });
+      }
 
       return result;
     } catch (e) {
@@ -107,8 +216,10 @@ class NightscoutMentraApp extends AppServer {
         updateInterval: 5,
         low_alert_mg: 70, high_alert_mg: 250,
         low_alert_mmol: 3.9, high_alert_mmol: 13.9,
-        alertsEnabled: true, language: 'en', timezone: null, units: 'mg/dL',
-        enable_head_up_display: false
+        alertsEnabled: true, language: 'en', timezone: null, units: UNITS.MGDL,
+        enable_head_up_display: false,
+        display_duration_ms: 5000, alert_duration_ms: 15000, alert_cooldown_ms: 600000,
+        enable_advanced_mode: false
       };
     }
   }
@@ -116,26 +227,51 @@ class NightscoutMentraApp extends AppServer {
   parseSettingsFromArray(arr) {
     const o = {};
     (arr || []).forEach(s => (o[s.key] = s.value));
-    const units = o.units || 'mg/dL';
-    console.log(`🔍 Settings parseados - Units:${units}`);
+    const units = o.units || UNITS.MGDL;
+
+    // update_interval llega como "1"|"5"|"15"
+    const uiMin = parseInt(o.update_interval, 10);
+    const ui = Number.isFinite(uiMin) ? uiMin : 5;
 
     return {
       nightscoutUrl: String(o.nightscout_url || '').trim() || '',
       nightscoutToken: String(o.nightscout_token || '').trim() || '',
-      updateInterval: this.parseSlicerValue(o.update_interval, 5),
+      updateInterval: ui, // MINUTOS
+
       low_alert_mg: this.validateSlicerValue(o.low_alert_mg, 40, 90, 70),
       high_alert_mg: this.validateSlicerValue(o.high_alert_mg, 180, 400, 250),
-      low_alert_mmol: this.validateSlicerValue(o.low_alert_mmol, 2, 5, 3.9),
-      high_alert_mmol: this.validateSlicerValue(o.high_alert_mmol, 8, 30, 13.9),
-      alertsEnabled: (o.alerts_enabled === true || o.alerts_enabled === 'true' || o.alerts_enabled === 1 || o.alerts_enabled === '1'),
+
+      // mmol normalizados (x10 si vienen como enteros)
+      low_alert_mmol: this.normalizeMmol(o.low_alert_mmol) ?? 3.9,
+      high_alert_mmol: this.normalizeMmol(o.high_alert_mmol) ?? 13.9,
+
+      alertsEnabled: this.toBool(o.alerts_enabled),
       language: o.language || 'en',
       timezone: o.timezone || null,
       units,
-      enable_head_up_display: (o.enable_head_up_display === true || o.enable_head_up_display === 'true' || o.enable_head_up_display === 1 || o.enable_head_up_display === '1')
+      enable_head_up_display: this.toBool(o.enable_head_up_display),
+
+      display_duration_ms: this.validateSlicerValue(o.display_duration_ms, 1000, 15000, 5000),
+      alert_duration_ms: this.validateSlicerValue(o.alert_duration_ms, 2000, 60000, 15000),
+      alert_cooldown_ms: this.validateSlicerValue(o.alert_cooldown_ms, 60000, 3600000, 600000),
+
+      // toggle avanzado con dos nombres aceptados
+      enable_advanced_mode: this.toBool(o.enable_advanced_mode) || this.toBool(o.advanced_mode_enabled),
+
+      // familias TIR aceptadas
+      tir_low_mg: this.parseSlicerValue(o.tir_low_mg, null),
+      tir_high_mg: this.parseSlicerValue(o.tir_high_mg, null),
+      tir_low_mmol: this.normalizeMmol(o.tir_low_mmol),
+      tir_high_mmol: this.normalizeMmol(o.tir_high_mmol),
+
+      time_in_range_low_mg: this.parseSlicerValue(o.time_in_range_low_mg, null),
+      time_in_range_high_mg: this.parseSlicerValue(o.time_in_range_high_mg, null),
+      time_in_range_low_mmol: this.normalizeMmol(o.time_in_range_low_mmol),
+      time_in_range_high_mmol: this.normalizeMmol(o.time_in_range_high_mmol),
     };
   }
 
-  /* ---------------- utils ---------------- */
+  /* ---------------- utils de UI ---------------- */
   convertToDisplay(mgdlValue, targetUnit) {
     if (targetUnit === UNITS.MMOL) return (mgdlValue / 18).toFixed(1);
     return Math.round(mgdlValue);
@@ -182,6 +318,57 @@ class NightscoutMentraApp extends AppServer {
     return `${display} ${settings.units} ${trend}\n${timeStr} (${timeAgo})`;
   }
 
+  /* ---------------- TIR de hoy ---------------- */
+  isSameLocalDay(tsA, tsB, tz, locale) {
+    const a = new Date(tsA).toLocaleDateString(locale, { timeZone: tz });
+    const b = new Date(tsB).toLocaleDateString(locale, { timeZone: tz });
+    return a === b;
+  }
+  async getTodayEntries(settings) {
+    const u0 = settings.nightscoutUrl;
+    if (!u0) throw new Error('URL no configurada');
+    let u = u0.startsWith('http') ? u0 : ('https://' + u0);
+    u = u.replace(/\/$/, '');
+
+    // Obtenemos ~últimas 400 y filtramos por hoy (TZ usuario)
+    const endpoint = `${u}/api/v1/entries/sgv.json?count=400`;
+    const params = settings.nightscoutToken ? { token: settings.nightscoutToken } : {};
+    const { data } = await axios.get(endpoint, {
+      params, timeout: 10000, headers: { 'User-Agent': 'MentraOS-Nightscout/2.8.0' }
+    });
+
+    const arr = Array.isArray(data) ? data : (data ? [data] : []);
+    const langSettings = this.getLanguageSettings(settings);
+    const tz = settings.timezone ? this.validateTimezone(settings.timezone) : langSettings.timezone;
+    const locale = langSettings.locale;
+
+    const todayStr = new Date().toLocaleDateString(locale, { timeZone: tz });
+    const today = arr
+      .map(r => ({
+        mgdl: Number(r.sgv ?? r.glucose),
+        date: typeof r.date === 'string' ? new Date(r.date).getTime() : r.date
+      }))
+      .filter(r => Number.isFinite(r.mgdl) && r.date)
+      .filter(r => new Date(r.date).toLocaleDateString(locale, { timeZone: tz }) === todayStr);
+
+    today.sort((a,b)=>a.date-b.date);
+    return today;
+  }
+  calcTirAndMinMax(entries, settings) {
+    if (!entries || entries.length === 0) return { tirPct: null, min: null, max: null, total: 0 };
+    const lim = this.getTirLimitsMg(settings);
+    let inRange = 0, min = Infinity, max = -Infinity;
+    for (const e of entries) {
+      if (e.mgdl >= lim.low && e.mgdl <= lim.high) inRange++;
+      if (e.mgdl < min) min = e.mgdl;
+      if (e.mgdl > max) max = e.mgdl;
+    }
+    const tirPct = Math.round((inRange / entries.length) * 100);
+    if (min === Infinity) min = null;
+    if (max === -Infinity) max = null;
+    return { tirPct, min, max, total: entries.length };
+  }
+
   /* ---------------- Data con fallbacks ---------------- */
   async getGlucoseData(settings) {
     let u = settings.nightscoutUrl;
@@ -198,10 +385,9 @@ class NightscoutMentraApp extends AppServer {
     let lastError;
     for (const endpoint of endpoints) {
       try {
-        console.log(`🔍 Trying endpoint: ${endpoint}`);
         const params = settings.nightscoutToken ? { token: settings.nightscoutToken } : {};
         const { data } = await axios.get(endpoint, {
-          params, timeout: 10000, headers: { 'User-Agent': 'MentraOS-Nightscout/2.6.1' }
+          params, timeout: 10000, headers: { 'User-Agent': 'MentraOS-Nightscout/2.8.0' }
         });
 
         const reading = Array.isArray(data) ? data[0] : data;
@@ -220,9 +406,6 @@ class NightscoutMentraApp extends AppServer {
           direction: reading.direction || reading.trend || 'NONE'
         };
       } catch (error) {
-        if (error?.response?.status === 404) console.log(`⚠️ 404: ${endpoint}`);
-        else if (error?.code === 'ECONNABORTED') console.log(`⏱️ Timeout: ${endpoint}`);
-        else console.warn(`❌ ${endpoint} - ${error.message}`);
         lastError = error;
         continue;
       }
@@ -268,7 +451,7 @@ class NightscoutMentraApp extends AppServer {
     try {
       const data = await this.getGlucoseData(settings);
       const formattedData = await this.formatForG1(data, settings);
-      session.layouts.showTextWall(formattedData);
+      session.layouts.showTextWall(`\n${formattedData}`);
       const t = setTimeout(() => this.hideDisplay(session, sessionId), 5000);
       this.displayTimers.set(sessionId, t);
     } catch (error) {
@@ -290,78 +473,84 @@ class NightscoutMentraApp extends AppServer {
   /* ---------------- Handlers de eventos ---------------- */
   setupEventHandlers(session, sessionId, userId) {
     try {
-      // Botón físico (tap)
+      // Botón físico (tap) → muestra valor actual usando display_duration_ms
       session.events?.onButtonPress?.(async () => {
         const sd = this.activeSessions.get(sessionId);
-        const s = sd?.settings || await this.getUserSettings(session); // cache primero
-        await this.showGlucoseTemporarily(session, sessionId, 10000, s);
+        const s = sd?.settings || await this.getUserSettings(session);
+        await this.showGlucoseTemporarily(session, sessionId, s.display_duration_ms || 4000, s);
       });
 
-      // Cambios de ajustes (compatibilidad con varios nombres de evento)
+      // Cambios de ajustes
       const settingsHandler = async (settingsData) => {
         session.logger?.info('Settings update received', { settingsCount: settingsData?.length });
-        console.log('🎯 Received settings update for user', userId);
-
         try {
-          const parsedSettings = this.parseSettingsFromArray(settingsData || []);
-          const sessionData = this.activeSessions.get(sessionId);
-          if (!sessionData) return;
+          const parsed = this.parseSettingsFromArray(settingsData || []);
+          const sd = this.activeSessions.get(sessionId);
+          if (!sd) return;
 
-          const oldSettings = sessionData.settings || {};
+          const old = sd.settings || {};
 
-          if (oldSettings.units !== parsedSettings.units) {
-            session.logger?.info('Units changed', { from: oldSettings.units, to: parsedSettings.units });
+          // restart ciclo si cambia intervalo
+          if (old.updateInterval !== parsed.updateInterval) {
+            if (sd.updateInterval) { clearInterval(sd.updateInterval); sd.updateInterval = null; }
+            await this.startNormalOperation(session, sessionId, userId, parsed);
           }
-          if (oldSettings.language !== parsedSettings.language) {
-            session.logger?.info('Language changed', { from: oldSettings.language, to: parsedSettings.language });
-          }
-          if (oldSettings.updateInterval !== parsedSettings.updateInterval) {
-            session.logger?.info('Update interval changed', { from: oldSettings.updateInterval, to: parsedSettings.updateInterval });
-            if (sessionData.updateInterval) { clearInterval(sessionData.updateInterval); sessionData.updateInterval = null; }
-            await this.startNormalOperation(session, sessionId, userId, parsedSettings);
-          }
-          if (this.alertLimitsChanged(oldSettings, parsedSettings)) {
+
+          // limpiar historial de alertas si cambian límites
+          if (this.alertLimitsChanged(old, parsed)) {
             this.alertHistory.delete(sessionId);
-            session.logger?.info('Alert limits changed, cleared alert history');
           }
 
-          // Cachea los nuevos settings (no dependas del store para re-lectura inmediata)
-          sessionData.settings = parsedSettings;
-          this.activeSessions.set(sessionId, sessionData);
+          // cache settings
+          sd.settings = parsed;
+          this.activeSessions.set(sessionId, sd);
 
-          // Best-effort persistencia al store (si procede)
+          // sincronización de alertas mg<->mmol (como en arranque)
           try {
-            await Promise.all([
-              session.settings.set('low_alert_mg', parsedSettings.low_alert_mg),
-              session.settings.set('high_alert_mg', parsedSettings.high_alert_mg),
-              session.settings.set('low_alert_mmol', parsedSettings.low_alert_mmol),
-              session.settings.set('high_alert_mmol', parsedSettings.high_alert_mmol),
-              session.settings.set('update_interval', parsedSettings.updateInterval),
-              session.settings.set('alerts_enabled', !!parsedSettings.alertsEnabled),
-              session.settings.set('units', parsedSettings.units),
-              session.settings.set('language', parsedSettings.language),
-              session.settings.set('timezone', parsedSettings.timezone || ''),
-              session.settings.set('enable_head_up_display', !!parsedSettings.enable_head_up_display)
-            ]);
+            if (parsed.units === UNITS.MMOL) {
+              const mgLow = Math.round(parsed.low_alert_mmol * 18);
+              const mgHigh = Math.round(parsed.high_alert_mmol * 18);
+              if (this.isDifferent(parsed.low_alert_mg, mgLow) || this.isDifferent(parsed.high_alert_mg, mgHigh)) {
+                await Promise.all([
+                  session.settings.set('low_alert_mg', mgLow),
+                  session.settings.set('high_alert_mg', mgHigh),
+                ]);
+                parsed.low_alert_mg = mgLow; parsed.high_alert_mg = mgHigh;
+              }
+            } else {
+              const mmolLow  = Number((parsed.low_alert_mg / 18).toFixed(1));
+              const mmolHigh = Number((parsed.high_alert_mg / 18).toFixed(1));
+              const storeLow  = Math.round(mmolLow * 10);
+              const storeHigh = Math.round(mmolHigh * 10);
+              if (this.isDifferent(parsed.low_alert_mmol, mmolLow) || this.isDifferent(parsed.high_alert_mmol, mmolHigh)) {
+                await Promise.all([
+                  session.settings.set('low_alert_mmol', storeLow),
+                  session.settings.set('high_alert_mmol', storeHigh),
+                ]);
+                parsed.low_alert_mmol = mmolLow; parsed.high_alert_mmol = mmolHigh;
+              }
+            }
           } catch (e) {
-            session.logger?.debug('Store persistence skipped/failed', { err: e?.message });
+            session.logger?.debug('Sync (onChange) skipped/failed', { err: e?.message });
           }
 
-          // Eco visual breve para confirmar en gafas (y evitar confusión con la UI de Mentra)
+          // ECO: mostrar los límites en la unidad activa + estado de toggles
           try {
-            const msg = [
-              'Ajustes guardados',
-              `Low mg: ${parsedSettings.low_alert_mg}`,
-              `High mg: ${parsedSettings.high_alert_mg}`,
-              `Units: ${parsedSettings.units}`,
-              `HeadUp: ${parsedSettings.enable_head_up_display ? 'ON' : 'OFF'}`
-            ].join('\n');
-            session.layouts.showTextWall(`\n${msg}`); // desplaza una línea
-            setTimeout(() => this.hideDisplay(session, sessionId), 2000);
+            const lines = ['Ajustes guardados'];
+            if (parsed.units === UNITS.MMOL) {
+              lines.push(`Low: ${parsed.low_alert_mmol} mmol/L`);
+              lines.push(`High: ${parsed.high_alert_mmol} mmol/L`);
+            } else {
+              lines.push(`Low: ${parsed.low_alert_mg} mg/dL`);
+              lines.push(`High: ${parsed.high_alert_mg} mg/dL`);
+            }
+            lines.push(`Units: ${parsed.units}`);
+            lines.push(`HeadUp: ${parsed.enable_head_up_display ? 'ON' : 'OFF'}`);
+            lines.push(`Advanced: ${parsed.enable_advanced_mode ? 'ON' : 'OFF'}`);
+            session.layouts.showTextWall(`\n${lines.join('\n')}`);
+            setTimeout(() => this.hideDisplay(session, sessionId), 2200);
           } catch {}
-
         } catch (error) {
-          console.error('❌ Error processing settings update:', error);
           session.logger?.error(error, 'Failed to process settings update');
         }
       };
@@ -370,7 +559,7 @@ class NightscoutMentraApp extends AppServer {
       session.events?.onSettingsUpdate?.(settingsHandler);
       session.events?.onSettingsChange?.(settingsHandler);
 
-      // HEAD-UP: mostrar al mirar ARRIBA (evita solapar HUD de hora/batería con saltos de línea)
+      // HUD por gesto: levantar la cabeza (usamos display_duration_ms)
       session.events?.onHeadPosition?.(async (data) => {
         try {
           if (data?.position !== 'up') return;
@@ -379,18 +568,38 @@ class NightscoutMentraApp extends AppServer {
           const s = sd?.settings;
           if (!s?.enable_head_up_display) return;
 
-          // Cooldown 10 s
+          // Cooldown usando alert_cooldown_ms? — no: mantenemos 10s para HUD
           const now = Date.now();
           const last = this.headUpLastShown.get(sessionId) || 0;
           if (now - last < 10_000) return;
           this.headUpLastShown.set(sessionId, now);
 
           const reading = await this.getGlucoseData(s);
-          const text = await this.formatForG1(reading, s);
-          session.layouts.showTextWall(`\n\n${text}`); // 2 saltos de línea arriba
-          setTimeout(() => this.hideDisplay(session, sessionId), 4000);
+          let text = await this.formatForG1(reading, s);
+
+          if (s.enable_advanced_mode) {
+            try {
+              const entries = await this.getTodayEntries(s);
+              const { tirPct, min, max, total } = this.calcTirAndMinMax(entries, s);
+              const unit = s.units;
+              const minDisp = (min===null) ? '-' : this.convertToDisplay(min, unit);
+              const maxDisp = (max===null) ? '-' : this.convertToDisplay(max, unit);
+
+              const more = [];
+              more.push('────────────');
+              more.push(tirPct===null ? 'TIR hoy: n/d' : `TIR hoy: ${tirPct}% (${total} lect.)`);
+              more.push(`Min/Max hoy: ${minDisp} / ${maxDisp} ${unit}`);
+
+              text = `${text}\n${more.join('\n')}`;
+            } catch {
+              text = `${text}\n────────────\nTIR hoy: n/d`;
+            }
+          }
+
+          session.layouts.showTextWall(`\n${text}`);
+          setTimeout(() => this.hideDisplay(session, sessionId), s.display_duration_ms || 4000);
         } catch (e) {
-          try { session.layouts.showTextWall('\n\nError al cargar'); } catch {}
+          try { session.layouts.showTextWall('\nError'); } catch {}
           setTimeout(() => this.hideDisplay(session, sessionId), 2000);
         }
       });
@@ -417,14 +626,14 @@ class NightscoutMentraApp extends AppServer {
     }
   }
 
-  /* ---------------- Mostrar temporal con cache primero ---------------- */
+  /* ---------------- Mostrar temporal (botón) ---------------- */
   async showGlucoseTemporarily(session, sessionId, ms, providedSettings) {
     try {
       const sd = this.activeSessions.get(sessionId);
       if (!sd) return;
       const settings = providedSettings || sd.settings || await this.getUserSettings(sd.session);
       const data = await this.getGlucoseData(settings);
-      session.layouts.showTextWall(await this.formatForG1(data, settings));
+      session.layouts.showTextWall(`\n${await this.formatForG1(data, settings)}`);
       const timer = setTimeout(() => this.hideDisplay(session, sessionId), ms);
       this.displayTimers.set(sessionId, timer);
     } catch (error) {
@@ -432,9 +641,9 @@ class NightscoutMentraApp extends AppServer {
     }
   }
 
-  /* ---------------- Bucle normal (usa settings cache) ---------------- */
+  /* ---------------- Bucle normal: fetch + alertas (no pinta HUD) ---------------- */
   async startNormalOperation(session, sessionId, userId, initialSettings) {
-    const ms = (initialSettings.updateInterval || 5) * 60 * 1000;
+    const ms = (initialSettings.updateInterval || 5) * 60 * 1000; // minutos → ms
     const iv = setInterval(async () => {
       if (!this.activeSessions.has(sessionId)) return clearInterval(iv);
       try {
@@ -447,11 +656,11 @@ class NightscoutMentraApp extends AppServer {
       }
     }, ms);
 
-    const sessionData = this.activeSessions.get(sessionId);
-    if (sessionData) {
-      if (sessionData.updateInterval) clearInterval(sessionData.updateInterval);
-      sessionData.updateInterval = iv;
-      this.activeSessions.set(sessionId, sessionData);
+    const sd = this.activeSessions.get(sessionId);
+    if (sd) {
+      if (sd.updateInterval) clearInterval(sd.updateInterval);
+      sd.updateInterval = iv;
+      this.activeSessions.set(sessionId, sd);
     }
   }
 
@@ -462,7 +671,8 @@ class NightscoutMentraApp extends AppServer {
     const display = this.convertToDisplay(mgdl, settings.units);
 
     const last = this.alertHistory.get(sessionId);
-    if (last && Date.now() - last < 600000) return; // 10 min
+    const cooldown = settings.alert_cooldown_ms || 600000;
+    if (last && Date.now() - last < cooldown) return;
 
     const msgs = {
       en: { low: `🚨 LOW GLUCOSE!\n${display} ${settings.units}`, high: `🚨 HIGH GLUCOSE!\n${display} ${settings.units}` },
@@ -476,7 +686,7 @@ class NightscoutMentraApp extends AppServer {
 
     if (msg) {
       session.layouts.showTextWall(msg);
-      const timer = setTimeout(() => this.hideDisplay(session, sessionId), 15000);
+      const timer = setTimeout(() => this.hideDisplay(session, sessionId), settings.alert_duration_ms || 15000);
       this.displayTimers.set(sessionId, timer);
       session.logger?.warn('Alert sent', { type: mgdl <= limits.low ? 'low' : 'high', value: mgdl });
     }
@@ -493,7 +703,7 @@ class NightscoutMentraApp extends AppServer {
     );
   }
 
-  /* ---------------- Tool calls (Mira) ---------------- */
+  /* ---------------- MIRA Tool ---------------- */
   async onToolCall(data) {
     const toolId = data.toolId || data.toolName;
     const userId = data.userId;
@@ -520,9 +730,24 @@ class NightscoutMentraApp extends AppServer {
       const trend = this.getTrendArrow(reading.direction);
       const status = this.getGlucoseStatusText(reading.sgv, settings, lang);
 
+      // Si modo avanzado ON, añadimos TIR/min/max en el mensaje de MIRA
+      let extra = '';
+      if (settings.enable_advanced_mode) {
+        try {
+          const entries = await this.getTodayEntries(settings);
+          const { tirPct, min, max } = this.calcTirAndMinMax(entries, settings);
+          const unit = settings.units;
+          const minDisp = (min===null) ? '-' : this.convertToDisplay(min, unit);
+          const maxDisp = (max===null) ? '-' : this.convertToDisplay(max, unit);
+          if (tirPct!==null) extra = (lang==='es')
+            ? ` TIR hoy: ${tirPct}%. Min/Max: ${minDisp}/${maxDisp} ${unit}.`
+            : ` Today TIR: ${tirPct}%. Min/Max: ${minDisp}/${maxDisp} ${unit}.`;
+        } catch {}
+      }
+
       const msg = lang === 'es'
-        ? `Tu glucosa está en ${display} ${settings.units} ${trend}. Estado: ${status}.`
-        : `Your glucose is ${display} ${settings.units} ${trend}. Status: ${status}.`;
+        ? `Tu glucosa está en ${display} ${settings.units} ${trend}. Estado: ${status}.${extra}`
+        : `Your glucose is ${display} ${settings.units} ${trend}. Status: ${status}.${extra}`;
 
       return { success: true, data: { glucose: display, unit: settings.units, trend, status }, message: msg };
     } catch (e) {
@@ -536,7 +761,7 @@ class NightscoutMentraApp extends AppServer {
     if (value <= limits.low) return lang === 'es' ? 'Bajo' : 'Low';
     if (value > 250) return lang === 'es' ? 'Crítico Alto' : 'Critical High';
     if (value >= limits.high) return lang === 'es' ? 'Alto' : 'High';
-    return 'Normal';
+    return lang === 'es' ? 'Normal' : 'Normal';
   }
 }
 
@@ -552,13 +777,13 @@ server.start().catch(err => {
   process.exit(1);
 });
 
-console.log('🚀 Nightscout MentraOS v2.6.1 — ROBUST + FALLBACK + HEAD-UP');
+console.log('🚀 Nightscout MentraOS v2.8.0 — HUD texto + Modo Avanzado TIR + ecos + MIRA');
 
 const KEEP_ALIVE_URL = process.env.RENDER_URL || 'https://mentra-nightscout.onrender.com';
 server.app.get('/health', (_, res) => res.json({
   status: 'alive',
   timestamp: new Date().toISOString(),
-  version: '2.6.1',
+  version: '2.8.0',
   activeSessions: server.activeSessions.size
 }));
 
