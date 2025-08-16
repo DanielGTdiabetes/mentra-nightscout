@@ -1,5 +1,5 @@
-// src/index.js — Nightscout MentraOS v2.8.0 (HUD texto + Modo Avanzado TIR + ecos + MIRA)
-// Base estructural tomada de v2.6.2 (robusta, con fallback de endpoints y HUD por gesto)
+// src/index.js — Nightscout MentraOS v2.9.0 (HUD texto + TIR con barra |||||, reset diario)
+// Base estructural tomada de v2.8.0 (robusta, con fallback de endpoints y HUD por gesto)
 
 require('dotenv').config();
 
@@ -33,6 +33,10 @@ class NightscoutMentraApp extends AppServer {
     this.alertHistory = new Map();     // sessionId -> timestamp
     this.displayTimers = new Map();    // sessionId -> timeoutId
     this.headUpLastShown = new Map();  // sessionId -> timestamp (cooldown)
+
+    // NUEVO: estado TIR diario y reloj de día
+    this.dailyTirState = new Map();    // sessionId -> { dayStr, total, inRange }
+    this.dayWatchTimers = new Map();   // sessionId -> intervalId
   }
 
   /* ---------------- helpers numéricos ---------------- */
@@ -318,12 +322,37 @@ class NightscoutMentraApp extends AppServer {
     return `${display} ${settings.units} ${trend}\n${timeStr} (${timeAgo})`;
   }
 
-  /* ---------------- TIR de hoy ---------------- */
-  isSameLocalDay(tsA, tsB, tz, locale) {
-    const a = new Date(tsA).toLocaleDateString(locale, { timeZone: tz });
-    const b = new Date(tsB).toLocaleDateString(locale, { timeZone: tz });
-    return a === b;
+  /* ---------------- Día local + barra TIR + actualización estado ---------------- */
+  getLocalDayStr(ts, settings) {
+    const langSettings = this.getLanguageSettings(settings);
+    const tz = settings.timezone ? this.validateTimezone(settings.timezone) : langSettings.timezone;
+    return new Date(ts).toLocaleDateString(langSettings.locale, { timeZone: tz });
   }
+  buildTirBar(tirPct) {
+    if (tirPct === null || !Number.isFinite(tirPct)) return '';
+    const blocks = Math.max(0, Math.min(20, Math.round(tirPct / 5)));
+    return '|'.repeat(blocks);
+  }
+  updateDailyTirState(sessionId, readingMgdl, readingTs, settings) {
+    const range = this.getAlertLimits(settings); // rango: low_alert_mg – high_alert_mg
+    const dayStr = this.getLocalDayStr(readingTs, settings);
+
+    let st = this.dailyTirState.get(sessionId);
+    if (!st || st.dayStr !== dayStr) {
+      st = { dayStr, total: 0, inRange: 0 };
+    }
+
+    if (Number.isFinite(readingMgdl)) {
+      st.total += 1;
+      if (readingMgdl >= range.low && readingMgdl <= range.high) st.inRange += 1;
+    }
+
+    this.dailyTirState.set(sessionId, st);
+    const tirPct = st.total > 0 ? Math.round((st.inRange / st.total) * 100) : null;
+    return { tirPct, total: st.total };
+  }
+
+  /* ---------------- TIR de hoy (desde Nightscout) para semilla/min/max ---------------- */
   async getTodayEntries(settings) {
     const u0 = settings.nightscoutUrl;
     if (!u0) throw new Error('URL no configurada');
@@ -334,7 +363,7 @@ class NightscoutMentraApp extends AppServer {
     const endpoint = `${u}/api/v1/entries/sgv.json?count=400`;
     const params = settings.nightscoutToken ? { token: settings.nightscoutToken } : {};
     const { data } = await axios.get(endpoint, {
-      params, timeout: 10000, headers: { 'User-Agent': 'MentraOS-Nightscout/2.8.0' }
+      params, timeout: 10000, headers: { 'User-Agent': 'MentraOS-Nightscout/2.9.0' }
     });
 
     const arr = Array.isArray(data) ? data : (data ? [data] : []);
@@ -353,20 +382,6 @@ class NightscoutMentraApp extends AppServer {
 
     today.sort((a,b)=>a.date-b.date);
     return today;
-  }
-  calcTirAndMinMax(entries, settings) {
-    if (!entries || entries.length === 0) return { tirPct: null, min: null, max: null, total: 0 };
-    const lim = this.getTirLimitsMg(settings);
-    let inRange = 0, min = Infinity, max = -Infinity;
-    for (const e of entries) {
-      if (e.mgdl >= lim.low && e.mgdl <= lim.high) inRange++;
-      if (e.mgdl < min) min = e.mgdl;
-      if (e.mgdl > max) max = e.mgdl;
-    }
-    const tirPct = Math.round((inRange / entries.length) * 100);
-    if (min === Infinity) min = null;
-    if (max === -Infinity) max = null;
-    return { tirPct, min, max, total: entries.length };
   }
 
   /* ---------------- Data con fallbacks ---------------- */
@@ -387,7 +402,7 @@ class NightscoutMentraApp extends AppServer {
       try {
         const params = settings.nightscoutToken ? { token: settings.nightscoutToken } : {};
         const { data } = await axios.get(endpoint, {
-          params, timeout: 10000, headers: { 'User-Agent': 'MentraOS-Nightscout/2.8.0' }
+          params, timeout: 10000, headers: { 'User-Agent': 'MentraOS-Nightscout/2.9.0' }
         });
 
         const reading = Array.isArray(data) ? data[0] : data;
@@ -437,6 +452,36 @@ class NightscoutMentraApp extends AppServer {
       this.activeSessions.set(sessionId, { session, userId, settings, updateInterval: null });
       this.setupEventHandlers(session, sessionId, userId);
 
+      // Semilla inicial con las lecturas de hoy → TIR diario coherente desde el arranque
+      try {
+        const entries = await this.getTodayEntries(settings);
+        const dayStr = this.getLocalDayStr(Date.now(), settings);
+        const range = this.getAlertLimits(settings);
+        let total = 0, inRange = 0;
+        for (const e of entries) {
+          if (Number.isFinite(e.mgdl)) {
+            total += 1;
+            if (e.mgdl >= range.low && e.mgdl <= range.high) inRange += 1;
+          }
+        }
+        this.dailyTirState.set(sessionId, { dayStr, total, inRange });
+      } catch (e) {
+        session.logger?.debug?.('Seed TIR failed', { err: e?.message });
+      }
+
+      // Reloj de cambio de día (reset a 00:00 local)
+      const dayWatch = setInterval(() => {
+        const sd = this.activeSessions.get(sessionId);
+        if (!sd) return;
+        const s = sd.settings;
+        const st = this.dailyTirState.get(sessionId);
+        const currentDay = this.getLocalDayStr(Date.now(), s);
+        if (!st || st.dayStr !== currentDay) {
+          this.dailyTirState.set(sessionId, { dayStr: currentDay, total: 0, inRange: 0 });
+        }
+      }, 60 * 1000);
+      this.dayWatchTimers.set(sessionId, dayWatch);
+
       await this.showInitialAndHide(session, sessionId, settings);
       await this.startNormalOperation(session, sessionId, userId, settings);
 
@@ -450,8 +495,20 @@ class NightscoutMentraApp extends AppServer {
   async showInitialAndHide(session, sessionId, settings) {
     try {
       const data = await this.getGlucoseData(settings);
+      // contabiliza lectura para TIR
+      this.updateDailyTirState(sessionId, data.sgv, data.date, settings);
+
       const formattedData = await this.formatForG1(data, settings);
-      session.layouts.showTextWall(`\n${formattedData}`);
+      if (settings.enable_advanced_mode) {
+        const { tirPct, total } = this.updateDailyTirState(sessionId, data.sgv, data.date, settings);
+        const tirLine = (tirPct === null)
+          ? (settings.language==='es' ? 'TIR hoy: n/d' : 'Today TIR: n/a')
+          : (settings.language==='es' ? `TIR hoy: ${tirPct}% (${total} lect.)` : `Today TIR: ${tirPct}% (${total} reads)`);
+        const bar = (tirPct === null) ? '' : this.buildTirBar(tirPct);
+        session.layouts.showTextWall(`\n${formattedData}\n────────────\n${tirLine}\n${bar}`);
+      } else {
+        session.layouts.showTextWall(`\n${formattedData}`);
+      }
       const t = setTimeout(() => this.hideDisplay(session, sessionId), 5000);
       this.displayTimers.set(sessionId, t);
     } catch (error) {
@@ -575,25 +632,37 @@ class NightscoutMentraApp extends AppServer {
           this.headUpLastShown.set(sessionId, now);
 
           const reading = await this.getGlucoseData(s);
+          // contabiliza lectura para TIR
+          const tirState = this.updateDailyTirState(sessionId, reading.sgv, reading.date, s);
+
           let text = await this.formatForG1(reading, s);
 
           if (s.enable_advanced_mode) {
+            const { tirPct, total } = tirState;
+            const unit = s.units;
+            let minDisp = '-', maxDisp = '-';
+
+            // Min/Max del día (ligero, usando entries de hoy). Si no interesa, se puede omitir.
             try {
               const entries = await this.getTodayEntries(s);
-              const { tirPct, min, max, total } = this.calcTirAndMinMax(entries, s);
-              const unit = s.units;
-              const minDisp = (min===null) ? '-' : this.convertToDisplay(min, unit);
-              const maxDisp = (max===null) ? '-' : this.convertToDisplay(max, unit);
+              const vals = entries.map(e => e.mgdl).filter(Number.isFinite);
+              if (vals.length) {
+                const min = Math.min(...vals), max = Math.max(...vals);
+                minDisp = this.convertToDisplay(min, unit);
+                maxDisp = this.convertToDisplay(max, unit);
+              }
+            } catch {}
 
-              const more = [];
-              more.push('────────────');
-              more.push(tirPct===null ? 'TIR hoy: n/d' : `TIR hoy: ${tirPct}% (${total} lect.)`);
-              more.push(`Min/Max hoy: ${minDisp} / ${maxDisp} ${unit}`);
+            const tirLine = (tirPct === null) ? 'TIR hoy: n/d' : `TIR hoy: ${tirPct}% (${total} lect.)`;
+            const bar = (tirPct === null) ? '' : this.buildTirBar(tirPct);
 
-              text = `${text}\n${more.join('\n')}`;
-            } catch {
-              text = `${text}\n────────────\nTIR hoy: n/d`;
-            }
+            const more = [];
+            more.push('────────────');
+            more.push(s.language==='es' ? tirLine : (tirPct===null ? 'Today TIR: n/a' : `Today TIR: ${tirPct}% (${total} reads)`));
+            if (bar) more.push(bar);
+            more.push(s.language==='es' ? `Min/Max hoy: ${minDisp} / ${maxDisp} ${unit}` : `Min/Max today: ${minDisp} / ${maxDisp} ${unit}`);
+
+            text = `${text}\n${more.join('\n')}`;
           }
 
           session.layouts.showTextWall(`\n${text}`);
@@ -613,9 +682,15 @@ class NightscoutMentraApp extends AppServer {
         const sd = this.activeSessions.get(sessionId);
         if (sd?.updateInterval) clearInterval(sd.updateInterval);
 
+        // limpiar reloj de cambio de día
+        const dw = this.dayWatchTimers.get(sessionId);
+        if (dw) clearInterval(dw);
+        this.dayWatchTimers.delete(sessionId);
+
         this.activeSessions.delete(sessionId);
         this.alertHistory.delete(sessionId);
         this.headUpLastShown.delete(sessionId);
+        this.dailyTirState.delete(sessionId);
 
         session.logger?.info('Session disconnected');
       });
@@ -633,7 +708,21 @@ class NightscoutMentraApp extends AppServer {
       if (!sd) return;
       const settings = providedSettings || sd.settings || await this.getUserSettings(sd.session);
       const data = await this.getGlucoseData(settings);
-      session.layouts.showTextWall(`\n${await this.formatForG1(data, settings)}`);
+
+      // contabiliza lectura para TIR
+      const { tirPct, total } = this.updateDailyTirState(sessionId, data.sgv, data.date, settings);
+
+      if (settings.enable_advanced_mode) {
+        const header = `\n${await this.formatForG1(data, settings)}`;
+        const tirLine = (tirPct === null)
+          ? (settings.language==='es' ? 'TIR hoy: n/d' : 'Today TIR: n/a')
+          : (settings.language==='es' ? `TIR hoy: ${tirPct}% (${total} lect.)` : `Today TIR: ${tirPct}% (${total} reads)`);
+        const bar = (tirPct === null) ? '' : this.buildTirBar(tirPct);
+        session.layouts.showTextWall(`${header}\n────────────\n${tirLine}\n${bar}`);
+      } else {
+        session.layouts.showTextWall(`\n${await this.formatForG1(data, settings)}`);
+      }
+
       const timer = setTimeout(() => this.hideDisplay(session, sessionId), ms);
       this.displayTimers.set(sessionId, timer);
     } catch (error) {
@@ -650,6 +739,10 @@ class NightscoutMentraApp extends AppServer {
         const sd = this.activeSessions.get(sessionId);
         const s = (sd && sd.settings) ? sd.settings : await this.getUserSettings(session);
         const d = await this.getGlucoseData(s);
+
+        // contabiliza lectura para TIR
+        this.updateDailyTirState(sessionId, d.sgv, d.date, s);
+
         if (s.alertsEnabled) await this.checkAlerts(session, sessionId, d, s);
       } catch (error) {
         session.logger?.debug('Normal operation cycle failed', { error: error.message });
@@ -730,26 +823,22 @@ class NightscoutMentraApp extends AppServer {
       const trend = this.getTrendArrow(reading.direction);
       const status = this.getGlucoseStatusText(reading.sgv, settings, lang);
 
-      // Si modo avanzado ON, añadimos TIR/min/max en el mensaje de MIRA
+      // Actualiza TIR para reflejar estado actual
+      const { tirPct, total } = this.updateDailyTirState(activeSession?.sessionId || 'tool', reading.sgv, reading.date, settings);
+
+      // Si modo avanzado ON, añadimos TIR en el mensaje de MIRA
       let extra = '';
-      if (settings.enable_advanced_mode) {
-        try {
-          const entries = await this.getTodayEntries(settings);
-          const { tirPct, min, max } = this.calcTirAndMinMax(entries, settings);
-          const unit = settings.units;
-          const minDisp = (min===null) ? '-' : this.convertToDisplay(min, unit);
-          const maxDisp = (max===null) ? '-' : this.convertToDisplay(max, unit);
-          if (tirPct!==null) extra = (lang==='es')
-            ? ` TIR hoy: ${tirPct}%. Min/Max: ${minDisp}/${maxDisp} ${unit}.`
-            : ` Today TIR: ${tirPct}%. Min/Max: ${minDisp}/${maxDisp} ${unit}.`;
-        } catch {}
+      if (settings.enable_advanced_mode && Number.isFinite(tirPct)) {
+        extra = (lang==='es')
+          ? ` TIR hoy: ${tirPct}%. (${total} lect.)`
+          : ` Today TIR: ${tirPct}%. (${total} reads)`;
       }
 
       const msg = lang === 'es'
         ? `Tu glucosa está en ${display} ${settings.units} ${trend}. Estado: ${status}.${extra}`
         : `Your glucose is ${display} ${settings.units} ${trend}. Status: ${status}.${extra}`;
 
-      return { success: true, data: { glucose: display, unit: settings.units, trend, status }, message: msg };
+      return { success: true, data: { glucose: display, unit: settings.units, trend, status, tirPct: Number.isFinite(tirPct) ? tirPct : null }, message: msg };
     } catch (e) {
       return { success: false, error: lang === 'es' ? `Error: ${e.message}` : `Error: ${e.message}` };
     }
@@ -777,13 +866,13 @@ server.start().catch(err => {
   process.exit(1);
 });
 
-console.log('🚀 Nightscout MentraOS v2.8.0 — HUD texto + Modo Avanzado TIR + ecos + MIRA');
+console.log('🚀 Nightscout MentraOS v2.9.0 — HUD texto + TIR con barra + reset diario');
 
 const KEEP_ALIVE_URL = process.env.RENDER_URL || 'https://mentra-nightscout.onrender.com';
 server.app.get('/health', (_, res) => res.json({
   status: 'alive',
   timestamp: new Date().toISOString(),
-  version: '2.8.0',
+  version: '2.9.0',
   activeSessions: server.activeSessions.size
 }));
 
