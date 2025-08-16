@@ -1,5 +1,5 @@
-// src/index.js — Nightscout MentraOS v2.6.1
-// SDK 2.1.18 — ROBUST + FALLBACK ENDPOINTS + HEAD-UP DISPLAY + SAFETY SHIMS
+// src/index.js — Nightscout MentraOS v2.6.2
+// SDK 2.1.18 — ROBUST + FALLBACK ENDPOINTS + HEAD-UP DISPLAY + MG/MMOL SYNC + SAFETY SHIMS
 
 require('dotenv').config();
 
@@ -47,6 +47,19 @@ class NightscoutMentraApp extends AppServer {
     const v = this.parseSlicerValue(val, fallback);
     if (!Number.isFinite(v)) return fallback;
     return Math.max(min, Math.min(max, v));
+  }
+
+  // --- Helpers de sincronización mg/dL <-> mmol/L ---
+  syncFromMmolToMg(mmol, min = 40, max = 400) {
+    const mg = Math.round((Number(mmol) || 0) * 18);
+    return Math.max(min, Math.min(max, mg));
+  }
+  syncFromMgToMmol(mg, min = 2, max = 30) {
+    const mmol = Number(((Number(mg) || 0) / 18).toFixed(1));
+    return Math.max(min, Math.min(max, mmol));
+  }
+  isDifferent(a, b, tol = 0.1) {
+    return Math.abs(Number(a) - Number(b)) > tol;
   }
 
   /* ---------------- Util para alarmas ---------------- */
@@ -98,6 +111,35 @@ class NightscoutMentraApp extends AppServer {
         units: units || 'mg/dL',
         enable_head_up_display: (enable_head_up_display === true || enable_head_up_display === 'true' || enable_head_up_display === 1 || enable_head_up_display === '1')
       };
+
+      // --- Normalización/coherencia entre pares (para que la UI siempre muestre equivalentes) ---
+      try {
+        if (result.units === 'mmol/L') {
+          const mgLow = this.syncFromMmolToMg(result.low_alert_mmol);
+          const mgHigh = this.syncFromMmolToMg(result.high_alert_mmol);
+          if (this.isDifferent(result.low_alert_mg, mgLow) || this.isDifferent(result.high_alert_mg, mgHigh)) {
+            await Promise.all([
+              session.settings.set('low_alert_mg', mgLow),
+              session.settings.set('high_alert_mg', mgHigh),
+            ]);
+            result.low_alert_mg = mgLow;
+            result.high_alert_mg = mgHigh;
+          }
+        } else { // mg/dL
+          const mmolLow = this.syncFromMgToMmol(result.low_alert_mg);
+          const mmolHigh = this.syncFromMgToMmol(result.high_alert_mg);
+          if (this.isDifferent(result.low_alert_mmol, mmolLow) || this.isDifferent(result.high_alert_mmol, mmolHigh)) {
+            await Promise.all([
+              session.settings.set('low_alert_mmol', mmolLow),
+              session.settings.set('high_alert_mmol', mmolHigh),
+            ]);
+            result.low_alert_mmol = mmolLow;
+            result.high_alert_mmol = mmolHigh;
+          }
+        }
+      } catch (e) {
+        session?.logger?.debug?.('Sync (startup) skipped/failed', { err: e?.message });
+      }
 
       return result;
     } catch (e) {
@@ -201,7 +243,7 @@ class NightscoutMentraApp extends AppServer {
         console.log(`🔍 Trying endpoint: ${endpoint}`);
         const params = settings.nightscoutToken ? { token: settings.nightscoutToken } : {};
         const { data } = await axios.get(endpoint, {
-          params, timeout: 10000, headers: { 'User-Agent': 'MentraOS-Nightscout/2.6.1' }
+          params, timeout: 10000, headers: { 'User-Agent': 'MentraOS-Nightscout/2.6.2' }
         });
 
         const reading = Array.isArray(data) ? data[0] : data;
@@ -325,11 +367,40 @@ class NightscoutMentraApp extends AppServer {
             session.logger?.info('Alert limits changed, cleared alert history');
           }
 
+          // --- Sincronización bidireccional según unidad activa ---
+          try {
+            if (parsedSettings.units === 'mmol/L') {
+              const mgLowNew  = this.syncFromMmolToMg(parsedSettings.low_alert_mmol);
+              const mgHighNew = this.syncFromMmolToMg(parsedSettings.high_alert_mmol);
+              if (this.isDifferent(parsedSettings.low_alert_mg, mgLowNew) || this.isDifferent(parsedSettings.high_alert_mg, mgHighNew)) {
+                await Promise.all([
+                  session.settings.set('low_alert_mg', mgLowNew),
+                  session.settings.set('high_alert_mg', mgHighNew),
+                ]);
+                parsedSettings.low_alert_mg  = mgLowNew;
+                parsedSettings.high_alert_mg = mgHighNew;
+              }
+            } else { // mg/dL
+              const mmolLowNew  = this.syncFromMgToMmol(parsedSettings.low_alert_mg);
+              const mmolHighNew = this.syncFromMgToMmol(parsedSettings.high_alert_mg);
+              if (this.isDifferent(parsedSettings.low_alert_mmol, mmolLowNew) || this.isDifferent(parsedSettings.high_alert_mmol, mmolHighNew)) {
+                await Promise.all([
+                  session.settings.set('low_alert_mmol', mmolLowNew),
+                  session.settings.set('high_alert_mmol', mmolHighNew),
+                ]);
+                parsedSettings.low_alert_mmol  = mmolLowNew;
+                parsedSettings.high_alert_mmol = mmolHighNew;
+              }
+            }
+          } catch (e) {
+            session.logger?.debug('Sync (onChange) skipped/failed', { err: e?.message });
+          }
+
           // Cachea los nuevos settings (no dependas del store para re-lectura inmediata)
           sessionData.settings = parsedSettings;
           this.activeSessions.set(sessionId, sessionData);
 
-          // Best-effort persistencia al store (si procede)
+          // Persistencia best-effort de los settings principales
           try {
             await Promise.all([
               session.settings.set('low_alert_mg', parsedSettings.low_alert_mg),
@@ -347,16 +418,19 @@ class NightscoutMentraApp extends AppServer {
             session.logger?.debug('Store persistence skipped/failed', { err: e?.message });
           }
 
-          // Eco visual breve para confirmar en gafas (y evitar confusión con la UI de Mentra)
+          // Eco visual breve — solo el par ACTIVO
           try {
-            const msg = [
-              'Ajustes guardados',
-              `Low mg: ${parsedSettings.low_alert_mg}`,
-              `High mg: ${parsedSettings.high_alert_mg}`,
-              `Units: ${parsedSettings.units}`,
-              `HeadUp: ${parsedSettings.enable_head_up_display ? 'ON' : 'OFF'}`
-            ].join('\n');
-            session.layouts.showTextWall(`\n${msg}`); // desplaza una línea
+            const lines = ['Ajustes guardados'];
+            if (parsedSettings.units === 'mmol/L') {
+              lines.push(`Low: ${parsedSettings.low_alert_mmol} mmol/L`);
+              lines.push(`High: ${parsedSettings.high_alert_mmol} mmol/L`);
+            } else {
+              lines.push(`Low: ${parsedSettings.low_alert_mg} mg/dL`);
+              lines.push(`High: ${parsedSettings.high_alert_mg} mg/dL`);
+            }
+            lines.push(`Units: ${parsedSettings.units}`);
+            lines.push(`HeadUp: ${parsedSettings.enable_head_up_display ? 'ON' : 'OFF'}`);
+            session.layouts.showTextWall(`\n${lines.join('\n')}`);
             setTimeout(() => this.hideDisplay(session, sessionId), 2000);
           } catch {}
 
@@ -387,7 +461,7 @@ class NightscoutMentraApp extends AppServer {
 
           const reading = await this.getGlucoseData(s);
           const text = await this.formatForG1(reading, s);
-          session.layouts.showTextWall(`\n\n${text}`); // 2 saltos de línea arriba
+          session.layouts.showTextWall(`\n\n${text}`); // 2 saltos para no chocar con hora/batería
           setTimeout(() => this.hideDisplay(session, sessionId), 4000);
         } catch (e) {
           try { session.layouts.showTextWall('\n\nError al cargar'); } catch {}
@@ -552,13 +626,13 @@ server.start().catch(err => {
   process.exit(1);
 });
 
-console.log('🚀 Nightscout MentraOS v2.6.1 — ROBUST + FALLBACK + HEAD-UP');
+console.log('🚀 Nightscout MentraOS v2.6.2 — ROBUST + FALLBACK + HEAD-UP + SYNC');
 
 const KEEP_ALIVE_URL = process.env.RENDER_URL || 'https://mentra-nightscout.onrender.com';
 server.app.get('/health', (_, res) => res.json({
   status: 'alive',
   timestamp: new Date().toISOString(),
-  version: '2.6.1',
+  version: '2.6.2',
   activeSessions: server.activeSessions.size
 }));
 
