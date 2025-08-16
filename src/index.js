@@ -172,18 +172,52 @@ class NightscoutMentraApp extends AppServer {
   drawString5x7(b,w,h,x,y,txt,scale=1,ls=1){
     let cur=x; for(const ch of String(txt)){ cur+=this.drawChar5x7(b,w,h,cur,y,ch,scale)+ls; } return cur-x;
   }
-  bitmapToBase64(bitmap,w,h){
-    const bytesPerRowNoPad=Math.ceil(w/8), rowSize=Math.ceil(w/32)*4, imageSize=rowSize*h, fileSize=62+imageSize;
-    const header=new Uint8Array(62), view=new DataView(header.buffer);
-    header[0]=0x42; header[1]=0x4D; view.setUint32(2,fileSize,true); view.setUint32(10,62,true);
-    view.setUint32(14,40,true); view.setInt32(18,w,true); view.setInt32(22,h,true);
-    view.setUint16(26,1,true); view.setUint16(28,1,true); view.setUint32(30,0,true);
-    view.setUint32(34,imageSize,true); view.setInt32(38,2835,true); view.setInt32(42,2835,true);
-    view.setUint32(46,2,true); view.setUint32(50,2,true);
-    const result=new Uint8Array(fileSize); result.set(header,0);
-    for(let y=0;y<h;y++){ const src=y*bytesPerRowNoPad, dst=62+(h-1-y)*rowSize; result.set(bitmap.subarray(src,src+bytesPerRowNoPad),dst); }
-    return Buffer.from(result.buffer).toString("base64");
+ bitmapToBase64(bitmap, w, h) {
+  // 1-bit BMP con paleta (2 colores). Fondo = blanco (idx 0), trazos = negro (idx 1)
+  const bytesPerRowNoPad = Math.ceil(w / 8);
+  const rowSize = Math.ceil(w / 32) * 4;           // filas alineadas a 4 bytes
+  const imageSize = rowSize * h;
+  const headerSize = 14 + 40 + 8;                  // File(14) + Info(40) + Palette(8)
+  const fileSize = headerSize + imageSize;
+
+  const buf = new Uint8Array(fileSize);
+  const dv = new DataView(buf.buffer);
+
+  // --- BITMAPFILEHEADER ---
+  buf[0] = 0x42; // 'B'
+  buf[1] = 0x4D; // 'M'
+  dv.setUint32(2, fileSize, true);                 // bfSize
+  dv.setUint32(10, headerSize, true);              // bfOffBits
+
+  // --- BITMAPINFOHEADER ---
+  dv.setUint32(14, 40, true);                      // biSize
+  dv.setInt32(18, w, true);                        // biWidth
+  dv.setInt32(22, h, true);                        // biHeight (positivo = bottom-up)
+  dv.setUint16(26, 1, true);                       // biPlanes
+  dv.setUint16(28, 1, true);                       // biBitCount = 1
+  dv.setUint32(30, 0, true);                       // biCompression = BI_RGB
+  dv.setUint32(34, imageSize, true);               // biSizeImage
+  dv.setInt32(38, 2835, true);                     // biXPelsPerMeter (~72 DPI)
+  dv.setInt32(42, 2835, true);                     // biYPelsPerMeter
+  dv.setUint32(46, 2, true);                       // biClrUsed = 2
+  dv.setUint32(50, 2, true);                       // biClrImportant = 2
+
+  // --- Palette (2 entradas RGBQUAD: B,G,R,0) ---
+  // idx 0 = blanco
+  buf[54] = 0xFF; buf[55] = 0xFF; buf[56] = 0xFF; buf[57] = 0x00;
+  // idx 1 = negro
+  buf[58] = 0x00; buf[59] = 0x00; buf[60] = 0x00; buf[61] = 0x00;
+
+  // --- Datos de imagen (bottom-up) con padding por fila ---
+  for (let y = 0; y < h; y++) {
+    const src = y * bytesPerRowNoPad;
+    const dst = headerSize + (h - 1 - y) * rowSize;
+    buf.set(bitmap.subarray(src, src + bytesPerRowNoPad), dst);
+    // el padding queda a 0 (blanco)
   }
+
+  return Buffer.from(buf.buffer).toString("base64");
+}
 
   /* ---------------- Sparkline ---------------- */
   downsample(points,maxPoints){
