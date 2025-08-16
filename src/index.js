@@ -19,13 +19,16 @@ function safeLayouts(session) {
   return {
     showDashboardCard: (t, s, opts) =>
       session.layouts?.showDashboardCard?.(t, s, opts) ||
-      session.layouts?.showTextWall?.(`${t}\n${s}`, { view: opts?.view, durationMs: opts?.durationMs }),
+      session.layouts?.showTextWall?.(`${t}
+${s}`, { view: opts?.view, durationMs: opts?.durationMs }),
     showDoubleTextWall: (h, b, opts) =>
       session.layouts?.showDoubleTextWall?.(h, b, opts) ||
-      session.layouts?.showTextWall?.(`${h}\n${b}`, { view: opts?.view, durationMs: opts?.durationMs }),
+      session.layouts?.showTextWall?.(`${h}
+${b}`, { view: opts?.view, durationMs: opts?.durationMs }),
     showReferenceCard: (t, s, opts) =>
       session.layouts?.showReferenceCard?.(t, s, opts) ||
-      session.layouts?.showTextWall?.(`${t}\n${s}`, { view: opts?.view, durationMs: opts?.durationMs }),
+      session.layouts?.showTextWall?.(`${t}
+${s}`, { view: opts?.view, durationMs: opts?.durationMs }),
     showTextWall: (txt, opts) => session.layouts?.showTextWall?.(txt, opts),
     clearView: (opts) => session.layouts?.clearView?.(opts),
   };
@@ -52,15 +55,26 @@ const asBool = (v) => (v === true || v === 'true' || v === 1 || v === '1');
 
 // Sparkline ASCII (bloques). Si hay <MIN_POINTS, rellena (padding) con el último valor para que SIEMPRE se vea algo.
 const MIN_POINTS = 3;      // mínimo para usar datos reales
-const SPARK_WIDTH = 8;     // ancho por defecto si hay que sintetizar
+const SPARK_WIDTH = 12;    // ancho fijo recomendado
 function renderSparkline(values) {
   let nums = (values || []).map(Number).filter(Number.isFinite);
-  if (!nums.length) return '';
+  if (!nums.length) return ''.padEnd(SPARK_WIDTH, '.');
   if (nums.length < MIN_POINTS) {
-    // Padding: repite el último valor hasta SPARK_WIDTH
     const last = nums[nums.length - 1];
     while (nums.length < SPARK_WIDTH) nums.push(last);
   }
+  const min = Math.min(...nums); const max = Math.max(...nums);
+  // Caracteres seguros para todas las fuentes de las gafas
+  const blocks = ['.', '-', '_', '=', '~', '^', '*', '#'];
+  if (max === min) return blocks[0].repeat(Math.max(nums.length, SPARK_WIDTH));
+  const range = Math.max(1e-6, max - min);
+  const out = nums.map(v => {
+    const idx = Math.floor(((v - min) / range) * (blocks.length - 1));
+    return blocks[clamp(idx, 0, blocks.length - 1)];
+  }).join('');
+  // Ajusta a ancho fijo
+  return out.slice(-SPARK_WIDTH).padStart(SPARK_WIDTH, blocks[0]);
+}
   const min = Math.min(...nums); const max = Math.max(...nums);
   const blocks = ['▁','▂','▃','▄','▅','▆','▇','█'];
   if (max === min) return blocks[0].repeat(nums.length);
@@ -96,6 +110,7 @@ class NightscoutMentraApp extends AppServer {
     this.sessions = new Map(); // sessionId -> { session, userId, settings, updateIv, cache: { MAIN, DASHBOARD } }
     this.lastAlert = new Map();
     this.headUpLast = new Map();
+    this.headUpShowing = new Map(); // sessionId -> boolean (debounce visual)
   }
 
   /* ----- Settings ----- */
@@ -224,10 +239,20 @@ class NightscoutMentraApp extends AppServer {
     const val = displayValue(reading.sgv, settings.units);
     const arrow = trendArrow(reading.direction);
     if (settings.enable_sparkline_display && spark) {
-      // Usa DoubleTextWall para título y sparkline
       const contentKey = `MAIN|${val}|${settings.units}|${arrow}|${spark}`;
       this.renderIfChanged(sessionId, SafeViewType.MAIN, contentKey, () =>
-        L.showDoubleTextWall('Glucosa', `${val} ${settings.units} ${arrow}\n${spark}`, { view: SafeViewType.MAIN, durationMs: settings.dashboard_duration_ms })
+        L.showDoubleTextWall('Glucosa', `${spark}   ${val} ${settings.units} ${arrow}`, { view: SafeViewType.MAIN, durationMs: settings.dashboard_duration_ms })
+      );
+    } else {
+      const contentKey = `MAIN|${val}|${settings.units}|${arrow}`;
+      this.renderIfChanged(sessionId, SafeViewType.MAIN, contentKey, () =>
+        L.showReferenceCard('Glucosa', `${val} ${settings.units} ${arrow}`, { view: SafeViewType.MAIN, durationMs: settings.dashboard_duration_ms })
+      );
+    }
+  }|${settings.units}|${arrow}|${spark}`;
+      this.renderIfChanged(sessionId, SafeViewType.MAIN, contentKey, () =>
+        L.showDoubleTextWall('Glucosa', `${val} ${settings.units} ${arrow}
+${spark}`, { view: SafeViewType.MAIN, durationMs: settings.dashboard_duration_ms })
       );
     } else {
       const contentKey = `MAIN|${val}|${settings.units}|${arrow}`;
@@ -244,9 +269,20 @@ class NightscoutMentraApp extends AppServer {
     const arrow = trendArrow(latest.direction);
 
     if (settings.enable_sparkline_display && spark) {
-      const contentKey = `DASH|${settings.units}|${spark}`;
+      const contentKey = `DASH|${settings.units}|${spark}|${val}|${arrow}`;
       this.renderIfChanged(sessionId, SafeViewType.DASHBOARD, contentKey, () =>
-        L.showDoubleTextWall('Últimas lecturas', `${val} ${settings.units} ${arrow}\n${spark}`, { view: SafeViewType.DASHBOARD, durationMs: settings.display_duration_ms })
+        L.showDoubleTextWall('Últimas lecturas', `${spark}   ${val} ${settings.units} ${arrow}`, { view: SafeViewType.DASHBOARD, durationMs: settings.display_duration_ms })
+      );
+    } else {
+      const contentKey = `DASH|${settings.units}|${val}|${arrow}`;
+      this.renderIfChanged(sessionId, SafeViewType.DASHBOARD, contentKey, () =>
+        L.showReferenceCard('Glucosa', `${val} ${settings.units} ${arrow}`, { view: SafeViewType.DASHBOARD, durationMs: settings.display_duration_ms })
+      );
+    }
+  }|${spark}`;
+      this.renderIfChanged(sessionId, SafeViewType.DASHBOARD, contentKey, () =>
+        L.showDoubleTextWall('Últimas lecturas', `${val} ${settings.units} ${arrow}
+${spark}`, { view: SafeViewType.DASHBOARD, durationMs: settings.display_duration_ms })
       );
     } else {
       const contentKey = `DASH|${settings.units}|${val}|${arrow}`;
@@ -342,7 +378,9 @@ class NightscoutMentraApp extends AppServer {
       if (parsed.units === UNITS.MMOL) { lines.push(`Low: ${parsed.low_alert_mmol} mmol/L`); lines.push(`High: ${parsed.high_alert_mmol} mmol/L`); }
       else { lines.push(`Low: ${parsed.low_alert_mg} mg/dL`); lines.push(`High: ${parsed.high_alert_mg} mg/dL`); }
       lines.push(`HUD:${parsed.enable_head_up_display ? 'ON':'OFF'} Spark:${parsed.enable_sparkline_display ? 'ON':'OFF'}`);
-      L.showTextWall('\n' + lines.join('\n'), { view: SafeViewType.MAIN, durationMs: 1800 });
+      L.showTextWall('
+' + lines.join('
+'), { view: SafeViewType.MAIN, durationMs: 1800 });
     };
 
     session.events?.onAppSettingsUpdate?.(onSettings);
@@ -355,16 +393,29 @@ class NightscoutMentraApp extends AppServer {
       const st = this.sessions.get(sessionId); if (!st) return;
       const s = st.settings; if (!s?.enable_head_up_display) return;
 
-      const now = Date.now(); const last = this.headUpLast.get(sessionId) || 0; if (now - last < 10_000) return; this.headUpLast.set(sessionId, now);
+      // Debounce fuerte: ignora si ya estamos mostrando dashboard
+      if (this.headUpShowing.get(sessionId)) return;
+
+      const now = Date.now();
+      const last = this.headUpLast.get(sessionId) || 0;
+      if (now - last < 1200) return; // micro-debounce eventos rápidos
+      this.headUpLast.set(sessionId, now);
 
       try {
+        this.headUpShowing.set(sessionId, true);
         const readings = await this.fetchReadings(s, 24);
         const seriesVals = readings.slice(0, 8).map(r => Number(displayValue(r.sgv, s.units))).reverse();
         const base = seriesVals.length ? seriesVals : [Number(displayValue(readings[0].sgv, s.units))];
         const spark = renderSparkline(base);
         this.showDashboard(sessionId, session, s, readings, spark);
       } catch {
-        L.showReferenceCard('Nightscout', 'Sin datos', { view: SafeViewType.DASHBOARD, durationMs: s.display_duration_ms || 2500 });
+        safeLayouts(session).showReferenceCard('Nightscout', 'Sin datos', { view: SafeViewType.DASHBOARD, durationMs: s.display_duration_ms || 2500 });
+      } finally {
+        // libera el lock cuando expire el layout
+        const releaseMs = clamp(Number(s.display_duration_ms) || 4000, 1000, 60000) + 100;
+        setTimeout(() => this.headUpShowing.set(sessionId, false), releaseMs);
+      }
+    });
       }
     });
 
@@ -399,7 +450,9 @@ class NightscoutMentraApp extends AppServer {
         if (s.alertsEnabled && (r.sgv <= lowMg || r.sgv >= highMg)) {
           const type = (r.sgv <= lowMg) ? 'low' : 'high';
           const val = displayValue(r.sgv, s.units);
-          const text = type === 'low' ? `🚨 ¡GLUCOSA BAJA!\n${val} ${s.units}` : `🚨 ¡GLUCOSA ALTA!\n${val} ${s.units}`;
+          const text = type === 'low' ? `🚨 ¡GLUCOSA BAJA!
+${val} ${s.units}` : `🚨 ¡GLUCOSA ALTA!
+${val} ${s.units}`;
           this.renderIfChanged(sessionId, SafeViewType.MAIN, `ALERT|${type}|${val}|${s.units}`,
             () => safeLayouts(session).showReferenceCard('Alerta', text, { view: SafeViewType.MAIN, durationMs: s.alert_duration_ms })
           );
