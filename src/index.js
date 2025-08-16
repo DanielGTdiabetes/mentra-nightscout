@@ -580,25 +580,54 @@ de Nightscout en ajustes` };
 
       session.events?.onHeadPosition?.(async (data) => {
         try {
-          if (data?.position !== 'up') return;
+          const pos = data?.position; if (pos !== 'up' && pos !== 'down') return;
           const sd = this.sessions.get(sessionId);
           const s = sd?.settings;
           if (!s?.enable_head_up_display) return;
           const now = Date.now();
           const last = this.headUpLastShown.get(sessionId) || 0;
-          if (now - last < 5_000) return; // cooldown más corto
+          if (now - last < 5_000) return; // cooldown
           this.headUpLastShown.set(sessionId, now);
 
+          // Asegurar que tenemos al menos una lectura reciente
           let lastReading = (this.glucoseHistory.get(sessionId) || []).slice(-1)[0];
           if (!lastReading) {
             lastReading = (await this.getGlucoseData(s, 1))[0];
             if (lastReading) this.addToGlucoseHistory(sessionId, lastReading);
           }
+
+          // Si el usuario tiene activado sparkline y hay historial, mostramos la gráfica
+          if (s?.enable_sparkline_display) {
+            const history = this.glucoseHistory.get(sessionId) || [];
+            if (history.length > 1) {
+              const values = history.map(h => h.sgv);
+              try {
+                const sdkBmp = await session.layouts.createSparkline(values);
+                if (sdkBmp && typeof sdkBmp === 'string' && sdkBmp.length > 0) {
+                  session.layouts.showBitmapView(sdkBmp, { durationMs: s.dashboard_duration_ms });
+                  return;
+                }
+              } catch (_) { /* fallback abajo */ }
+              try {
+                const bmp = this.generateSparklineBitmap(history, s);
+                session.layouts.showBitmapView(bmp, { durationMs: s.dashboard_duration_ms });
+                return;
+              } catch (_) { /* último recurso: texto */ }
+            }
+          }
+
+          // Fallback: solo texto (valor + hora)
           if (lastReading) {
             const text = await this.formatForG1(lastReading, s);
             session.layouts.showTextWall(`
 
 ${text}`, { durationMs: s.dashboard_duration_ms });
+          }
+        } catch (e) {
+          session.logger?.error(e, 'Head up display failed');
+          try { session.layouts.showTextWall('Error al cargar', { durationMs: 4000 }); } catch {}
+        }
+      });
           }
         } catch (e) {
           session.logger?.error(e, 'Head up display failed');
