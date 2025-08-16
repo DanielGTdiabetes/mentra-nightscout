@@ -1,8 +1,8 @@
 "use strict";
-// src/index.js — Nightscout MentraOS v2.10.1-combined
+// src/index.js — Nightscout MentraOS v2.10.3-combined
 // SDK 2.1.18 — ROBUST + FALLBACK ENDPOINTS + HEAD-UP DISPLAY + MG/MMOL SYNC
 // + SPARKLINE CHARTS + CACHING (LOCAL HISTORY) + COMBINED VIEW (TEXT+SPARKLINE) BMP 576x135
-// v2.10.1 — FIXED: Layout (sparkline/text position) & Head-Up Display logic (auto-hide)
+// v2.10.3 — FIXED: Render fallback logic for empty data & improved rendering flow.
 
 require("dotenv").config();
 
@@ -179,7 +179,7 @@ class NightscoutMentraApp extends AppServer {
       ".":[0x00,0x00,0x00,0x20,0x00,0x00,0x00], "m":[0x00,0x1F,0x10,0x0F,0x10,0x0F,0x00],
       "g":[0x00,0x0C,0x12,0x12,0x0E,0x01,0x1E], "d":[0x00,0x0F,0x10,0x10,0x10,0x0F,0x00],
       "L":[0x3F,0x01,0x01,0x01,0x01,0x01,0x01], "h":[0x00,0x3F,0x08,0x08,0x08,0x07,0x00],
-      "a":[0x00,0x0C,0x12,0x12,0x12,0x1E,0x00], "c":[0x00,0x0C,0x12,0x12,0x12,0x00,0x00],
+      "a":[0x00,0x0C,0x1A,0x1A,0x12,0x04,0x00], "c":[0x00,0x0C,0x12,0x12,0x12,0x00,0x00],
       "e":[0x00,0x0C,0x1A,0x1A,0x12,0x04,0x00], "s":[0x00,0x14,0x1A,0x1A,0x12,0x00,0x00],
       "(": [0x00,0x00,0x1E,0x21,0x00,0x00,0x00], ")": [0x00,0x00,0x21,0x1E,0x00,0x00,0x00],
       "↑":[0x04,0x06,0x05,0x1C,0x05,0x06,0x04], "↓":[0x10,0x30,0x50,0x0F,0x50,0x30,0x10],
@@ -369,7 +369,8 @@ class NightscoutMentraApp extends AppServer {
 
   generateCombinedBitmap(history, lastReading, settings) {
     const bitmap = this.createBitmapCanvas(BMP_WIDTH, BMP_HEIGHT);
-
+    const lang = settings.language || 'en';
+    
     // --- DEBUG: Dibuja un borde de depuración para visualizar el bitmap y las zonas de layout ---
     if (LAYOUT.DEBUG) {
         this.drawRect(bitmap, BMP_WIDTH, BMP_HEIGHT, 0, 0, BMP_WIDTH - 1, BMP_HEIGHT - 1);
@@ -377,6 +378,14 @@ class NightscoutMentraApp extends AppServer {
         this.drawRect(bitmap, BMP_WIDTH, BMP_HEIGHT, x, y, width - 1, height - 1);
     }
 
+    // Lógica de fallback: si no hay datos de lectura, muestra un mensaje de estado
+    if (!lastReading) {
+      const statusMessage = lang === 'es' ? "Cargando..." : "Loading...";
+      const x = Math.floor((BMP_WIDTH - statusMessage.length * (5 * LAYOUT.text.scale + 1)) / 2);
+      this.drawString5x7(bitmap, BMP_WIDTH, BMP_HEIGHT, x, LAYOUT.text.y, statusMessage, LAYOUT.text.scale, 1);
+      return this.bitmapToBase64(bitmap, BMP_WIDTH, BMP_HEIGHT);
+    }
+    
     // Texto principal
     const { line1, line2 } = { ...{ line1: '', line2: '' }, ...((() => {
       // utilizamos la versión sync del formatter (mismos cálculos pero inline)
@@ -389,8 +398,7 @@ class NightscoutMentraApp extends AppServer {
         timeZone: timezone, hour: '2-digit', minute: '2-digit'
       });
       const minutesAgo = Math.floor((Date.now() - lastReading.date) / 60000);
-      const lang = settings.language || 'en';
-      const timeAgo = minutesAgo <= 1 ? (lang === 'es' ? 'ahora' : 'now') : (lang === 'es' ? `hace ${minutesAgo}m` : `${minutesAgo}m ago`);
+      const timeAgo = minutesAgo <= 1 ? (lang === 'es' ? 'ahora' : 'now') : (lang === 'es' ? `${minutesAgo}m ago` : `${minutesAgo}m ago`);
       return { line1: `${display} ${settings.units} ${trend}`, line2: `${timeStr} (${timeAgo})` };
     })()) };
     // Render texto (escala 2 para línea 1, escala 1 para línea 2)
@@ -574,7 +582,7 @@ class NightscoutMentraApp extends AppServer {
     }
 
     // Lógica para mostrar el bitmap
-    const now = Date.EET();
+    const now = Date.sno();
     const lastShown = this.headUpLastShown.get(userId) || 0;
     const isShowingDueToHeadUp = (now - lastShown) <= display_duration_ms;
     
@@ -582,15 +590,13 @@ class NightscoutMentraApp extends AppServer {
       const lastReading = this.glucoseHistory.get(userId)?.lastReading;
       const history = this.glucoseHistory.get(userId)?.history;
       
-      if (lastReading) {
-        const combinedBitmapBase64 = this.generateCombinedBitmap(history, lastReading, await this.getUserSettings(session));
+      const combinedBitmapBase64 = this.generateCombinedBitmap(history, lastReading, await this.getUserSettings(session));
 
-        await session.sendBitmap({
-          bitmap: combinedBitmapBase64,
-          position: 'HeadUpDisplay',
-          id: 'glucose-combined',
-        });
-      }
+      await session.sendBitmap({
+        bitmap: combinedBitmapBase64,
+        position: 'HeadUpDisplay',
+        id: 'glucose-combined',
+      });
     }
   }
 
@@ -609,6 +615,8 @@ class NightscoutMentraApp extends AppServer {
 
     if (!currentReading) {
       this.log(session, "No hay datos de glucosa disponibles. Intente de nuevo más tarde.");
+      // Renderiza con un mensaje de error o estado de "cargando..."
+      await this.render(session, { forceShow: false }); 
       return;
     }
 
@@ -725,4 +733,4 @@ server.start().catch(err => {
   process.exit(1);
 });
 
-console.log('🚀 Nightscout MentraOS v2.10.1-combined — FIXED: Layout & Auto-hide');
+console.log('🚀 Nightscout MentraOS v2.10.3-combined — FIXED: Render fallback logic & improved rendering flow');
