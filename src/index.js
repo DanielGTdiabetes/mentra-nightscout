@@ -154,6 +154,8 @@ class NightscoutMentraApp extends AppServer {
     "↑":[4,6,5,28,5,6,4],"↓":[16,48,80,15,80,48,16],
     "→":[0,8,12,126,12,8,0],"↗":[0,6,5,120,0,0,0],"↘":[0,0,0,120,5,6,0],
     "⇈":[4,6,5,28,5,6,4],"⇊":[16,48,80,15,80,48,16]
+    "o":[0,12,18,18,18,12,0],  // nueva (círculo pequeño)
+    "l":[0,8,8,8,8,8,0],       // nueva (barra vertical)
   }; Object.keys(d).forEach(k=>m[k]=d[k]); return m; })();
 
   drawChar5x7(b,w,h,x,y,ch,scale=1){
@@ -269,16 +271,23 @@ class NightscoutMentraApp extends AppServer {
   validateTimezone(tz){const ok=['Europe/Madrid','Atlantic/Canary','Europe/London','Europe/Paris','Europe/Berlin','Europe/Rome','America/New_York','America/Chicago','America/Los_Angeles','America/Mexico_City','UTC']; return ok.includes(tz)?tz:'UTC';}
 
   async formatLines(reading, settings){
-    const display=this.convertToDisplay(reading.sgv, settings.units);
-    const trend=this.getTrendArrow(reading.direction);
-    const lang=this.getLanguageSettings(settings);
-    const tz=settings.timezone?this.validateTimezone(settings.timezone):lang.timezone;
-    const t=new Date(reading.date).toLocaleTimeString(lang.locale,{timeZone:tz,hour:'2-digit',minute:'2-digit'});
-    const mins=Math.floor((Date.now()-reading.date)/60000);
-    const ago = mins<=1 ? (settings.language==='es'?'ahora':'now') :
-      (settings.language==='es'?`hace ${mins}m`:`${mins}m ago`);
-    return [`${display} ${settings.units} ${trend}`, `${t} (${ago})`];
-  }
+  const display=this.convertToDisplay(reading.sgv, settings.units);
+  const trend=this.getTrendArrow(reading.direction);
+
+  const lang = (settings.language==='es') ? 'es-ES' : 'en-US';
+  const tz = settings.timezone || ((settings.language==='es') ? 'Europe/Madrid' : 'America/New_York');
+
+  const hhmm = new Date(reading.date).toLocaleTimeString(lang, { timeZone: tz, hour:'2-digit', minute:'2-digit' });
+  const mins = Math.max(0, Math.floor((Date.now()-reading.date)/60000));
+
+  // Línea 1: valor + unidad + flecha  (todo soportado por la fuente)
+  const line1 = `${display} ${settings.units} ${trend}`;
+
+  // Línea 2: "HH:MM (Xm)"  -> solo dígitos, :, (, ), m   => todos soportados
+  const line2 = `${hhmm} (${mins}m)`;
+
+  return [line1, line2];
+}
 
   generateCombinedBitmap(history, reading, settings){
     const b=this.createBitmapCanvas(BMP_WIDTH,BMP_HEIGHT);
