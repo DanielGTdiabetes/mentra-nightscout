@@ -40,13 +40,12 @@ const BMP_HEIGHT = 135;
 const SAFE_TOP = 17, SAFE_BOTTOM = 12, SAFE_LEFT = 10, SAFE_RIGHT = 10;
 
 const LAYOUT = {
-  text:  { x: SAFE_LEFT, y: SAFE_TOP + 2, scale: 2 },
+  text:  { x: SAFE_LEFT, y: SAFE_TOP + 10, scale: 2 },  // antes: +2
   spark: {
-    // 50% texto (izq) / 50% spark (dcha)
-    x: Math.floor(BMP_WIDTH * 0.50),        // 288
-    y: SAFE_TOP + 2,                        // 19
-    width: BMP_WIDTH - Math.floor(BMP_WIDTH * 0.50) - SAFE_RIGHT, // 576-288-10 = 278
-    height: BMP_HEIGHT - (SAFE_TOP + 2) - SAFE_BOTTOM - 1,        // 135-19-12-1 = 103
+    x: Math.floor(BMP_WIDTH * 0.50),
+    y: SAFE_TOP + 6,                                     // un poco más bajo
+    width: BMP_WIDTH - Math.floor(BMP_WIDTH * 0.50) - SAFE_RIGHT,
+    height: BMP_HEIGHT - (SAFE_TOP + 6) - SAFE_BOTTOM - 1
   }
 };
 
