@@ -1,537 +1,407 @@
-// src/index.js — Nightscout MentraOS v2.8.0
-// Optimizado: anti-parpadeo, layouts MAIN/DASHBOARD, duraciones configurables, mg/dL↔mmol/L coherente, sparkline opcional
+// index.js – Mentra + Nightscout (revisión 2025-08-16)
+// Objetivos clave:
+// - HUD con sparkline opcional y fallback a último valor cuando no hay datos suficientes.
+// - Watchdog anti-bloqueos: si el HUD o la app quedan "atascados", forzar refresco seguro.
+// - Relectura en caliente de settings (sin reiniciar) y límites de seguridad para los tiempos.
+// - Logs detallados (nivel debug) para diagnosticar eventos head-up y pipeline de datos.
+//
+// NOTA: Esta versión asume un runtime Mentra con API similar a:
+//   - mentra.settings.get(key), .onChange(callback)
+//   - mentra.events.onHeadPosition((pos) => { 'up' | 'down' })
+//   - mentra.display.showHUD(payload), mentra.display.hideHUD()
+//   - mentra.display.showTextWall(text), mentra.display.showToast(text, ms)
+//   - mentra.app.onStart(cb), mentra.app.onStop(cb)
+// Si alguna API difiere, adapta los adaptadores al final de este archivo (Adapter Layer).
 
-require('dotenv').config();
+////////////////////
+// Configuración   //
+////////////////////
+const SETTINGS = {
+  enable_head_up_display: { type: 'toggle', default: true },
+  enable_sparkline_display: { type: 'toggle', default: true },
+  display_duration_ms: { type: 'number', default: 5000, min: 1000, max: 60000 },
+  dashboard_duration_ms: { type: 'number', default: 4000, min: 1000, max: 60000 },
+  alert_duration_ms: { type: 'number', default: 15000, min: 1000, max: 60000 },
+  // Sugerido: unidad y umbrales pueden estar ya en tu backend/App Console.
+  glucose_units: { type: 'select', default: 'mg/dL', options: ['mg/dL', 'mmol/L'] },
+};
 
-const { AppServer, ViewType } = require('@mentra/sdk');
-const axios = require('axios');
+const MIN_POINTS_FOR_SPARKLINE = 5; // si <5 puntos, caemos a fallback de último valor
+const FETCH_COUNT = 36;              // ~3 horas si entrada cada 5 min (ajustable)
+const DATA_STALE_MS = 10 * 60 * 1000; // considerar datos "viejos" si >10 min
+const HEAD_EVENT_DEBOUNCE_MS = 400;   // evita flapping por movimientos rápidos
+const WATCHDOG_INTERVAL_MS = 8000;    // revisa estado cada 8s
 
-/* ---------- Compat: evita crash si el SDK llama a métodos inexistentes ---------- */
-if (typeof Object.prototype.updateSettingsForTesting !== 'function') {
-  Object.defineProperty(Object.prototype, 'updateSettingsForTesting', {
-    value: async function () { /* noop */ },
-    writable: true, configurable: true, enumerable: false
+////////////////////
+// Estado runtime  //
+////////////////////
+let state = {
+  settings: {},
+  lastHeadPos: 'down',
+  hudVisible: false,
+  lastHudRenderAt: 0,
+  lastDataFetchAt: 0,
+  lastSgv: null,
+  watchdogTimer: null,
+  headDebounceTimer: null,
+  refreshingUI: false,
+};
+
+////////////////////
+// Utilidades      //
+////////////////////
+const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+const now = () => Date.now();
+
+function dlog(...args) {
+  // Toggle global si quieres silenciar logs
+  const ENABLE_DEBUG = true;
+  if (ENABLE_DEBUG) console.log('[MentraNS]', ...args);
+}
+
+function msSetting(key) {
+  const def = SETTINGS[key];
+  if (!def) return 0;
+  const raw = Number(state.settings[key] ?? def.default);
+  return clamp(isNaN(raw) ? def.default : raw, def.min ?? 0, def.max ?? 1e9);
+}
+
+function toUserUnits(valueMgdl, units) {
+  if (units === 'mmol/L') return +(valueMgdl / 18.0).toFixed(1);
+  return Math.round(valueMgdl);
+}
+
+function isStale(ts) {
+  return now() - ts > DATA_STALE_MS;
+}
+
+////////////////////
+// Nightscout I/O  //
+////////////////////
+async function fetchNightscoutEntries() {
+  const baseUrl = await adapter.getNightscoutBaseUrl();
+  if (!baseUrl) throw new Error('Nightscout URL no configurada.');
+  const url = `${baseUrl.replace(/\/$/, '')}/api/v1/entries.json?count=${FETCH_COUNT}`;
+  dlog('Fetching', url);
+  const res = await adapter.fetch(url);
+  if (!res.ok) throw new Error(`Nightscout HTTP ${res.status}`);
+  const data = await res.json();
+  // data: [{ sgv, date, direction, ... }]
+  return Array.isArray(data) ? data : [];
+}
+
+function normalizeEntries(entries) {
+  // Ordenar por fecha ascendente (antiguo -> reciente)
+  const sorted = [...entries].sort((a, b) => (a.date || 0) - (b.date || 0));
+  return sorted.map(e => ({
+    ts: e.date || (e.dateString ? new Date(e.dateString).getTime() : null),
+    mgdl: e.sgv ?? null,
+    dir: e.direction || null,
+  })).filter(e => e.ts && e.mgdl);
+}
+
+async function getGlucoseSeries() {
+  const entries = await fetchNightscoutEntries();
+  const norm = normalizeEntries(entries);
+  state.lastDataFetchAt = now();
+  if (norm.length === 0) return { series: [], last: null };
+  const last = norm[norm.length - 1];
+  state.lastSgv = last;
+  return { series: norm, last };
+}
+
+///////////////////////////////
+// Render HUD + Fallback     //
+///////////////////////////////
+async function renderHUD(reason = 'manual') {
+  try {
+    dlog('renderHUD start', { reason });
+    const units = state.settings.glucose_units || SETTINGS.glucose_units.default;
+    const enableSpark = !!(state.settings.enable_sparkline_display ?? SETTINGS.enable_sparkline_display.default);
+
+    const { series, last } = await getGlucoseSeries();
+
+    // Validaciones de datos
+    if (!last) {
+      dlog('Sin datos Nightscout. Fallback texto.');
+      await adapter.displayHUD({
+        title: 'Glucosa',
+        subtitle: 'Sin datos recientes',
+        body: 'Comprueba conexión o URL.',
+        units,
+        value: null,
+        sparkline: null,
+      });
+      state.hudVisible = true;
+      state.lastHudRenderAt = now();
+      return;
+    }
+
+    const valueUser = toUserUnits(last.mgdl, units);
+    const timeStr = new Date(last.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+    let sparkline = null;
+    if (enableSpark && series.length >= MIN_POINTS_FOR_SPARKLINE) {
+      // Genera sparkline base: pares [ts, valor]
+      sparkline = series.map(p => [p.ts, toUserUnits(p.mgdl, units)]);
+    }
+
+    const isDataStale = isStale(last.ts);
+    const subtitle = isDataStale ? `Último: ${timeStr} (desactualizado)` : `Último: ${timeStr}`;
+
+    await adapter.displayHUD({
+      title: 'Glucosa',
+      subtitle,
+      body: sparkline ? 'Últimas lecturas' : 'Último valor',
+      units,
+      value: valueUser,
+      trend: last.dir || null,
+      sparkline, // null -> el adaptador cae a modo texto
+    });
+
+    state.hudVisible = true;
+    state.lastHudRenderAt = now();
+
+    // Auto-ocultar tras display_duration_ms si está en posición UP y luego DOWN
+    const displayMs = msSetting('display_duration_ms');
+    setTimeout(async () => {
+      if (state.hudVisible && state.lastHeadPos === 'down') {
+        await adapter.hideHUD();
+        state.hudVisible = false;
+      }
+    }, displayMs + 50);
+
+  } catch (err) {
+    dlog('renderHUD error', err);
+    await adapter.showToast(`HUD error: ${err.message}`, 3000);
+  }
+}
+
+///////////////////////////////
+// Head position handling    //
+///////////////////////////////
+async function onHeadPosition(pos) {
+  // Debounce para evitar repetición por micro-movimientos
+  if (state.headDebounceTimer) clearTimeout(state.headDebounceTimer);
+  state.headDebounceTimer = setTimeout(async () => {
+    if (pos === state.lastHeadPos) return; // sin cambio real
+    state.lastHeadPos = pos;
+    dlog('Head position:', pos);
+
+    const hudEnabled = !!(state.settings.enable_head_up_display ?? SETTINGS.enable_head_up_display.default);
+    if (!hudEnabled) return;
+
+    if (pos === 'up') {
+      await renderHUD('head_up');
+    } else if (pos === 'down') {
+      await adapter.hideHUD();
+      state.hudVisible = false;
+    }
+  }, HEAD_EVENT_DEBOUNCE_MS);
+}
+
+////////////////////
+// Watchdog        //
+////////////////////
+async function watchdogTick() {
+  try {
+    // Si la app muestra "Iniciando" demasiado tiempo, forzar un refresh suave
+    const sinceRender = now() - (state.lastHudRenderAt || 0);
+    const sinceFetch = now() - (state.lastDataFetchAt || 0);
+
+    // 1) Si el HUD está visible pero llevamos >alert_duration_ms sin refrescar, re-render
+    const alertMs = msSetting('alert_duration_ms');
+    if (state.hudVisible && sinceRender > alertMs) {
+      dlog('Watchdog: re-render HUD (timeout render)');
+      await renderHUD('watchdog_refresh');
+      return;
+    }
+
+    // 2) Si hace mucho que no fetcheamos, fuerza una lectura para evitar quedar con datos viejos
+    if (sinceFetch > 2 * alertMs) {
+      dlog('Watchdog: refresh data');
+      await getGlucoseSeries();
+    }
+
+    // 3) Si el HUD debía ocultarse y cabeza abajo, asegura hideHUD()
+    if (!state.hudVisible && state.lastHeadPos === 'down') {
+      await adapter.hideHUD();
+    }
+  } catch (err) {
+    dlog('Watchdog error', err);
+  }
+}
+
+////////////////////
+// Settings live   //
+////////////////////
+async function loadSettings() {
+  const loaded = {};
+  for (const k of Object.keys(SETTINGS)) {
+    try {
+      let v = await adapter.getSetting(k);
+      if (v == null) v = SETTINGS[k].default;
+      if (SETTINGS[k].type === 'number') {
+        v = clamp(Number(v), SETTINGS[k].min, SETTINGS[k].max);
+      }
+      loaded[k] = v;
+    } catch {
+      loaded[k] = SETTINGS[k].default;
+    }
+  }
+  state.settings = loaded;
+  dlog('Settings loaded:', loaded);
+}
+
+function subscribeSettingsChanges() {
+  adapter.onSettingsChange(async (changed) => {
+    dlog('Settings changed:', changed);
+    // Mezcla cambios y aplica límites
+    for (const [k, v] of Object.entries(changed || {})) {
+      const def = SETTINGS[k];
+      if (!def) continue;
+      let val = v;
+      if (def.type === 'number') {
+        val = clamp(Number(v), def.min, def.max);
+      }
+      state.settings[k] = val;
+    }
+    // Refresca HUD si está visible o si el cambio afecta a la manera de renderizar
+    if (state.hudVisible || 'enable_sparkline_display' in changed || 'glucose_units' in changed) {
+      await renderHUD('settings_changed');
+    }
   });
 }
-/* ------------------------------------------------------------------------------- */
 
-const PACKAGE_NAME = process.env.PACKAGE_NAME || 'com.tucompania.nightscout-glucose';
-const PORT = parseInt(process.env.PORT || '3000', 10);
-const MENTRAOS_API_KEY = process.env.MENTRAOS_API_KEY;
+////////////////////
+// Ciclo de vida   //
+////////////////////
+async function startApp() {
+  if (state.refreshingUI) return;
+  state.refreshingUI = true;
 
-if (!MENTRAOS_API_KEY) {
-  console.error('❌ MENTRAOS_API_KEY environment variable is required');
-  process.exit(1);
+  // Mensaje inicial breve (evita quedar atascado)
+  await adapter.showText('Iniciando app de Mentra…');
+
+  await loadSettings();
+  subscribeSettingsChanges();
+
+  // Suscribirse a eventos de cabeza
+  adapter.onHeadPosition(onHeadPosition);
+
+  // Primer render si ya está la cabeza arriba (por si el evento se perdió)
+  if (state.lastHeadPos === 'up') {
+    await renderHUD('startup_head_up');
+  } else {
+    // Pre-carga datos para que el primer UP sea instantáneo
+    try { await getGlucoseSeries(); } catch (e) { dlog('Preload data error', e); }
+  }
+
+  // Inicia watchdog
+  if (state.watchdogTimer) clearInterval(state.watchdogTimer);
+  state.watchdogTimer = setInterval(watchdogTick, WATCHDOG_INTERVAL_MS);
+
+  // Limpia el texto inicial si todo fue bien
+  await adapter.clearText();
+  state.refreshingUI = false;
 }
 
-const UNITS = { MGDL: 'mg/dL', MMOL: 'mmol/L' };
+async function stopApp() {
+  if (state.watchdogTimer) clearInterval(state.watchdogTimer);
+  await adapter.hideHUD();
+}
 
-/* ========== Utilidades ========== */
-const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
-const toNumber = (x, fb) => {
-  const n = (typeof x === 'object' && x) ? parseFloat(x.value) : parseFloat(x);
-  return Number.isFinite(n) ? n : fb;
+// Registro de ciclo de vida
+adapter.onStart(startApp);
+adapter.onStop(stopApp);
+
+///////////////////////////////////////////////
+// Adapter Layer – aísla diferencias de SDK  //
+///////////////////////////////////////////////
+// Sustituye las funciones aquí si tu entorno difiere.
+const adapter = {
+  // ==== App lifecycle ====
+  onStart(cb) {
+    if (globalThis.mentra?.app?.onStart) return globalThis.mentra.app.onStart(cb);
+    // Fallback inmediato: llama al callback al cargar
+    document?.addEventListener?.('DOMContentLoaded', cb);
+  },
+  onStop(cb) {
+    if (globalThis.mentra?.app?.onStop) return globalThis.mentra.app.onStop(cb);
+    // No-op en fallback
+  },
+
+  // ==== Settings ====
+  async getSetting(key) {
+    if (globalThis.mentra?.settings?.get) return await globalThis.mentra.settings.get(key);
+    return SETTINGS[key]?.default;
+  },
+  onSettingsChange(handler) {
+    if (globalThis.mentra?.settings?.onChange) return globalThis.mentra.settings.onChange(handler);
+    // No-op fallback
+  },
+
+  // ==== Events ====
+  onHeadPosition(handler) {
+    if (globalThis.mentra?.events?.onHeadPosition) return globalThis.mentra.events.onHeadPosition(handler);
+    // Fallback: escucha teclas (U/D) para simular
+    window.addEventListener('keydown', (e) => {
+      if (e.key.toLowerCase() === 'u') handler('up');
+      if (e.key.toLowerCase() === 'd') handler('down');
+    });
+  },
+
+  // ==== Display ====
+  async displayHUD({ title, subtitle, body, units, value, trend, sparkline }) {
+    // Si existe API HUD nativa
+    if (globalThis.mentra?.display?.showHUD) {
+      return await globalThis.mentra.display.showHUD({ title, subtitle, body, units, value, trend, sparkline });
+    }
+    // Fallback: renderiza texto (sin sparkline)
+    const txt = `${title || ''}\n${subtitle || ''}\n${body || ''}\n${value != null ? `${value} ${units || ''}` : ''}`.trim();
+    await this.showText(txt);
+  },
+  async hideHUD() {
+    if (globalThis.mentra?.display?.hideHUD) return await globalThis.mentra.display.hideHUD();
+    await this.clearText();
+  },
+  async showText(text) {
+    if (globalThis.mentra?.display?.showTextWall) return await globalThis.mentra.display.showTextWall(text);
+    const el = ensurePad(); el.textContent = text;
+  },
+  async clearText() {
+    if (globalThis.mentra?.display?.clear) return await globalThis.mentra.display.clear();
+    const el = ensurePad(); el.textContent = '';
+  },
+  async showToast(text, ms = 2000) {
+    if (globalThis.mentra?.display?.showToast) return await globalThis.mentra.display.showToast(text, ms);
+    console.warn('Toast:', text);
+  },
+
+  // ==== Network ====
+  async fetch(url, options) {
+    return await fetch(url, options);
+  },
+  async getNightscoutBaseUrl() {
+    // Intenta setting dedicado; si no, .env u otra clave
+    const k = 'nightscout_base_url';
+    if (globalThis.mentra?.settings?.get) {
+      const v = await globalThis.mentra.settings.get(k);
+      if (v) return v;
+    }
+    // Fallback: window.NS_URL definido por entorno de pruebas
+    return globalThis.NS_URL || '';
+  },
 };
-const asBool = (v) => (v === true || v === 'true' || v === 1 || v === '1');
 
-/** Sparkline ASCII simple */
-function renderSparkline(values) {
-  if (!values || !values.length) return '';
-  const nums = values.map(Number).filter(Number.isFinite);
-  if (!nums.length) return '';
-  const min = Math.min(...nums);
-  const max = Math.max(...nums);
-  const levels = ['▁','▂','▃','▄','▅','▆','▇','█'];
-  if (max === min) return levels[0].repeat(nums.length);
-  const range = max - min;
-  return nums.map(v => {
-    const idx = Math.floor(((v - min) / range) * (levels.length - 1));
-    return levels[clamp(idx, 0, levels.length - 1)];
-  }).join('');
+// Helpers DOM fallback (solo en modos web/testing)
+function ensurePad() {
+  let el = document.getElementById('mentra-pad');
+  if (!el) {
+    el = document.createElement('pre');
+    el.id = 'mentra-pad';
+    el.style.cssText = 'position:fixed;left:8px;top:8px;right:8px;bottom:8px;padding:12px;background:#000;color:#0f0;font:14px/1.4 monospace;white-space:pre-wrap;overflow:auto;z-index:99999;border-radius:12px;';
+    document.body.appendChild(el);
+  }
+  return el;
 }
-
-/** Mapea direction a flecha */
-function trendArrow(dir) {
-  const map = {
-    'DoubleUp':'⇈', 'SingleUp':'↑', 'FortyFiveUp':'↗',
-    'Flat':'→', 'FortyFiveDown':'↘', 'SingleDown':'↓', 'DoubleDown':'⇊',
-    'NONE':'-', 'NOT COMPUTABLE':'→'
-  };
-  return map[dir] || '→';
-}
-
-/** Conv a unidad visual */
-function displayValue(mgdl, unit) {
-  if (unit === UNITS.MMOL) return (Number(mgdl) / 18).toFixed(1);
-  return Math.round(Number(mgdl));
-}
-
-/** Normaliza lecturas de Nightscout -> {sgv, date, direction}[] */
-function normalizeReadings(raw) {
-  const arr = Array.isArray(raw) ? raw : [raw];
-  const readings = arr.map(r => {
-    const sgv = Number(r?.sgv ?? r?.glucose);
-    const dateValue = r?.date || r?.dateString || r?.sysTime;
-    const ts = typeof dateValue === 'string' ? new Date(dateValue).getTime() : Number(dateValue);
-    const direction = r?.direction || r?.trend || 'NONE';
-    return { sgv, date: ts, direction };
-  }).filter(r => Number.isFinite(r.sgv) && Number.isFinite(r.date));
-  readings.sort((a,b) => b.date - a.date);
-  return readings;
-}
-
-/* ========== App ========== */
-class NightscoutMentraApp extends AppServer {
-  constructor(opts) {
-    super(opts);
-    this.sessions = new Map(); // sessionId -> { session, userId, settings, updateIv, cache: {MAIN, DASHBOARD} }
-    this.lastAlert = new Map(); // sessionId -> ts
-    this.headUpLast = new Map(); // sessionId -> ts
-  }
-
-  /* ----- Settings ----- */
-  async getSettings(session) {
-    const [
-      url, token, updateInterval,
-      lowMg, highMg, lowMmol, highMmol,
-      alertsEnabled, language, timezone, units,
-      enable_head_up_display, enable_sparkline_display,
-      display_duration_ms, dashboard_duration_ms, alert_duration_ms
-    ] = await Promise.all([
-      session.settings.get('nightscout_url'),
-      session.settings.get('nightscout_token'),
-      session.settings.get('update_interval'),
-      session.settings.get('low_alert_mg'),
-      session.settings.get('high_alert_mg'),
-      session.settings.get('low_alert_mmol'),
-      session.settings.get('high_alert_mmol'),
-      session.settings.get('alerts_enabled'),
-      session.settings.get('language'),
-      session.settings.get('timezone'),
-      session.settings.get('units'),
-      session.settings.get('enable_head_up_display'),
-      session.settings.get('enable_sparkline_display'),
-      session.settings.get('display_duration_ms'),
-      session.settings.get('dashboard_duration_ms'),
-      session.settings.get('alert_duration_ms'),
-    ]).catch(() => []);
-
-    const settings = {
-      nightscoutUrl: String(url || '').trim(),
-      nightscoutToken: String(token || '').trim(),
-      updateInterval: clamp(toNumber(updateInterval, 5), 1, 60),
-      low_alert_mg: clamp(toNumber(lowMg, 70), 40, 90),
-      high_alert_mg: clamp(toNumber(highMg, 250), 180, 400),
-      low_alert_mmol: clamp(toNumber(lowMmol, 3.9), 2, 5),
-      high_alert_mmol: clamp(toNumber(highMmol, 13.9), 8, 30),
-      alertsEnabled: asBool(alertsEnabled),
-      language: language || 'es',
-      timezone: timezone || 'Europe/Madrid',
-      units: units || UNITS.MGDL,
-      enable_head_up_display: asBool(enable_head_up_display),
-      enable_sparkline_display: asBool(enable_sparkline_display),
-      display_duration_ms: Math.trunc(toNumber(display_duration_ms, 5000)),
-      dashboard_duration_ms: Math.trunc(toNumber(dashboard_duration_ms, 4000)),
-      alert_duration_ms: Math.trunc(toNumber(alert_duration_ms, 15000)),
-    };
-
-    // Sincroniza el par no activo (para mantener consola coherente)
-    try {
-      if (settings.units === UNITS.MMOL) {
-        const mgLow = Math.round(settings.low_alert_mmol * 18);
-        const mgHigh = Math.round(settings.high_alert_mmol * 18);
-        if (mgLow !== settings.low_alert_mg) await session.settings.set('low_alert_mg', mgLow);
-        if (mgHigh !== settings.high_alert_mg) await session.settings.set('high_alert_mg', mgHigh);
-        settings.low_alert_mg = mgLow;
-        settings.high_alert_mg = mgHigh;
-      } else {
-        const mmolLow = Number((settings.low_alert_mg / 18).toFixed(1));
-        const mmolHigh = Number((settings.high_alert_mg / 18).toFixed(1));
-        if (mmolLow !== settings.low_alert_mmol) await session.settings.set('low_alert_mmol', mmolLow);
-        if (mmolHigh !== settings.high_alert_mmol) await session.settings.set('high_alert_mmol', mmolHigh);
-        settings.low_alert_mmol = mmolLow;
-        settings.high_alert_mmol = mmolHigh;
-      }
-    } catch { /* best-effort */ }
-
-    return settings;
-  }
-
-  parseSettingsFromArray(arr) {
-    const o = {};
-    (arr || []).forEach(s => (o[s.key] = s.value));
-    return {
-      nightscoutUrl: String(o.nightscout_url || '').trim(),
-      nightscoutToken: String(o.nightscout_token || '').trim(),
-      updateInterval: clamp(toNumber(o.update_interval, 5), 1, 60),
-      low_alert_mg: clamp(toNumber(o.low_alert_mg, 70), 40, 90),
-      high_alert_mg: clamp(toNumber(o.high_alert_mg, 250), 180, 400),
-      low_alert_mmol: clamp(toNumber(o.low_alert_mmol, 3.9), 2, 5),
-      high_alert_mmol: clamp(toNumber(o.high_alert_mmol, 13.9), 8, 30),
-      alertsEnabled: asBool(o.alerts_enabled),
-      language: o.language || 'es',
-      timezone: o.timezone || 'Europe/Madrid',
-      units: o.units || UNITS.MGDL,
-      enable_head_up_display: asBool(o.enable_head_up_display),
-      enable_sparkline_display: asBool(o.enable_sparkline_display),
-      display_duration_ms: Math.trunc(toNumber(o.display_duration_ms, 5000)),
-      dashboard_duration_ms: Math.trunc(toNumber(o.dashboard_duration_ms, 4000)),
-      alert_duration_ms: Math.trunc(toNumber(o.alert_duration_ms, 15000)),
-    };
-  }
-
-  /* ----- Nightscout ----- */
-  async fetchReadings(settings, count = 8) {
-    let base = settings.nightscoutUrl;
-    if (!base) throw new Error('URL no configurada');
-    if (!base.startsWith('http')) base = 'https://' + base;
-    base = base.replace(/\/$/, '');
-
-    const eps = [
-      `${base}/api/v1/entries/sgv.json?count=${count}`,
-      `${base}/api/v1/entries.json?count=${count}`,
-      `${base}/api/v1/entries/current.json`
-    ];
-
-    let lastErr;
-    for (const ep of eps) {
-      try {
-        const params = settings.nightscoutToken ? { token: settings.nightscoutToken } : {};
-        const { data } = await axios.get(ep, {
-          params, timeout: 10000,
-          headers: { 'User-Agent': 'MentraOS-Nightscout/2.8.0' }
-        });
-        const readings = normalizeReadings(data);
-        if (readings.length) return readings;
-        lastErr = new Error('No glucose rows');
-      } catch (e) { lastErr = e; }
-    }
-    throw new Error(`All endpoints failed: ${lastErr?.message || 'unknown'}`);
-  }
-
-  /* ----- Render helpers con anti-parpadeo ----- */
-  ensureSessionCache(sessionId) {
-    if (!this.sessions.has(sessionId)) return;
-    const state = this.sessions.get(sessionId);
-    if (!state.cache) state.cache = { MAIN: '', DASHBOARD: '' };
-    this.sessions.set(sessionId, state);
-  }
-  renderIfChanged(sessionId, view, content, renderFn) {
-    const key = view === ViewType.DASHBOARD ? 'DASHBOARD' : 'MAIN';
-    this.ensureSessionCache(sessionId);
-    const state = this.sessions.get(sessionId);
-    const prev = state.cache[key];
-    if (content === prev) return false; // no re-render → evita parpadeo
-    renderFn();
-    state.cache[key] = content;
-    this.sessions.set(sessionId, state);
-    return true;
-  }
-
-  showMainCard(sessionId, session, settings, reading) {
-    if (!reading || !Number.isFinite(reading.sgv)) return;
-    const val = displayValue(reading.sgv, settings.units);
-    const arrow = trendArrow(reading.direction);
-    const contentKey = `Glucosa|${val}|${settings.units}|${arrow}`;
-
-    this.renderIfChanged(
-      sessionId,
-      ViewType.MAIN,
-      contentKey,
-      () => session.layouts.showDashboardCard(
-        'Glucosa',
-        `${val} ${settings.units} ${arrow}`,
-        { view: ViewType.MAIN, durationMs: settings.display_duration_ms || 5000 }
-      )
-    );
-  }
-
-  showDashboard(sessionId, session, settings, readings) {
-    const latest = readings?.[0];
-    if (!latest) return;
-
-    const sparkOn = settings.enable_sparkline_display;
-    let bottom;
-    if (sparkOn && readings.length >= 3) {
-      const hist = readings
-        .slice(0, 8)
-        .map(r => Number(displayValue(r.sgv, settings.units)))
-        .reverse(); // antiguo → reciente
-      bottom = renderSparkline(hist);
-    } else {
-      const val = displayValue(latest.sgv, settings.units);
-      const arrow = trendArrow(latest.direction);
-      bottom = `${val} ${settings.units} ${arrow}`;
-    }
-
-    const contentKey = `Dash|${settings.units}|${bottom}`;
-    this.renderIfChanged(
-      sessionId,
-      ViewType.DASHBOARD,
-      contentKey,
-      () => session.layouts.showDoubleTextWall(
-        'Últimas lecturas',
-        bottom,
-        { view: ViewType.DASHBOARD, durationMs: settings.dashboard_duration_ms || 4000 }
-      )
-    );
-  }
-
-  showAlert(sessionId, session, settings, reading, type /* 'low'|'high' */) {
-    const val = displayValue(reading.sgv, settings.units);
-    const title = 'Alerta';
-    const text = type === 'low'
-      ? `🚨 ¡GLUCOSA BAJA!\n${val} ${settings.units}`
-      : `🚨 ¡GLUCOSA ALTA!\n${val} ${settings.units}`;
-    const contentKey = `Alert|${type}|${val}|${settings.units}`;
-
-    const now = Date.now();
-    const last = this.lastAlert.get(sessionId) || 0;
-    if (now - last < 10 * 60 * 1000) return; // antispam 10 min
-
-    const rendered = this.renderIfChanged(
-      sessionId,
-      ViewType.MAIN,
-      contentKey,
-      () => session.layouts.showReferenceCard(
-        title, text,
-        { view: ViewType.MAIN, durationMs: settings.alert_duration_ms || 15000 }
-      )
-    );
-    if (rendered) this.lastAlert.set(sessionId, now);
-  }
-
-  /* ----- Sesión ----- */
-  async onSession(session, sessionId, userId) {
-    session.logger?.info('Session started', { userId, sessionId });
-
-    try {
-      const settings = await this.getSettings(session);
-      if (!settings.nightscoutUrl || !settings.nightscoutToken) {
-        session.layouts.showTextWall(
-          'Configura URL y token de Nightscout en ajustes',
-          { view: ViewType.MAIN, durationMs: 6000 }
-        );
-        return;
-      }
-
-      this.sessions.set(sessionId, { session, userId, settings, updateIv: null, cache: { MAIN: '', DASHBOARD: '' } });
-
-      // Handlers
-      this.setupHandlers(session, sessionId, userId);
-
-      // Primer render corto (MAIN)
-      try {
-        const readings = await this.fetchReadings(settings, 1);
-        this.showMainCard(sessionId, session, settings, readings[0]);
-      } catch (e) {
-        session.layouts.showReferenceCard(
-          'Nightscout',
-          'No se puede conectar. Revisa URL y token',
-          { view: ViewType.MAIN, durationMs: 6000 }
-        );
-      }
-
-      // Loop periódico (alertas)
-      await this.startLoop(session, sessionId);
-
-    } catch (e) {
-      session.logger?.error(e, 'Error iniciando sesión');
-      session.layouts.showReferenceCard('Error', 'Check app settings', { view: ViewType.MAIN, durationMs: 5000 });
-    }
-  }
-
-  setupHandlers(session, sessionId, userId) {
-    // Botón: refresco rápido en MAIN
-    session.events?.onButtonPress?.(async () => {
-      const st = this.sessions.get(sessionId)?.settings || await this.getSettings(session);
-      try {
-        const readings = await this.fetchReadings(st, 1);
-        this.showMainCard(sessionId, session, st, readings[0]);
-      } catch {/* silent */}
-    });
-
-    // Settings update (varios nombres por compat)
-    const onSettings = async (payload) => {
-      const parsed = this.parseSettingsFromArray(payload || []);
-      const state = this.sessions.get(sessionId);
-      if (!state) return;
-
-      // Reinicio del intervalo si cambia frecuencia
-      if (state.settings.updateInterval !== parsed.updateInterval) {
-        if (state.updateIv) clearInterval(state.updateIv);
-        state.updateIv = null;
-        await this.startLoop(session, sessionId, parsed);
-      }
-
-      // Sincroniza pares mg↔mmol (best-effort)
-      try {
-        if (parsed.units === UNITS.MMOL) {
-          const mgLow = Math.round(parsed.low_alert_mmol * 18);
-          const mgHigh = Math.round(parsed.high_alert_mmol * 18);
-          if (mgLow !== parsed.low_alert_mg) await session.settings.set('low_alert_mg', mgLow);
-          if (mgHigh !== parsed.high_alert_mg) await session.settings.set('high_alert_mg', mgHigh);
-          parsed.low_alert_mg = mgLow; parsed.high_alert_mg = mgHigh;
-        } else {
-          const mmolLow = Number((parsed.low_alert_mg / 18).toFixed(1));
-          const mmolHigh = Number((parsed.high_alert_mg / 18).toFixed(1));
-          if (mmolLow !== parsed.low_alert_mmol) await session.settings.set('low_alert_mmol', mmolLow);
-          if (mmolHigh !== parsed.high_alert_mmol) await session.settings.set('high_alert_mmol', mmolHigh);
-          parsed.low_alert_mmol = mmolLow; parsed.high_alert_mmol = mmolHigh;
-        }
-      } catch { /* best-effort */ }
-
-      // Actualiza y resetea cache de render para evitar “quedar clavado”
-      state.settings = parsed;
-      state.cache = { MAIN: '', DASHBOARD: '' };
-      this.sessions.set(sessionId, state);
-
-      // Eco breve
-      const lines = ['Ajustes guardados'];
-      if (parsed.units === UNITS.MMOL) {
-        lines.push(`Low: ${parsed.low_alert_mmol} mmol/L`);
-        lines.push(`High: ${parsed.high_alert_mmol} mmol/L`);
-      } else {
-        lines.push(`Low: ${parsed.low_alert_mg} mg/dL`);
-        lines.push(`High: ${parsed.high_alert_mg} mg/dL`);
-      }
-      lines.push(`HUD:${parsed.enable_head_up_display ? 'ON':'OFF'} Spark:${parsed.enable_sparkline_display ? 'ON':'OFF'}`);
-      session.layouts.showTextWall(`\n${lines.join('\n')}`, { view: ViewType.MAIN, durationMs: 1800 });
-    };
-
-    session.events?.onAppSettingsUpdate?.(onSettings);
-    session.events?.onSettingsUpdate?.(onSettings);
-    session.events?.onSettingsChange?.(onSettings);
-
-    // Head up: mostrar DASHBOARD (con sparkline si está ON)
-    session.events?.onHeadPosition?.(async (data) => {
-      if (!data || data.position !== 'up') return;
-      const state = this.sessions.get(sessionId); if (!state) return;
-      const s = state.settings; if (!s?.enable_head_up_display) return;
-
-      const now = Date.now();
-      const last = this.headUpLast.get(sessionId) || 0;
-      if (now - last < 10_000) return; // cooldown 10s
-      this.headUpLast.set(sessionId, now);
-
-      try {
-        const readings = await this.fetchReadings(s, 8);
-        this.showDashboard(sessionId, session, s, readings);
-      } catch {
-        session.layouts.showDoubleTextWall('Nightscout', 'Sin datos', { view: ViewType.DASHBOARD, durationMs: s.dashboard_duration_ms || 2500 });
-      }
-    });
-
-    // Limpieza
-    session.events?.onDisconnected?.(() => {
-      const st = this.sessions.get(sessionId);
-      if (st?.updateIv) clearInterval(st.updateIv);
-      this.sessions.delete(sessionId);
-      this.lastAlert.delete(sessionId);
-      this.headUpLast.delete(sessionId);
-      session.logger?.info('Session disconnected');
-    });
-  }
-
-  /* ----- Loop periódico (alertas) ----- */
-  async startLoop(session, sessionId, settingsOverride = null) {
-    const st = this.sessions.get(sessionId);
-    if (!st) return;
-    const settings = settingsOverride || st.settings || await this.getSettings(session);
-    const everyMs = clamp(Number(settings.updateInterval) || 5, 1, 60) * 60 * 1000;
-
-    const iv = setInterval(async () => {
-      if (!this.sessions.has(sessionId)) return clearInterval(iv);
-      try {
-        const s = this.sessions.get(sessionId)?.settings || settings;
-        const readings = await this.fetchReadings(s, 1);
-        const r = readings[0];
-        if (!r) return;
-
-        // Alertas
-        if (s.alertsEnabled) {
-          const lowMg  = Math.round(s.units === UNITS.MMOL ? s.low_alert_mmol * 18 : s.low_alert_mg);
-          const highMg = Math.round(s.units === UNITS.MMOL ? s.high_alert_mmol * 18 : s.high_alert_mg);
-          if (r.sgv <= lowMg) this.showAlert(sessionId, session, s, r, 'low');
-          else if (r.sgv >= highMg) this.showAlert(sessionId, session, s, r, 'high');
-        }
-      } catch (e) {
-        session.logger?.debug('Periodic cycle failed', { error: e?.message });
-      }
-    }, everyMs);
-
-    if (st.updateIv) clearInterval(st.updateIv);
-    st.updateIv = iv;
-    this.sessions.set(sessionId, st);
-  }
-
-  /* ----- Mira tool ----- */
-  async onToolCall(data) {
-    const toolId = data.toolId || data.toolName;
-    const userId = data.userId;
-    const activeSession = data.activeSession;
-    const isEs = ['obtener_glucosa','revisar_glucosa','nivel_glucosa','mi_glucosa'].includes(toolId);
-    const lang = isEs ? 'es' : 'en';
-
-    try {
-      let settings = null, session = null;
-      if (activeSession?.settings?.settings) {
-        settings = this.parseSettingsFromArray(activeSession.settings.settings);
-      } else {
-        for (const [sid, st] of this.sessions) {
-          if (st.userId === userId) { settings = st.settings; session = st.session; break; }
-        }
-      }
-      if (!settings?.nightscoutUrl || !settings?.nightscoutToken) {
-        throw new Error(isEs ? 'Nightscout no configurado' : 'Nightscout not configured');
-      }
-
-      const readings = await this.fetchReadings(settings, 1);
-      const r = readings[0];
-      if (!r) throw new Error('Sin datos');
-
-      const val = displayValue(r.sgv, settings.units);
-      const tr = trendArrow(r.direction);
-
-      const lowMg  = Math.round(settings.units === UNITS.MMOL ? settings.low_alert_mmol * 18 : settings.low_alert_mg);
-      const highMg = Math.round(settings.units === UNITS.MMOL ? settings.high_alert_mmol * 18 : settings.high_alert_mg);
-
-      let status = 'Normal';
-      if (r.sgv < 70) status = isEs ? 'Crítico Bajo' : 'Critical Low';
-      else if (r.sgv <= lowMg) status = isEs ? 'Bajo' : 'Low';
-      else if (r.sgv > 250) status = isEs ? 'Crítico Alto' : 'Critical High';
-      else if (r.sgv >= highMg) status = isEs ? 'Alto' : 'High';
-
-      const msg = isEs
-        ? `Tu glucosa está en ${val} ${settings.units} ${tr}. Estado: ${status}.`
-        : `Your glucose is ${val} ${settings.units} ${tr}. Status: ${status}.`;
-
-      return { success: true, data: { glucose: val, unit: settings.units, trend: tr, status }, message: msg };
-    } catch (e) {
-      return { success: false, error: isEs ? `Error: ${e.message}` : `Error: ${e.message}` };
-    }
-  }
-}
-
-/* ----- Init ----- */
-const server = new NightscoutMentraApp({
-  packageName: PACKAGE_NAME,
-  apiKey: MENTRAOS_API_KEY,
-  port: PORT,
-});
-
-server.start().catch(err => {
-  console.error('❌ Error iniciando servidor:', err);
-  process.exit(1);
-});
-
-console.log('🚀 Nightscout MentraOS v2.8.0 — Anti-flicker + Layouts + Sparkline + Durations');
-
-const KEEP_ALIVE_URL = process.env.RENDER_URL || 'https://mentra-nightscout.onrender.com';
-server.app.get('/health', (_, res) => res.json({
-  status: 'alive',
-  timestamp: new Date().toISOString(),
-  version: '2.8.0',
-  activeSessions: server.sessions.size
-}));
-setInterval(() => axios.get(`${KEEP_ALIVE_URL}/health`).catch(() => {}), 3 * 60 * 1000);
