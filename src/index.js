@@ -34,21 +34,24 @@ const UNITS = { MGDL: "mg/dL", MMOL: "mmol/L" };
 const CRITICAL_THRESHOLDS = { LOW_MGDL: 70, HIGH_MGDL: 250 };
 
 /* ------ Dimensiones seguras y layout ------ */
-const BMP_WIDTH  = 526;
-const BMP_HEIGHT = 128;
-const SAFE_TOP = 16, SAFE_BOTTOM = 12, SAFE_LEFT = 10, SAFE_RIGHT = 10;
+const BMP_WIDTH  = 576;
+const BMP_HEIGHT = 135;
+
+const SAFE_TOP = 17, SAFE_BOTTOM = 12, SAFE_LEFT = 10, SAFE_RIGHT = 10;
 
 const LAYOUT = {
   text:  { x: SAFE_LEFT, y: SAFE_TOP + 2, scale: 2 },
   spark: {
-    x: Math.floor(BMP_WIDTH * 0.48),
-    y: SAFE_TOP + 2,
-    width: BMP_WIDTH - Math.floor(BMP_WIDTH * 0.48) - SAFE_RIGHT,
-    height: BMP_HEIGHT - (SAFE_TOP + 2) - SAFE_BOTTOM - 1,
+    // 50% texto (izq) / 50% spark (dcha)
+    x: Math.floor(BMP_WIDTH * 0.50),        // 288
+    y: SAFE_TOP + 2,                        // 19
+    width: BMP_WIDTH - Math.floor(BMP_WIDTH * 0.50) - SAFE_RIGHT, // 576-288-10 = 278
+    height: BMP_HEIGHT - (SAFE_TOP + 2) - SAFE_BOTTOM - 1,        // 135-19-12-1 = 103
   }
 };
 
-const MIN_HISTORY_FOR_SPARKLINE = 6;
+// Durante la prueba, baja el umbral para ver la sparkline enseguida:
+const MIN_HISTORY_FOR_SPARKLINE = 2; // luego vuelve a 6 si quieres
 
 /* ===================================================== */
 class NightscoutMentraApp extends AppServer {
