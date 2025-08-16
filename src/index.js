@@ -503,9 +503,6 @@ Revisa tu configuración` };
       this.handleDisplayError(session, error, settings, actualDuration, isAlert);
     }
   }
-
-  async showInitialAndStart
-
   async showInitialAndStart(session, sessionId, userId) {
     try {
       const settings = await this.getUserSettings(session);
@@ -598,23 +595,35 @@ de Nightscout en ajustes` };
             if (r && r[0]) { lastReading = r[0]; this.addToGlucoseHistory(sessionId, lastReading); }
           }
 
-          // Si el usuario tiene activado sparkline y hay historial, mostramos la gráfica
+          // Si el usuario tiene activado sparkline y hay historial, mostramos primero la gráfica unos segundos y luego el texto
+          let sparkDuration = 0;
           if (s?.enable_sparkline_display) {
             const history = this.glucoseHistory.get(sessionId) || [];
             if (history.length > 1) {
               try {
-                const sdkBmp = await session.layouts.createSparkline(history.map(h => h.sgv));
-                if (sdkBmp && typeof sdkBmp === 'string' && sdkBmp.length > 0) {
-                  await session.layouts.showBitmapView(sdkBmp, { durationMs: s.dashboard_duration_ms });
-                  return;
+                let bmp = null;
+                try {
+                  const sdkBmp = await session.layouts.createSparkline(history.map(h => h.sgv));
+                  if (sdkBmp && typeof sdkBmp === 'string' && sdkBmp.length > 0) bmp = sdkBmp;
+                } catch {}
+                if (!bmp) {
+                  try { bmp = this.generateSparklineBitmap(history, s); } catch {}
+                }
+                if (bmp) {
+                  sparkDuration = Math.min(2500, s.dashboard_duration_ms);
+                  await session.layouts.showBitmapView(bmp, { durationMs: sparkDuration });
                 }
               } catch {}
-              try {
-                const bmp = this.generateSparklineBitmap(history, s);
-                await session.layouts.showBitmapView(bmp, { durationMs: s.dashboard_duration_ms });
-                return;
-              } catch {}
             }
+          }
+
+          // Fallback/seguido: siempre mostramos texto (valor + hora) para el tiempo restante
+          const remaining = Math.max(0, s.dashboard_duration_ms - sparkDuration);
+          if (lastReading) {
+            const text = await this.formatForG1(lastReading, s);
+            await session.layouts.showTextWall(`
+
+${text}`, { durationMs: remaining || 1500 });
           }
 
           // Fallback: solo texto (valor + hora)
