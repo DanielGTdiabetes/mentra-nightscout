@@ -1,5 +1,5 @@
 "use strict";
-// src/index.js — Nightscout MentraOS v2.9.5
+// src/index.js — Nightscout MentraOS v2.9.5-patch1
 // SDK 2.1.18 — ROBUST + FALLBACK ENDPOINTS + HEAD-UP DISPLAY + MG/MMOL SYNC + SAFETY SHIMS + SPARKLINE CHARTS + CACHING (LOCAL HISTORY)
 
 require("dotenv").config();
@@ -89,6 +89,7 @@ class NightscoutMentraApp extends AppServer {
   }
 
   /* ---------------- Sparkline Chart Generation ---------------- */
+  // Nota: usaremos createSparkline del SDK cuando sea posible. Este generador queda como fallback experimental.
   generateSparklineBitmap(readings, settings) {
     const width = 526;
     const height = 100;
@@ -393,6 +394,17 @@ class NightscoutMentraApp extends AppServer {
     this.glucoseHistory.set(sessionId, history);
   }
 
+  // ⚡ Pre-cargar historial para que haya gráfica desde el inicio
+  async preloadHistory(sessionId, settings, points = 24) {
+    try {
+      const readings = await this.getGlucoseData(settings, points);
+      // Orden de más antiguo a más reciente
+      readings.reverse().forEach(r => this.addToGlucoseHistory(sessionId, r));
+    } catch (e) {
+      this.sessions.get(sessionId)?.session?.logger?.debug?.('Preload history failed', { err: e?.message });
+    }
+  }
+
   /* ---------------- Data con fallbacks ---------------- */
   async getGlucoseData(settings, count = 1) {
     let u = settings.nightscoutUrl;
@@ -410,7 +422,7 @@ class NightscoutMentraApp extends AppServer {
         console.log(`🔍 Trying endpoint: ${endpoint}`);
         const params = settings.nightscoutToken ? { token: settings.nightscoutToken } : {};
         const { data } = await axios.get(endpoint, {
-          params, timeout: 10000, headers: { 'User-Agent': 'MentraOS-Nightscout/2.9.5' }
+          params, timeout: 10000, headers: { 'User-Agent': 'MentraOS-Nightscout/2.9.5-patch1' }
         });
         const arr = Array.isArray(data) ? data : (data ? [data] : []);
         if (arr.length === 0) throw new Error('Empty response');
@@ -459,9 +471,10 @@ class NightscoutMentraApp extends AppServer {
           try {
             const sdkBmp = await session.layouts.createSparkline(values);
             session.layouts.showBitmapView(sdkBmp, { durationMs: actualDuration });
-          } catch(_) {
-            const bmpBase64 = this.generateSparklineBitmap(history, settings);
-            session.layouts.showBitmapView(bmpBase64, { durationMs: actualDuration });
+          } catch (_) {
+            // Si el SDK no soporta createSparkline en este dispositivo, mostramos texto
+            const formattedData = await this.formatForG1(lastReading, settings);
+            session.layouts.showTextWall(formattedData, { durationMs: actualDuration });
           }
         } else {
           const formattedData = await this.formatForG1(lastReading, settings);
@@ -485,6 +498,8 @@ class NightscoutMentraApp extends AppServer {
         return;
       }
       this.sessions.set(sessionId, { session, userId, settings, updateInterval: null });
+      // Pre-carga historial para que la gráfica esté disponible desde el primer minuto
+      await this.preloadHistory(sessionId, settings, 24);
       this.setupEventHandlers(session, sessionId);
       await this.showGlucoseDisplay(session, sessionId, settings);
       this.startNormalOperation(session, sessionId, settings);
@@ -547,17 +562,16 @@ class NightscoutMentraApp extends AppServer {
           if (!s?.enable_head_up_display) return;
           const now = Date.now();
           const last = this.headUpLastShown.get(sessionId) || 0;
-          if (now - last < 10_000) return;
+          if (now - last < 5_000) return; // cooldown más corto
           this.headUpLastShown.set(sessionId, now);
 
-          const lastReading = (this.glucoseHistory.get(sessionId) || []).slice(-1)[0];
+          let lastReading = (this.glucoseHistory.get(sessionId) || []).slice(-1)[0];
+          if (!lastReading) {
+            lastReading = (await this.getGlucoseData(s, 1))[0];
+            if (lastReading) this.addToGlucoseHistory(sessionId, lastReading);
+          }
           if (lastReading) {
             const text = await this.formatForG1(lastReading, s);
-            session.layouts.showTextWall(`\n\n${text}`, { durationMs: s.dashboard_duration_ms });
-          } else {
-            const reading = await this.getGlucoseData(s, 1).then(r => r[0]);
-            this.addToGlucoseHistory(sessionId, reading);
-            const text = await this.formatForG1(reading, s);
             session.layouts.showTextWall(`\n\n${text}`, { durationMs: s.dashboard_duration_ms });
           }
         } catch (e) {
@@ -610,7 +624,9 @@ class NightscoutMentraApp extends AppServer {
       lines.push(`Units: ${parsedSettings.units}`);
       lines.push(`HeadUp: ${parsedSettings.enable_head_up_display ? 'ON' : 'OFF'}`);
       lines.push(`Sparkline: ${parsedSettings.enable_sparkline_display ? 'ON' : 'OFF'}`);
-      session.layouts.showTextWall(`\n${lines.join('\n')}`);
+      // Mostrar el eco 2s y luego limpiar para no "pisar" otras vistas
+      session.layouts.showTextWall(`\n${lines.join('\n')}`, { durationMs: 2000 });
+      setTimeout(() => { try { session.layouts.showTextWall(''); } catch {} }, 2100);
     } catch (e) {
       session.logger?.debug('Store persistence skipped/failed', { err: e?.message });
     }
@@ -655,7 +671,7 @@ class NightscoutMentraApp extends AppServer {
     const mgdl = data.sgv;
     const display = this.convertToDisplay(mgdl, settings.units);
     const last = this.alertHistory.get(sessionId);
-    if (last && Date.now() - last < 600000) return;
+    if (last && Date.now() - last < 600000) return; // 10 min
     const msgs = {
       en: { low: `LOW GLUCOSE!`, high: `HIGH GLUCOSE!` },
       es: { low: `¡GLUCOSA BAJA!`, high: `¡GLUCOSA ALTA!` }
@@ -762,13 +778,13 @@ server.start().catch(err => {
   process.exit(1);
 });
 
-console.log('🚀 Nightscout MentraOS v2.9.5 — ROBUST + FALLBACK + HEAD-UP + SYNC + SPARKLINE CHARTS + CACHING (LOCAL HISTORY)');
+console.log('🚀 Nightscout MentraOS v2.9.5-patch1 — ROBUST + FALLBACK + HEAD-UP + SYNC + SPARKLINE CHARTS + CACHING (LOCAL HISTORY)');
 
 const KEEP_ALIVE_URL = process.env.RENDER_URL || 'https://mentra-nightscout.onrender.com';
 server.app.get('/health', (_, res) => res.json({
   status: 'alive',
   timestamp: new Date().toISOString(),
-  version: '2.9.5',
+  version: '2.9.5-patch1',
   activeSessions: server.sessions.size,
   features: ['sparkline', 'head-up', 'alerts', 'mg-mmol-sync', 'fallback-endpoints']
 }));
