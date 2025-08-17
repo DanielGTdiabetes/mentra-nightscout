@@ -45,6 +45,74 @@ class NightscoutMentraApp extends AppServer {
   }
 
   /* ---------- helpers ---------- */
+
+  __delay(ms) { return new Promise(res => setTimeout(res, ms)); }
+  __clamp01(x){ return x < 0 ? 0 : (x > 1 ? 1 : x); }
+  __speedMult(speed){ return speed==='slow' ? 1.35 : (speed==='fast' ? 0.75 : 1.0); }
+  __barFromRatio(ratio, slots){
+    const n = Math.round(this.__clamp01(ratio) * slots);
+    const filled = '│'.repeat(n);
+    const empty  = '·'.repeat(Math.max(0, slots - n));
+    return `[${filled}${empty}]`;
+  }
+
+  /**
+   * Animate TIR bar from 0 → tirPct.
+   * Cancels if a newer render starts (token check).
+   */
+  async animateTIRFill(session, sessionId, s, headerText, tirPct, tLine='', extraLine=''){
+    try {
+      const showBar = !!s.show_tir_bar;
+      const anims   = s.enable_animations !== false;
+      if (!showBar || !anims || tirPct == null || !Number.isFinite(tirPct)){
+        const bar = showBar && tirPct != null ? ' ' + this.__barFromRatio(tirPct/100, Number(s.tir_slots)||16) : '';
+        const tirLine = tirPct == null ? (s.language==='es' ? 'TIR hoy: n/d' : 'TIR: n/a') : (s.language==='es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
+        const line2 = `${tirLine}${bar}` + (tLine ? `\n${tLine}` : '');
+        const out = extraLine ? `${headerText}\n${line2}\n${extraLine}` : `${headerText}\n${line2}`;
+        this.showClamped(session, sessionId, out);
+        return;
+      }
+      // token to cancel old animations
+      if (!this._renderToken) this._renderToken = new Map();
+      const token = (this._renderToken.get(sessionId) || 0) + 1;
+      this._renderToken.set(sessionId, token);
+
+      const slots   = Math.max(8, Number(s.tir_slots) || 16);
+      const leadIn  = Number(s.tir_leadin_ms) || 220;
+      const speedM  = this.__speedMult(String(s.animation_speed||'normal'));
+      const totalMs = Math.max(300, Math.min(2000, Math.round((Number(s.tir_anim_ms)||800) * speedM)));
+      const target  = Math.round(this.__clamp01(tirPct/100) * slots);
+      const perSlot = Math.max(50, Math.min(240, Math.round((totalMs - leadIn) / Math.max(1, target))));
+
+      const tirLine = (s.language==='es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
+
+      // initial (empty)
+      let frame = `${headerText}\n${tirLine} ${this.__barFromRatio(0, slots)}` + (tLine ? `\n${tLine}` : '') + (extraLine ? `\n${extraLine}` : '');
+      this.showClamped(session, sessionId, frame);
+      await this.__delay(leadIn);
+      if (this._renderToken.get(sessionId) !== token) return;
+
+      // fill slots
+      for (let i=1; i<=target; i++){
+        frame = `${headerText}\n${tirLine} ${this.__barFromRatio(i/slots, slots)}` + (tLine ? `\n${tLine}` : '') + (extraLine ? `\n${extraLine}` : '');
+        this.showClamped(session, sessionId, frame);
+        await this.__delay(perSlot);
+        if (this._renderToken.get(sessionId) !== token) return;
+      }
+      // final settle with exact percentage bar
+      frame = `${headerText}\n${tirLine} ${this.__barFromRatio(tirPct/100, slots)}` + (tLine ? `\n${tLine}` : '') + (extraLine ? `\n${extraLine}` : '');
+      this.showClamped(session, sessionId, frame);
+    } catch (_) {
+      // fallback: static render
+      try {
+        const bar = this.__barFromRatio((tirPct||0)/100, Number(s.tir_slots)||16);
+        const tirLine = tirPct == null ? (s.language==='es' ? 'TIR hoy: n/d' : 'TIR: n/a') : (s.language==='es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
+        const line2 = `${tirLine} ${bar}` + (tLine ? `\n${tLine}` : '');
+        const out = extraLine ? `${headerText}\n${line2}\n${extraLine}` : `${headerText}\n${line2}`;
+        this.showClamped(session, sessionId, out);
+      } catch {}
+    }
+  }
   parseSlicerValue(val, fallback) {
     const n = (typeof val === 'object' && val !== null) ? parseFloat(val.value) : parseFloat(val);
     return Number.isFinite(n) ? n : fallback;
@@ -585,8 +653,7 @@ class NightscoutMentraApp extends AppServer {
         const bar = !this.toBool(settings.show_tir_bar) || tirPct === null ? '' : this.buildTirBar(tirPct);
         let tLine = '';
         try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {}
-        this.showClamped(session, sessionId, `${formattedData}
-${this.composeTirLines(settings, tirLine, bar, tLine)}`);
+        await this.animateTIRFill(session, sessionId, settings, formattedData, tirPct, tLine);
       } else {
         this.showClamped(session, sessionId, formattedData);
       }
@@ -700,8 +767,7 @@ if (settings.units === UNITS.MMOL) {
           let tLine = '';
           try { const sum = await this.getRecentTreatments(s, 'day'); tLine = this.formatTreatmentsLine(sum, s); } catch {}
           const line2 = this.composeTirLines(s, tirLine, bar, tLine);
-          const out = minMaxLine ? `${baseLine}\n${line2}\n${minMaxLine}` : `${baseLine}\n${line2}`;
-          this.showClamped(session, sessionId, out);
+          await this.animateTIRFill(session, sessionId, s, baseLine, tirPct, tLine, minMaxLine);
           setTimeout(() => this.hideDisplay(session, sessionId), s.display_duration_ms || 4000);
         } catch (e) {
           this.showClamped(session, sessionId, (s.language==='es' ? 'Error al mostrar' : 'Display error'));
