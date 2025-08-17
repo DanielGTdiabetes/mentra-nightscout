@@ -75,7 +75,7 @@ class NightscoutMentraApp extends AppServer {
   async getUserSettings(session) {
     try {
       const [
-url, token, updateInterval,
+        url, token, updateInterval,
         lowMg, highMg, lowMmol, highMmol,
         alertsEnabled, language, timezone, units,
         enable_head_up_display,
@@ -85,12 +85,8 @@ url, token, updateInterval,
         enable_advanced_mode, advanced_mode_enabled,
         tir_low_mg, tir_high_mg, tir_low_mmol, tir_high_mmol,
         time_in_range_low_mg, time_in_range_high_mg, time_in_range_low_mmol, time_in_range_high_mmol,
-        prediction_horizon_min, official_prediction_only,
-        blink_on_prediction, blink_cycles, blink_interval_ms,
-        enable_animations, animation_speed, tir_anim_ms, tir_fadeout_ms,
-    
       ] = await Promise.all([
-session.settings.get('nightscout_url'),
+        session.settings.get('nightscout_url'),
         session.settings.get('nightscout_token'),
         session.settings.get('update_interval'),
         session.settings.get('low_alert_mg'),
@@ -120,16 +116,6 @@ session.settings.get('nightscout_url'),
         session.settings.get('time_in_range_high_mg'),
         session.settings.get('time_in_range_low_mmol'),
         session.settings.get('time_in_range_high_mmol'),
-        session.settings.get('prediction_horizon_min'),
-        session.settings.get('official_prediction_only'),
-        session.settings.get('blink_on_prediction'),
-        session.settings.get('blink_cycles'),
-        session.settings.get('blink_interval_ms'),
-        session.settings.get('enable_animations'),
-        session.settings.get('animation_speed'),
-        session.settings.get('tir_anim_ms'),
-        session.settings.get('tir_fadeout_ms'),
-    
       ]);
 
       const uiMin = parseInt(updateInterval, 10);
@@ -177,16 +163,6 @@ session.settings.get('nightscout_url'),
         time_in_range_high_mg: this.parseSlicerValue(time_in_range_high_mg, null),
         time_in_range_low_mmol: this.normalizeMmol(time_in_range_low_mmol),
         time_in_range_high_mmol: this.normalizeMmol(time_in_range_high_mmol),
-        prediction_horizon_min: [15,30,60].includes(Number(prediction_horizon_min)) ? Number(prediction_horizon_min) : 30,
-        official_prediction_only: this.toBool(official_prediction_only),
-        blink_on_prediction: (blink_on_prediction === undefined || blink_on_prediction === null) ? true : this.toBool(blink_on_prediction),
-        blink_cycles: this.validateSlicerValue(blink_cycles, 1, 8, 4),
-        blink_interval_ms: this.validateSlicerValue(blink_interval_ms, 80, 600, 180),
-        enable_animations: (enable_animations === undefined || enable_animations === null) ? true : this.toBool(enable_animations),
-        animation_speed: (['slow','normal','fast'].includes(String(animation_speed))) ? String(animation_speed) : 'normal',
-        tir_anim_ms: this.validateSlicerValue(tir_anim_ms, 200, 1200, 500),
-        tir_fadeout_ms: this.validateSlicerValue(tir_fadeout_ms, 80, 600, 160),
-
       };
     } catch (e) {
       console.error('Error leyendo settings:', e);
@@ -253,107 +229,10 @@ session.settings.get('nightscout_url'),
       time_in_range_high_mg: this.parseSlicerValue(o.time_in_range_high_mg, null),
       time_in_range_low_mmol: this.normalizeMmol(o.time_in_range_low_mmol),
       time_in_range_high_mmol: this.normalizeMmol(o.time_in_range_high_mmol),
-      prediction_horizon_min: [15,30,60].includes(Number(o.prediction_horizon_min)) ? Number(o.prediction_horizon_min) : 30,
-      official_prediction_only: this.toBool(o.official_prediction_only),
-      blink_on_prediction: (o.blink_on_prediction === undefined || o.blink_on_prediction === null) ? true : this.toBool(o.blink_on_prediction),
-      blink_cycles: this.validateSlicerValue(o.blink_cycles, 1, 8, 4),
-      blink_interval_ms: this.validateSlicerValue(o.blink_interval_ms, 80, 600, 180),
-      enable_animations: (o.enable_animations === undefined || o.enable_animations === null) ? true : this.toBool(o.enable_animations),
-      animation_speed: (['slow','normal','fast'].includes(String(o.animation_speed))) ? String(o.animation_speed) : 'normal',
-      tir_anim_ms: this.validateSlicerValue(o.tir_anim_ms, 200, 1200, 500),
-      tir_fadeout_ms: this.validateSlicerValue(o.tir_fadeout_ms, 80, 600, 160),
-
     };
   }
 
   /* ---------- UI helpers ---------- */
-
-  /* ---------- Animation helpers ---------- */
-  sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-  easeOutCubic(t){ return 1 - Math.pow(1 - t, 3); }
-  resolveAnimDur(settings, baseMs){
-    const map = { slow: 1.35, normal: 1.0, fast: 0.75 };
-    const mult = map[(settings && settings.animation_speed) || 'normal'] ?? 1.0;
-    const b = Number(baseMs) || 300;
-    const ms = Math.round(Math.max(80, Math.min(2000, b * mult)));
-    return ms;
-  }
-  shouldAnimate(settings){
-    if (!settings) return false;
-    if (settings.enable_animations === false) return false;
-    return true;
-  }
-
-  extractPredictionFromFormattedText(text) {
-    const rx = /([0-9]+(?:\.[0-9]+)?)\s*(mg\/dL|mmol\/L)\s*@\s*(\d+)m\b/;
-    const m = String(text || '').match(rx);
-    if (!m) return null;
-    const value = parseFloat(m[1]);
-    const unit = m[2];
-    const mgdl = unit.toLowerCase().includes('mmol') ? value * 18 : value;
-    return { mgdl, minutes: parseInt(m[3], 10) };
-  }
-
-  async blinkPredictionIfOut(session, sessionId, settings, formattedText) {
-    try {
-      if (!settings || settings.blink_on_prediction === false) return;
-      const pred = this.extractPredictionFromFormattedText(formattedText);
-      if (!pred) return;
-      const limits = this.getAlertLimits(settings);
-      const outLow  = pred.mgdl < limits.low;
-      const outHigh = pred.mgdl > limits.high;
-      if (!outLow && !outHigh) return;
-
-      const cycles = Math.max(1, Math.min(8, Number(settings.blink_cycles) || 4));
-      const interval = Math.max(80, Math.min(600, Number(settings.blink_interval_ms) || 180));
-      const unit = settings.units || UNITS.MGDL;
-      const valDisp = this.convertToDisplay(pred.mgdl, unit);
-      const lang = settings.language || 'en';
-      const warn = lang === 'es'
-        ? (outLow ? `⚠️ Predicción BAJA: ${valDisp} ${unit}` : `⚠️ Predicción ALTA: ${valDisp} ${unit}`)
-        : (outLow ? `⚠️ LOW prediction: ${valDisp} ${unit}` : `⚠️ HIGH prediction: ${valDisp} ${unit}`);
-
-      for (let i = 0; i < cycles; i++) {
-        this.showClamped(session, sessionId, `${formattedText}\n${warn}`);
-        await this.sleep(interval);
-        this.showClamped(session, sessionId, formattedText);
-        await this.sleep(interval);
-      }
-    } catch (_) {}
-  }
-
-  async renderTirAnimatedText(session, sessionId, settings, header, tirLine, tLine, tirPct, minMaxLine) {
-    try {
-      const blocksTarget = Math.max(0, Math.min(20, Math.round((Number(tirPct)||0) / 5)));
-      const animMs = this.resolveAnimDur(settings, settings.tir_anim_ms || 500);
-      const fadeMs = this.resolveAnimDur(settings, settings.tir_fadeout_ms || 160);
-      const steps = Math.max(1, blocksTarget);
-      const stepDelay = Math.max(16, Math.round(animMs / steps));
-      // Progreso
-      for (let i = 0; i <= blocksTarget; i++) {
-        const bar = '│'.repeat(i);
-        const body = this.composeTirLines(settings, tirLine, bar, tLine);
-        const txt = `${header}\n${body}${minMaxLine ? `\n${minMaxLine}` : ''}`;
-        this.showClamped(session, sessionId, txt);
-        await this.sleep(stepDelay);
-      }
-      // Fade-out sutil: 3 pasos
-      const fadeSteps = 3;
-      for (let j = fadeSteps - 1; j >= 0; j--) {
-        const len = Math.round(blocksTarget * (j / fadeSteps));
-        const bar = '│'.repeat(len);
-        const body = this.composeTirLines(settings, tirLine, bar, tLine);
-        const txt = `${header}\n${body}${minMaxLine ? `\n${minMaxLine}` : ''}`;
-        this.showClamped(session, sessionId, txt);
-        await this.sleep(Math.max(30, Math.round(fadeMs / fadeSteps)));
-      }
-      // Estado final sin barra
-      const finalBody = this.composeTirLines(settings, tirLine, '', tLine);
-      const finalTxt = `${header}\n${finalBody}${minMaxLine ? `\n${minMaxLine}` : ''}`;
-      this.showClamped(session, sessionId, finalTxt);
-    } catch (_) {}
-  }
-
   convertToDisplay(mgdlValue, targetUnit) {
     return targetUnit === UNITS.MMOL ? (mgdlValue / 18).toFixed(1) : Math.round(mgdlValue);
   }
@@ -475,6 +354,108 @@ session.settings.get('nightscout_url'),
     const blocks = Math.max(0, Math.min(20, Math.round(tirPct / 5)));
     return '│'.repeat(blocks);
   }
+/* ---------- Animation & Prediction helpers ---------- */
+async function __sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
+const __SPEED_MAP = { slow: 1.35, normal: 1.0, fast: 0.75 };
+function __resolveMs(settings, base){ const mult = __SPEED_MAP[(settings.animation_speed||'normal')] ?? 1.0; return Math.round(Math.max(60, Math.min(2000, base*mult))); }
+function __clamp01(x){ return Math.max(0, Math.min(1, x)); }
+function __barStep(r){ const slots=20; const n = Math.round(__clamp01(r)*slots); return '│'.repeat(n) + '·'.repeat(slots-n); }
+
+/** Compose and animate TIR block as text (when advanced+show_tir_bar). */
+async function animateTIRText(session, sessionId, settings, headerText, tirLine, tirPct, tLine='', extraLine=''){
+  try {
+    const showBar = !!(settings && (settings.show_tir_bar || settings.show_tir_bar === undefined));
+    const advanced = !!(settings && settings.enable_advanced_mode);
+    const enableAnims = settings && settings.enable_animations !== false;
+    const doAnim = showBar && advanced && enableAnims && Number.isFinite(tirPct);
+    const animMs = __resolveMs(settings, Number(settings.tir_anim_ms||500));
+    const steps = Math.max(4, Math.min(20, Math.round(animMs/60)));
+    const per = Math.max(40, Math.round(animMs/steps));
+    const cleanTreat = (tLine||'').replace(/\s+/g,' ').trim();
+    const extras = extraLine ? `\n${extraLine}` : '';
+
+    function compose(ratio){
+      const bar = showBar ? ` [${__barStep(ratio)}]` : '';
+      const l2 = `${tirLine}${bar}`;
+      const tl = cleanTreat ? `\n${cleanTreat}` : '';
+      return `${headerText}\n${l2}${tl}${extras}`;
+    }
+
+    if (!doAnim){
+      const ratio = Number.isFinite(tirPct) ? tirPct/100 : 0;
+      this.showClamped(session, sessionId, compose(ratio));
+      return compose(ratio);
+    }
+
+    let last = '';
+    for (let i=1;i<=steps;i++){
+      const ratio = (tirPct/100)*(i/steps);
+      last = compose(ratio);
+      this.showClamped(session, sessionId, last);
+      await __sleep(per);
+    }
+    // tiny settle frame
+    this.showClamped(session, sessionId, last);
+    return last;
+  } catch (e) {
+    try { this.showClamped(session, sessionId, `${headerText}\n${tirLine}`); } catch(_){}
+    return `${headerText}\n${tirLine}`;
+  }
+}
+
+/** Extracts "123 mg/dL @30m" or "6.8 mmol/L @30m" from any block of text. */
+function extractPredictionFromText(block){
+  const rx = /([0-9]+(?:\.[0-9]+)?)\\s*(mg\\/dL|mmol\\/L)\\s*@\\s*(\\d+)m\\b/;
+  const m = String(block||'').match(rx);
+  if (!m) return null;
+  const v = parseFloat(m[1]);
+  const unit = m[2].toLowerCase();
+  const minutes = parseInt(m[3], 10);
+  const mgdl = unit.includes('mmol') ? v*18 : v;
+  return { mgdl, minutes };
+}
+
+/** Blink a warning line if prediction is out-of-range (uses current alert limits). */
+async function blinkPredictionIfOut(session, sessionId, settings, renderedText){
+  try {
+    if (!settings || settings.blink_on_prediction === false) return;
+    const pred = extractPredictionFromText(renderedText);
+    if (!pred) return;
+    const limits = this.getAlertLimits(settings); // existing helper
+    const outLow  = pred.mgdl < limits.low;
+    const outHigh = pred.mgdl > limits.high;
+    if (!outLow && !outHigh) return;
+
+    const unit = settings.units || UNITS.MGDL;
+    const vDisp = this.convertToDisplay(pred.mgdl, unit);
+    const lang = settings.language || 'en';
+    const warn = lang === 'es'
+      ? (outLow ? `⚠️ Predicción BAJA: ${vDisp} ${unit}` : `⚠️ Predicción ALTA: ${vDisp} ${unit}`)
+      : (outLow ? `⚠️ LOW prediction: ${vDisp} ${unit}` : `⚠️ HIGH prediction: ${vDisp} ${unit}`);
+
+    const cycles = Math.max(1, Math.min(8, Number(settings.blink_cycles) || 4));
+    const interval = Math.max(80, Math.min(600, Number(settings.blink_interval_ms) || 180));
+    for (let i=0;i<cycles;i++){
+      this.showClamped(session, sessionId, `${renderedText}\n${warn}`);
+      await __sleep(interval);
+      this.showClamped(session, sessionId, renderedText);
+      await __sleep(interval);
+    }
+  } catch(_){}
+}
+
+/** Light blink for alerts (LOW/HIGH) to increase salience. */
+async function blinkAlertBlock(session, sessionId, text){
+  try{
+    for (let i=0;i<2;i++){
+      this.showClamped(session, sessionId, text);
+      await __sleep(200);
+      this.showClamped(session, sessionId, text + '\\n'); // minimal change for blink
+      await __sleep(200);
+    }
+  }catch(_){}
+}
+
   /* Compose second line: TIR label+bar and treatments.
      Siempre baja los tratamientos a siguiente línea (sin punto delante). */
   composeTirLines(settings, tirLine, bar, tLine) {
@@ -699,39 +680,6 @@ session.settings.get('nightscout_url'),
       const tirRes = this.updateDailyTirState(sessionId, data.sgv, data.date, settings);
       const formattedData = await this.formatForG1WithPrediction(data, settings);
       if (settings.enable_advanced_mode) {
-        // Animated TIR bar + fade-out + blink on prediction
-        try {
-          const tirPct = (typeof tirRes !== 'undefined' && tirRes && typeof tirRes.tirPct !== 'undefined')
-            ? tirRes.tirPct : null;
-          const header = formattedData;
-          const tirLine = tirPct === null
-            ? (settings.language === 'es' ? 'TIR hoy: n/d' : 'TIR: n/a')
-            : (settings.language === 'es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
-          let tLine = '';
-          try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {}
-          let minMaxLine = '';
-          try {
-            const entries = await this.getTodayEntries(settings);
-            const vals = entries.map(e => e.mgdl).filter(Number.isFinite);
-            if (vals.length) {
-              const min = Math.min(...vals), max = Math.max(...vals);
-              const minDisp = this.convertToDisplay(min, settings.units);
-              const maxDisp = this.convertToDisplay(max, settings.units);
-              minMaxLine = settings.language === 'es'
-                ? `Min/Max hoy: ${minDisp} / ${maxDisp} ${settings.units}`
-                : `Min/Max today: ${minDisp} / ${maxDisp} ${settings.units}`;
-            }
-          } catch {}
-          const timer = setTimeout(() => this.hideDisplay(session, sessionId), settings.display_duration_ms || 5000);
-          this.displayTimers.set(sessionId, timer);
-          if (this.toBool(settings.show_tir_bar) && tirPct !== null && this.shouldAnimate(settings)) {
-            await this.renderTirAnimatedText(session, sessionId, settings, header, tirLine, tLine, tirPct, minMaxLine);
-            const finalTxt = `${header}\n${this.composeTirLines(settings, tirLine, '', tLine)}${minMaxLine ? `\n${minMaxLine}` : ''}`;
-            await this.blinkPredictionIfOut(session, sessionId, settings, finalTxt);
-            return;
-          }
-        } catch (_) {}
-
         const tirPct = tirRes.tirPct;
         const tirLine = tirPct === null
           ? (settings.language === 'es' ? 'TIR hoy: n/d' : 'TIR: n/a')
@@ -739,10 +687,11 @@ session.settings.get('nightscout_url'),
         const bar = !this.toBool(settings.show_tir_bar) || tirPct === null ? '' : this.buildTirBar(tirPct);
         let tLine = '';
         try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {}
-        this.showClamped(session, sessionId, `${formattedData}
-${this.composeTirLines(settings, tirLine, bar, tLine)}`);
+        const __txt0 = await animateTIRText.call(this, session, sessionId, settings, formattedData, tirLine, tirPct, tLine);
+      await blinkPredictionIfOut.call(this, session, sessionId, settings, __txt0);
       } else {
         this.showClamped(session, sessionId, formattedData);
+      await blinkPredictionIfOut.call(this, session, sessionId, settings, formattedData);
       }
       const t = setTimeout(() => this.hideDisplay(session, sessionId), settings.display_duration_ms || 5000);
       this.displayTimers.set(sessionId, t);
@@ -892,10 +841,12 @@ if (settings.units === UNITS.MMOL) {
         const bar = !this.toBool(settings.show_tir_bar) || tirPct === null ? '' : this.buildTirBar(tirPct);
         let tLine = '';
         try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {}
-        this.showClamped(session, sessionId, `${header}
-${this.composeTirLines(settings, tirLine, bar, tLine)}`);
+        const __txt1 = await animateTIRText.call(this, session, sessionId, settings, header, tirLine, tirPct, tLine);
+      await blinkPredictionIfOut.call(this, session, sessionId, settings, __txt1);
       } else {
-        this.showClamped(session, sessionId, await this.formatForG1WithPrediction(data, settings));
+        const __txt2 = await this.formatForG1WithPrediction(data, settings);
+      this.showClamped(session, sessionId, __txt2);
+      await blinkPredictionIfOut.call(this, session, sessionId, settings, __txt2);
       }
       const timer = setTimeout(() => this.hideDisplay(session, sessionId), ms);
       this.displayTimers.set(sessionId, timer);
