@@ -142,9 +142,7 @@ session.settings.get('display_duration_ms'),
 
       
       
-    const showPrediction = this.toBool(o.show_prediction);
-    const predictionHorizonMin = this.validateSlicerValue(o.prediction_horizon_min, 10, 60, 30);
-const showPrediction = this.toBool(show_prediction);
+    const showPrediction = this.toBool(show_prediction);
       const predictionHorizonMin = this.validateSlicerValue(prediction_horizon_min, 10, 60, 30);
 return {
         nightscoutUrl: String(url || '').trim() || '',
@@ -218,6 +216,9 @@ enable_advanced_mode: false,
     const showTirBar = (o.show_tir_bar === null && o.show_range_bar === null)
       ? true
       : (this.toBool(o.show_tir_bar) || this.toBool(o.show_range_bar));
+    const showPrediction = this.toBool(o.show_prediction);
+    const predictionHorizonMin = this.validateSlicerValue(o.prediction_horizon_min, 10, 60, 30);
+
 
     return {
       nightscoutUrl: String(o.nightscout_url || '').trim() || '',
