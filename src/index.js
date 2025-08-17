@@ -290,12 +290,56 @@ ${line2}`;
     return '│'.repeat(blocks);
   }
   /* Build a single TIR line (label + bar + optional treatments) clamped to display width */
-  buildTirLine(settings, tirPct, tLine, maxWidth = 30) {
-    const label = (settings.language === 'es') ? 'TIR hoy:' : 'TIR:';
-    let tShort = '';
+  
+  buildTirLine(settings, tirPct, tLine, maxWidth = 28) {
+    const isEs = settings.language === 'es';
+    let label = isEs ? 'TIR hoy:' : 'TIR:';
+
+    let clean = '';
     if (tLine && tLine.trim().length) {
-      const clean = tLine.replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '').trim();
-      if (clean) tShort = ` · ${clean}`;
+      clean = tLine.replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '').trim();
+      clean = clean.replace(/\s*\/\s*/g, '/').replace(/\s+/g, ' ').trim();
+    }
+
+    const variants = [];
+    if (clean) {
+      variants.push(' · ' + clean);
+      variants.push(' · ' + clean.replace(/\s+/g, ''));
+      variants.push('·' + clean.replace(/\s+/g, ''));
+      variants.push(' ' + clean.replace(/\s+/g, ''));
+    }
+    variants.push('');
+
+    const assemble = (tSuffix) => {
+      const capMax = 18;
+      let bars = Math.max(0, Math.min(capMax, Math.round((Number(tirPct) || 0) * capMax / 100)));
+      const barPart = bars > 0 ? (' ' + '│'.repeat(bars)) : '';
+      let line = `${label}${barPart}${tSuffix}`;
+      if (line.length <= maxWidth) return line;
+      if (bars > 0) {
+        for (let b = bars - 1; b >= 0; b--) {
+          const bp = b > 0 ? (' ' + '│'.repeat(b)) : '';
+          line = `${label}${bp}${tSuffix}`;
+          if (line.length <= maxWidth) return line;
+        }
+      }
+      return null;
+    };
+
+    for (const t of variants) {
+      const out = assemble(t);
+      if (out) return out;
+    }
+    if (isEs) {
+      label = 'TIR:';
+      for (const t of variants) {
+        const out = assemble(t);
+        if (out) return out;
+      }
+    }
+    return label;
+  }
+`;
     }
     const reserved = label.length + 1 + tShort.length;
     const avail = Math.max(0, maxWidth - reserved);
