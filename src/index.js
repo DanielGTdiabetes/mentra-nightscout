@@ -264,19 +264,8 @@ class NightscoutMentraApp extends AppServer {
     const minutesAgo = Math.floor((Date.now() - data.date) / 60000);
     const lang = settings.language || 'en';
     const timeAgo = minutesAgo <= 1 ? (lang === 'es' ? 'ahora' : 'now') : (lang === 'es' ? `hace ${minutesAgo}m` : `${minutesAgo}m ago`);
-    
-    const sep = '   ·   ';
-    let predShort = '';
-    if (this.toBool(settings.enable_advanced_mode)) {
-      try { predShort = await this.buildPredictionShort(settings, 30); } catch {}
-    }
-    const line1 = `${display} ${settings.units || UNITS.MGDL} ${trend}`;
-    const line2base = `${timeStr} (${timeAgo})`;
-    const line2 = predShort ? (line2base + sep + predShort) : line2base;
-    return `${line1}
-${line2}`;
+    return `${display} ${settings.units || UNITS.MGDL} ${trend}\n${timeStr} (${timeAgo})`;
   }
-
 
   /* ---------- día local + TIR + tratamientos ---------- */
   getLocalDayStr(ts, settings) {
@@ -289,54 +278,23 @@ ${line2}`;
     const blocks = Math.max(0, Math.min(20, Math.round(tirPct / 5)));
     return '│'.repeat(blocks);
   }
-  /* Safe one-line TIR + bar + treatments for GB1 */
-  buildTirLine(settings, tirPct, tLine, maxWidth = 28) {
-    const isEs = settings.language === 'es';
-    let label = isEs ? 'TIR hoy:' : 'TIR:';
-
-    let clean = '';
-    if (tLine && tLine.trim().length) {
-      clean = tLine.replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '').trim();
-      clean = clean.replace(/\s*\/\s*/g, '/').replace(/\s+/g, ' ').trim();
-    }
-
-    const variants = [];
-    if (clean) {
-      variants.push(' · ' + clean);
-      variants.push(' · ' + clean.replace(/\s+/g, ''));
-      variants.push('·' + clean.replace(/\s+/g, ''));
-      variants.push(' ' + clean.replace(/\s+/g, ''));
-    }
-    variants.push('');
-
-    const assemble = (tSuffix) => {
-      const capMax = 18;
-      let bars = Math.max(0, Math.min(capMax, Math.round((Number(tirPct) || 0) * capMax / 100)));
-      const barPart = bars > 0 ? (' ' + '│'.repeat(bars)) : '';
-      let line = `${label}${barPart}${tSuffix}`;
-      if (line.length <= maxWidth) return line;
-      if (bars > 0) {
-        for (let b = bars - 1; b >= 0; b--) {
-          const bp = b > 0 ? (' ' + '│'.repeat(b)) : '';
-          line = `${label}${bp}${tSuffix}`;
-          if (line.length <= maxWidth) return line;
-        }
+  /* Compose second line: TIR label+bar and treatments.
+     EN+mmol -> put treatments on the next line (no leading dot). */
+  composeTirLines(settings, tirLine, bar, tLine) {
+    const labelBar = `${tirLine}${bar ? ' ' + bar : ''}`;
+    try {
+      const forceNewLine = (settings.language !== 'es') && (settings.units === UNITS.MMOL);
+      if (forceNewLine) {
+        const clean = (tLine || '').replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '')
+                                   .replace(/\s*\/\s*/g, '/').replace(/\s+/g, ' ').trim();
+        return clean ? `${labelBar}\n${clean}` : labelBar;
+      } else {
+        const suffix = (tLine && tLine.trim().length)
+            ? ` · ${tLine.replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '')}`
+            : '';
+        return `${labelBar}${suffix}`;
       }
-      return null;
-    };
-
-    for (const t of variants) {
-      const out = assemble(t);
-      if (out) return out;
-    }
-    if (isEs) {
-      label = 'TIR:';
-      for (const t of variants) {
-        const out = assemble(t);
-        if (out) return out;
-      }
-    }
-    return label;
+    } catch { return labelBar; }
   }
 
   updateDailyTirState(sessionId, readingMgdl, readingTs, settings) {
@@ -434,46 +392,6 @@ ${line2}`;
       .sort((a, b) => a.date - b.date);
     return today;
   }
-  /* ---------- Prediction (fallback from entries) ---------- */
-  computeLinearPredictionFromToday(entries, horizonMin = 30) {
-    try {
-      if (!Array.isArray(entries) || entries.length < 2) return null;
-      // usar las últimas lecturas (hasta ~8)
-      const pts = entries
-        .slice(-8)
-        .map(e => ({
-          t: Number.isFinite(e.date) ? e.date : +new Date(e.dateString || e.date || 0),
-          v: Number(e.mgdl != null ? e.mgdl : (e.sgv != null ? e.sgv : (e.glucose != null ? e.glucose : e.value)))
-        }))
-        .filter(p => Number.isFinite(p.t) && Number.isFinite(p.v))
-        .sort((a,b) => a.t - b.t);
-      if (pts.length < 2) return null;
-      const dt = pts[pts.length - 1].t - pts[0].t;
-      if (dt <= 0) return null;
-      const dv = pts[pts.length - 1].v - pts[0].v;
-      const slope = dv / dt; // mg/dL por ms
-      const pred = pts[pts.length - 1].v + slope * (horizonMin * 60 * 1000);
-      return Math.round(pred);
-    } catch {
-      return null;
-    }
-  }
-
-  async buildPredictionShort(settings, horizonMin = 30) {
-    try {
-      const todays = await this.getTodayEntries(settings);
-      const pred = this.computeLinearPredictionFromToday(todays, horizonMin);
-      if (!Number.isFinite(pred)) return '';
-      if ((settings.units || UNITS.MGDL) === UNITS.MMOL) {
-        const mmol = pred / 18;
-        return `→ ${mmol.toFixed(1)} ${UNITS.MMOL} @${horizonMin}m`;
-      }
-      return `→ ${Math.round(pred)} ${UNITS.MGDL} @${horizonMin}m`;
-    } catch {
-      return '';
-    }
-  }
-
 
   async getGlucoseData(settings) {
     let u = settings.nightscoutUrl;
@@ -585,8 +503,8 @@ ${line2}`;
       if (settings.enable_advanced_mode) {
         const tirPct = tirRes.tirPct;
         const tirLine = tirPct === null
-          ? (settings.language === 'es' ? 'TIR hoy: n/d' : 'TIR: n/a')
-          : (settings.language === 'es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
+          ? (settings.language === 'es' ? 'TIR hoy: n/d' : 'Today TIR: n/a')
+          : (settings.language === 'es' ? `TIR hoy: ${tirPct}%` : `Today TIR: ${tirPct}%`);
         const bar = !this.toBool(settings.show_tir_bar) || tirPct === null ? '' : this.buildTirBar(tirPct);
         let tLine = '';
         try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {}
@@ -643,17 +561,14 @@ ${line2}`;
           sd.settings = settings;
           this.activeSessions.set(sessionId, sd);
           try {
-            const savedMsg = (settings.language === 'es') ? 'Ajustes guardados' : 'Settings saved';
-const lowLbl = (settings.language === 'es') ? 'Bajo' : 'Low';
-const highLbl = (settings.language === 'es') ? 'Alto' : 'High';
-const lines = [savedMsg];
-if (settings.units === UNITS.MMOL) {
-  lines.push(`${lowLbl}: ${settings.low_alert_mmol} mmol/L`);
-  lines.push(`${highLbl}: ${settings.high_alert_mmol} mmol/L`);
-} else {
-  lines.push(`${lowLbl}: ${settings.low_alert_mg} mg/dL`);
-  lines.push(`${highLbl}: ${settings.high_alert_mg} mg/dL`);
-}
+            const lines = ['Ajustes guardados'];
+            if (settings.units === UNITS.MMOL) {
+              lines.push(`Low: ${settings.low_alert_mmol} mmol/L`);
+              lines.push(`High: ${settings.high_alert_mmol} mmol/L`);
+            } else {
+              lines.push(`Low: ${settings.low_alert_mg} mg/dL`);
+              lines.push(`High: ${settings.high_alert_mg} mg/dL`);
+            }
             lines.push(`Units: ${settings.units}`);
             lines.push(`HeadUp: ${settings.enable_head_up_display ? 'ON' : 'OFF'}`);
             lines.push(`Advanced: ${settings.enable_advanced_mode ? 'ON' : 'OFF'}`);
@@ -685,8 +600,8 @@ if (settings.units === UNITS.MMOL) {
           }
           const { tirPct } = this.updateDailyTirState(sessionId, reading.sgv, reading.date, s);
           const tirLine = tirPct === null
-            ? (s.language === 'es' ? 'TIR hoy: n/d' : 'TIR: n/a')
-            : (s.language === 'es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
+            ? (s.language === 'es' ? 'TIR hoy: n/d' : 'Today TIR: n/a')
+            : (s.language === 'es' ? `TIR hoy: ${tirPct}%` : `Today TIR: ${tirPct}%`);
           const bar = !this.toBool(s.show_tir_bar) || tirPct === null ? '' : this.buildTirBar(tirPct);
           let minMaxLine = '';
           try {
@@ -737,8 +652,8 @@ if (settings.units === UNITS.MMOL) {
       if (settings.enable_advanced_mode) {
         const header = await this.formatForG1(data, settings);
         const tirLine = tirPct === null
-          ? (settings.language === 'es' ? 'TIR hoy: n/d' : 'TIR: n/a')
-          : (settings.language === 'es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
+          ? (settings.language === 'es' ? 'TIR hoy: n/d' : 'Today TIR: n/a')
+          : (settings.language === 'es' ? `TIR hoy: ${tirPct}%` : `Today TIR: ${tirPct}%`);
         const bar = !this.toBool(settings.show_tir_bar) || tirPct === null ? '' : this.buildTirBar(tirPct);
         let tLine = '';
         try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {}
@@ -847,7 +762,7 @@ if (settings.units === UNITS.MMOL) {
       const { tirPct } = this.updateDailyTirState(activeSession?.sessionId || 'tool', reading.sgv, reading.date, settings);
       let extra = '';
       if (settings.enable_advanced_mode && Number.isFinite(tirPct)) {
-        extra = lang === 'es' ? ` TIR hoy: ${tirPct}%` : ` TIR: ${tirPct}%`;
+        extra = lang === 'es' ? ` TIR hoy: ${tirPct}%` : ` Today TIR: ${tirPct}%`;
       }
       const msg = lang === 'es'
         ? `Tu glucosa está en ${display} ${settings.units || UNITS.MGDL} ${trend}. Estado: ${status}.${extra}`
