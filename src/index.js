@@ -83,6 +83,9 @@ class NightscoutMentraApp extends AppServer {
         alertsEnabled, language, timezone, units,
         enable_head_up_display,
 
+        // toggles UI
+        show_tir_bar, show_range_bar,
+
         // NUEVOS (UI humana)
         display_duration_s, alert_duration_s, alert_cooldown_min,
 
@@ -106,6 +109,10 @@ class NightscoutMentraApp extends AppServer {
         session.settings.get('timezone'),
         session.settings.get('units'),
         session.settings.get('enable_head_up_display'),
+
+        // toggles UI
+        session.settings.get('show_tir_bar'),
+        session.settings.get('show_range_bar'),
 
         // nuevos (s/min)
         session.settings.get('display_duration_s'),
@@ -150,7 +157,11 @@ class NightscoutMentraApp extends AppServer {
         ? Math.min(60, Math.max(1, coolMinRaw)) * 60 * 1000
         : this.validateSlicerValue(alert_cooldown_ms, 60000, 3600000, 600000);
 
-      const result = {
+      
+      const showTirBar = (show_tir_bar == null && show_range_bar == null)
+        ? true
+        : (this.toBool(show_tir_bar) || this.toBool(show_range_bar));
+const result = {
         nightscoutUrl: String(url || '').trim() || '',
         nightscoutToken: String(token || '').trim() || '',
         updateInterval: ui, // MINUTOS
@@ -165,6 +176,7 @@ class NightscoutMentraApp extends AppServer {
         timezone: timezone || null,
         units: units || UNITS.MGDL,
         enable_head_up_display: this.toBool(enable_head_up_display),
+        show_tir_bar: showTirBar,
 
         // siempre en ms internamente
         display_duration_ms: displayMs,
@@ -237,6 +249,10 @@ class NightscoutMentraApp extends AppServer {
     (arr || []).forEach(s => (o[s.key] = s.value));
     const units = o.units || UNITS.MGDL;
 
+    const showTirBar = (o.show_tir_bar == null && o.show_range_bar == null)
+      ? true
+      : (this.toBool(o.show_tir_bar) || this.toBool(o.show_range_bar));
+
     // update_interval llega como "1"|"5"|"15"
     const uiMin = parseInt(o.update_interval, 10);
     const ui = Number.isFinite(uiMin) ? uiMin : 5;
@@ -275,6 +291,7 @@ class NightscoutMentraApp extends AppServer {
       timezone: o.timezone || null,
       units,
       enable_head_up_display: this.toBool(o.enable_head_up_display),
+      show_tir_bar: showTirBar,
 
       // interno en ms
       display_duration_ms: displayMs,
@@ -609,7 +626,7 @@ class NightscoutMentraApp extends AppServer {
         const tirLine = (tirPct === null)
           ? (settings.language==='es' ? 'TIR hoy: n/d' : 'Today TIR: n/a')
           : (settings.language==='es' ? `TIR hoy: ${tirPct}%` : `Today TIR: ${tirPct}%`);
-        const bar = (tirPct === null) ? '' : this.buildTirBar(tirPct);
+        const bar = (!this.toBool(settings.show_tir_bar) || tirPct === null) ? '' : this.buildTirBar(tirPct);
 
         // Tratamientos del día completo (solo en avanzado)
         let tLine = '';
@@ -756,7 +773,7 @@ ${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /
           // MODO AVANZADO
           const { tirPct } = this.updateDailyTirState(sessionId, reading.sgv, reading.date, s);
           const tirLine = (tirPct === null) ? (s.language==='es' ? 'TIR hoy: n/d' : 'Today TIR: n/a') : (s.language==='es' ? `TIR hoy: ${tirPct}%` : `Today TIR: ${tirPct}%`);
-          const bar = (tirPct === null) ? '' : this.buildTirBar(tirPct);
+          const bar = (!this.toBool(settings.show_tir_bar) || tirPct === null) ? '' : this.buildTirBar(tirPct);
 
           // Min/Max del día (SOLO en gesto y SOLO en avanzado)
           let minMaxLine = '';
@@ -833,7 +850,7 @@ ${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /
         const tirLine = (tirPct === null)
           ? (settings.language==='es' ? 'TIR hoy: n/d' : 'Today TIR: n/a')
           : (settings.language==='es' ? `TIR hoy: ${tirPct}%` : `Today TIR: ${tirPct}%`);
-        const bar = (tirPct === null) ? '' : this.buildTirBar(tirPct);
+        const bar = (!this.toBool(settings.show_tir_bar) || tirPct === null) ? '' : this.buildTirBar(tirPct);
 
         // Resumen CH/Ins (del día)
         let tLine = '';
