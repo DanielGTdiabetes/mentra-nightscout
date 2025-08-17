@@ -72,18 +72,20 @@ class NightscoutMentraApp extends AppServer {
 
   /* ---------------- Utilidades de validación ---------------- */
   isValidHttpUrl(u) {
-    try {
-      const raw = String(u || '').trim();
-      const probe = raw.startsWith('http') ? raw : `https://${raw}`;
-      const url = new URL(probe);
-      return (url.protocol === 'http:' || url.protocol === 'https:') && !!url.host;
-    } catch {
-      return false;
-    }
+  try {
+    const raw = (u == null ? '' : String(u)).trim();
+    const probe = raw.startsWith('http') ? raw : 'https://' + raw;
+    const url = new URL(probe);
+    return (url.protocol === 'http:' || url.protocol === 'https:') && !!url.host;
+  } catch {
+    return false;
   }
+}
   sanitizeBaseUrl(u) {
-    const raw = String(u || '').trim();
-    const withProto = raw.startsWith('http') ? raw : `https://${raw}`;
+  const raw = (u == null ? '' : String(u)).trim();
+  const withProto = raw.startsWith('http') ? raw : 'https://' + raw;
+  return withProto.replace(/\/+$/, '');
+}`;
     return withProto.replace(/\/$/, '');
   }
   buildAuth(token) {
@@ -103,7 +105,6 @@ class NightscoutMentraApp extends AppServer {
     out.headers['Authorization'] = `Bearer ${t}`;
     return out;
   }
-`;
       const url = new URL(probe);
       return (url.protocol === 'http:' || url.protocol === 'https:') && !!url.host;
     } catch {
@@ -496,10 +497,10 @@ const endpoint = `${u}/api/v1/entries/sgv.json?count=400`;
     // validation relaxed: proceed after sanitizeBaseUrl
 // validation relaxed: allow token fallback
 const endpoints = [
-      `${u}/api/v1/entries/sgv.json?count=1`,
-      `${u}/api/v1/entries.json?count=1`,
-      `${u}/api/v1/entries/current.json`
-    ];
+  u + '/api/v1/entries/sgv.json?count=1',
+  u + '/api/v1/entries.json?count=1',
+  u + '/api/v1/entries/current.json'
+];
     let lastError;
     for (const endpoint of endpoints) {
       try {
