@@ -404,47 +404,56 @@ __barStep(r){ const slots=20; const n = Math.round(this.__clamp01(r)*slots); ret
 
 /** Compose and animate TIR block as text (when advanced+show_tir_bar). */
 async animateTIRText(session, sessionId, settings, headerText, tirLine, tirPct, tLine='', extraLine=''){
-  try {
-    const showBar = !!(settings && (settings.show_tir_bar || settings.show_tir_bar === undefined));
-    const advanced = !!(settings && settings.enable_advanced_mode);
-    const enableAnims = settings && settings.enable_animations !== false;
-    const doAnim = showBar && enableAnims && Number.isFinite(tirPct);
-    const animMs = this.__resolveMs(settings, Number(settings.tir_anim_ms||500));
-    const steps = Math.max(4, Math.min(20, Math.round(animMs/60)));
-    const per = Math.max(40, Math.round(animMs/steps));
-    const cleanTreat = (tLine||'').replace(/\s+/g,' ').trim();
-    const extras = extraLine ? `\n${extraLine}` : '';
-    try { session.logger?.info('TIR-ANIM', { doAnim: (showBar && enableAnims && Number.isFinite(tirPct)), tirPct, showBar, advanced, enableAnims, animMs, steps, per }); } catch(_) {}
+    try {
+      const showBar = !(settings && settings.show_tir_bar === false);
+      const allowAnim = !(settings && settings.enable_animations === false);
+      const slots = Math.max(6, Math.min(24, Number(settings?.tir_slots || 14)));
+      const pct = Number.isFinite(Number(tirPct)) ? Number(tirPct) : 0;
+      const targetSlots = Math.max(0, Math.min(slots, Math.round((pct/100) * slots)));
+      const cleanTreat = (tLine||'').replace(/\s+/g,' ').trim();
+      const extras = extraLine ? `\n${extraLine}` : '';
 
-    const __self = this;
-    function compose(ratio){
-      const bar = showBar ? ` [${__self.__barStep(ratio)}]` : '';
-      const l2 = `${tirLine}${bar}`;
-      const tl = cleanTreat ? `\n${cleanTreat}` : '';
-      return `${headerText}\n${l2}${tl}${extras}`;
-    }
+      const self = this;
+      function compose(nSlots){
+        const ratio = slots ? (nSlots/slots) : 0;
+        const bar = showBar ? ` [${self.__barStep(ratio)}]` : '';
+        const l2 = `${tirLine}${bar}`;
+        const tl = cleanTreat ? `\n${cleanTreat}` : '';
+        return `${headerText}\n${l2}${tl}${extras}`;
+      }
 
-    if (!doAnim){
-      const ratio = Number.isFinite(tirPct) ? tirPct/100 : 0;
-      this.showClamped(session, sessionId, compose(ratio));
-      return compose(ratio);
-    }
+      // Static if no anim or no slots to fill
+      if (!allowAnim || targetSlots <= 0){
+        const txt = compose(targetSlots);
+        self.showClamped(session, sessionId, txt);
+        return txt;
+      }
 
-    let last = '';
-    for (let i=1;i<=steps;i++){
-      const ratio = (tirPct/100)*(i/steps);
-      last = compose(ratio);
-      this.showClamped(session, sessionId, last);
-      await this.__sleep(per);
+      // Frame pacing by slot increments (coalescing-friendly)
+      const baseMs = self.__resolveMs(settings, Number(settings.tir_anim_ms||500));
+      const maxFrames = Math.max(1, Math.ceil(baseMs/100)); // >=100ms/frame
+      const frames = Math.max(1, Math.min(targetSlots, maxFrames));
+      const step = Math.max(1, Math.floor(targetSlots/frames) || 1);
+      const totalSteps = Math.ceil(targetSlots/step);
+      const perFrame = Math.max(90, Math.min(160, Math.round(baseMs / totalSteps)));
+
+      let lastText = '';
+      let filled = 0;
+      for (let i=0; i<totalSteps; i++){
+        filled = Math.min(targetSlots, filled + step);
+        const txt = compose(filled);
+        if (txt !== lastText){
+          self.showClamped(session, sessionId, txt);
+          lastText = txt;
+        }
+        await self.__sleep(perFrame);
+      }
+      return lastText;
+    } catch (e) {
+      try { this.showClamped(session, sessionId, `${headerText}\n${tirLine}`); } catch(_){}
+      return `${headerText}\n${tirLine}`;
     }
-    // tiny settle frame
-    this.showClamped(session, sessionId, last);
-    return last;
-  } catch (e) {
-    try { this.showClamped(session, sessionId, `${headerText}\n${tirLine}`); } catch(_){}
-    return `${headerText}\n${tirLine}`;
   }
-}
 
 /** Extracts "123 mg/dL @30m" or "6.8 mmol/L @30m" from any block of text. */
 extractPredictionFromText(block){
