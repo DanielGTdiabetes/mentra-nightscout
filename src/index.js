@@ -521,7 +521,7 @@ class NightscoutMentraApp extends AppServer {
     let settings = null;
     try {
       settings = await this.getUserSettings(session);
-      if (!settings.nightscoutUrl || !settings.nightscoutToken) {
+      if (!settings.nightscoutUrl) {
         const msg = { en: 'Please configure Nightscout\nURL and token in settings', es: 'Configura URL y token\nde Nightscout en ajustes' };
         this.showClamped(session, sessionId, msg[settings.language || 'en']);
         return;
@@ -704,7 +704,7 @@ if (settings.units === UNITS.MMOL) {
           this.showClamped(session, sessionId, out);
           setTimeout(() => this.hideDisplay(session, sessionId), s.display_duration_ms || 4000);
         } catch (e) {
-          this.showClamped(session, sessionId, 'Error');
+          this.showClamped(session, sessionId, (s.language==='es' ? 'Error al mostrar' : 'Display error'));
           setTimeout(() => this.hideDisplay(session, sessionId), 2000);
         }
       });
