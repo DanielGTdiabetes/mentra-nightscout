@@ -142,6 +142,7 @@ class NightscoutMentraApp extends AppServer {
       const blink_on_prediction = await session.settings.get('blink_on_prediction');
       const blink_cycles = await session.settings.get('blink_cycles');
       const blink_interval_ms = await session.settings.get('blink_interval_ms');
+    const blink_alert_style = await session.settings.get('prediction_alert_style');
 
 
       const showTirBar = (show_tir_bar === null && show_range_bar === null)
@@ -185,6 +186,7 @@ class NightscoutMentraApp extends AppServer {
         blink_on_prediction: (blink_on_prediction === undefined || blink_on_prediction === null) ? true : this.toBool(blink_on_prediction),
         blink_cycles: this.validateSlicerValue(blink_cycles, 1, 8, 4),
         blink_interval_ms: this.validateSlicerValue(blink_interval_ms, 80, 600, 180),
+      prediction_alert_style: (['blink','pulse','solid'].includes(String(blink_alert_style||'pulse')) ? String(blink_alert_style||'pulse') : 'pulse'),
 
       };
     } catch (e) {
@@ -263,6 +265,7 @@ class NightscoutMentraApp extends AppServer {
       blink_on_prediction: (o.blink_on_prediction === undefined || o.blink_on_prediction === null) ? true : this.toBool(o.blink_on_prediction),
       blink_cycles: this.validateSlicerValue(o.blink_cycles, 1, 8, 4),
       blink_interval_ms: this.validateSlicerValue(o.blink_interval_ms, 80, 600, 180),
+      prediction_alert_style: (['blink','pulse','solid'].includes(String(o.prediction_alert_style)) ? String(o.prediction_alert_style) : 'pulse'),
 
     };
   }
@@ -351,7 +354,7 @@ class NightscoutMentraApp extends AppServer {
         if (series && Array.isArray(series) && series.length) {
           const idx = Math.max(0, Math.min(series.length - 1, Math.round(horizonMin / 5)));
           const mgdl = Number(series[idx]);
-          if (Number.isFinite(mgdl)) return fmt(mgdl);
+          if (Number.isFinite(mgdl)) { this._lastPredictionMgdl = mgdl; return fmt(mgdl); }
         }
       }
     } catch (_) {}
@@ -370,7 +373,7 @@ class NightscoutMentraApp extends AppServer {
           const ratePerMin = (mgNow - mgPrev) / ((tNow - tPrev) / 60000);
           let mgPred = mgNow + ratePerMin * horizonMin;
           mgPred = Math.max(40, Math.min(400, mgPred));
-          return fmt(mgPred);
+          this._lastPredictionMgdl = mgPred; return fmt(mgPred);
         }
       }
     } catch (_) {}
@@ -442,10 +445,10 @@ async animateTIRText(session, sessionId, settings, headerText, tirLine, tirPct, 
 
 /** Extracts "123 mg/dL @30m" or "6.8 mmol/L @30m" from any block of text. */
 extractPredictionFromText(block){
-  const rx = /([0-9]+(?:\.[0-9]+)?)\s*(mg\/dL|mmol\/L)\s*@\s*(\d+)m\b/;
+  const rx = /([0-9]+(?:[\.,][0-9]+)?)\s*(mg\/dL|mmol\/L)\s*@\s*(\d+)m\b/;
   const m = String(block||'').match(rx);
   if (!m) return null;
-  const v = parseFloat(m[1]);
+  const v = parseFloat(String(m[1]).replace(',', '.'));
   const unit = m[2].toLowerCase();
   const minutes = parseInt(m[3], 10);
   const mgdl = unit.includes('mmol') ? v*18 : v;
@@ -454,32 +457,50 @@ extractPredictionFromText(block){
 
 /** Blink a warning line if prediction is out-of-range (uses current alert limits). */
 async blinkPredictionIfOut(session, sessionId, settings, renderedText){
-  try {
-    if (!settings || settings.blink_on_prediction === false) return;
-    const pred = this.extractPredictionFromText(renderedText);
-    if (!pred) return;
-    const limits = this.getAlertLimits(settings); // existing helper
-    const outLow  = pred.mgdl < limits.low;
-    const outHigh = pred.mgdl > limits.high;
-    if (!outLow && !outHigh) return;
+    try {
+      if (!settings) return;
+      const style = settings.prediction_alert_style || 'pulse';
+      const allowAnim = settings.blink_on_prediction !== false && (settings.enable_animations !== false);
+      // 1) Extract or fallback to last prediction mg/dL
+      let pred = this.extractPredictionFromText(renderedText);
+      if (!pred && Number.isFinite(this._lastPredictionMgdl)) {
+        pred = { mgdl: this._lastPredictionMgdl, minutes: Number(settings.prediction_horizon_min||30) };
+      }
+      if (!pred) return;
+      // 2) Thresholds
+      const limits = this.getAlertLimits(settings);
+      const outLow  = pred.mgdl < limits.low;
+      const outHigh = pred.mgdl > limits.high;
+      const triggered = (outLow || outHigh);
+      try { session.logger?.info('PRED-BLINK', { mgdl: pred.mgdl, limits, triggered, style }); } catch(_){}
+      if (!triggered) return;
 
-    const unit = settings.units || UNITS.MGDL;
-    const vDisp = this.convertToDisplay(pred.mgdl, unit);
-    const lang = settings.language || 'en';
-    const warn = lang === 'es'
-      ? (outLow ? `⚠️ Predicción BAJA: ${vDisp} ${unit}` : `⚠️ Predicción ALTA: ${vDisp} ${unit}`)
-      : (outLow ? `⚠️ LOW prediction: ${vDisp} ${unit}` : `⚠️ HIGH prediction: ${vDisp} ${unit}`);
+      const unit = settings.units || UNITS.MGDL;
+      const vDisp = this.convertToDisplay(pred.mgdl, unit);
+      const lang = settings.language || 'en';
+      const warn = lang === 'es'
+        ? (outLow ? `⚠️ Predicción BAJA: ${vDisp} ${unit}` : `⚠️ Predicción ALTA: ${vDisp} ${unit}`)
+        : (outLow ? `⚠️ LOW prediction: ${vDisp} ${unit}` : `⚠️ HIGH prediction: ${vDisp} ${unit}`);
 
-    const cycles = Math.max(1, Math.min(8, Number(settings.blink_cycles) || 4));
-    const interval = Math.max(80, Math.min(600, Number(settings.blink_interval_ms) || 180));
-    for (let i=0;i<cycles;i++){
-      this.showClamped(session, sessionId, `${renderedText}\n${warn}`);
-      await this.__sleep(interval);
-      this.showClamped(session, sessionId, renderedText);
-      await this.__sleep(interval);
-    }
-  } catch(_){}
-}
+      // Fallback "solid" (si animaciones off o estilo = solid)
+      if (!allowAnim || style === 'solid') {
+        this.showClamped(session, sessionId, `${renderedText}\n${warn}`);
+        return;
+      }
+
+      // 'pulse' y 'blink' — intervalos más largos para evitar coalescing
+      const cycles = style === 'pulse' ? 3 : Math.max(1, Math.min(8, Number(settings.blink_cycles) || 4));
+      const interval = Math.max(200, Math.min(1000, Number(settings.blink_interval_ms) || (style === 'pulse' ? 260 : 220)));
+      const bust = ['\u2009', '\u200A', '']; // alterna invisibles para que el frame cambie
+
+      for (let i=0; i<cycles; i++){
+        this.showClamped(session, sessionId, `${renderedText}\n${warn}${bust[i % bust.length]}`);
+        await this.__sleep(interval);
+        this.showClamped(session, sessionId, `${renderedText}${bust[(i+1) % bust.length]}`);
+        await this.__sleep(interval);
+      }
+    } catch(_){}
+  }
 
 /** Light blink for alerts (LOW/HIGH) to increase salience. */
 async blinkAlertBlock(session, sessionId, text){
