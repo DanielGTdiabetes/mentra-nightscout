@@ -10,16 +10,6 @@ require('dotenv').config();
 const { AppServer } = require('@mentra/sdk');
 const axios = require('axios');
 
-/* ---- process safety: do not crash on unhandled errors ---- */
-process.on('unhandledRejection', (err) => {
-  console.error('[unhandledRejection]', err && err.stack || err);
-});
-process.on('uncaughtException', (err) => {
-  console.error('[uncaughtException]', err && err.stack || err);
-  // do not process.exit(1); keep server alive where possible
-});
-
-
 /* ---------- SHIM: compatibilidad SDK ---------- */
 if (typeof Object.prototype.updateSettingsForTesting !== 'function') {
   Object.defineProperty(Object.prototype, 'updateSettingsForTesting', {
@@ -65,11 +55,8 @@ paintFrame(session, sessionId, token, text){
     this.showClamped(session, sessionId, text);
   }
 
-    constructor(opts) {
+  constructor(opts) {
     super(opts);
-    this._alertLock = new Set();
-    this._predBlinkBusy = new Set();
-
     this.activeSessions = new Map();
     this.alertHistory = new Map();
     this.displayTimers = new Map();
@@ -78,7 +65,6 @@ paintFrame(session, sessionId, token, text){
     this.dayWatchTimers = new Map();
     this.lastGoodEntry = new Map();          // cache last valid entry
   }
-
 
   /* ---------- helpers ---------- */
   parseSlicerValue(val, fallback) {
@@ -446,7 +432,7 @@ paintFrame(session, sessionId, token, text){
   }
 /* ---------- Animation & Prediction helpers ---------- */
 async __sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
-  
+  __busyWait(ms){ const end = Date.now() + Math.max(0, Number(ms)||0); while (Date.now() < end) {} }
 
 __SPEED_MAP = { slow: 1.35, normal: 1.0, fast: 0.75 };
 __resolveMs(settings, base){ const mult = (this.__SPEED_MAP[(settings.animation_speed||'normal')] ?? 1.0); return Math.round(Math.max(60, Math.min(2000, base*mult))); }
@@ -523,7 +509,7 @@ __barStep(r){ const slots=20; const n = Math.round(this.__clamp01(r)*slots); ret
           lastKey = key;
         }
         if (t >= 1) break;
-        await this.__sleep(tick);
+        this.__busyWait(tick);
       }
       // Final settle frame (full bar)
       if (this.isCurrentToken(sessionId, token)){
@@ -531,7 +517,7 @@ __barStep(r){ const slots=20; const n = Math.round(this.__clamp01(r)*slots); ret
       }
     }catch(_){}
   }
-async animateTIRText(session, sessionId, settings, headerText, tirLine, tirPct, tLine='', extraLine=''){
+animateTIRText(session, sessionId, settings, headerText, tirLine, tirPct, tLine='', extraLine=''){
 try {
       // ---- Config & defaults ----
       const showBar = !!(settings && (settings.show_tir_bar ?? true));
@@ -603,7 +589,7 @@ try {
       // Animate over time with ease-in; only redraw when visible change
       let elapsed = 0;
       while (elapsed < leadInMs) {
-        await this.__sleep(30);
+        this.__busyWait(30);
         elapsed = Date.now() - startTs;
       }
 
@@ -627,7 +613,7 @@ try {
         // adapt tick roughly to total frames (aim 10-20 frames)
         const remaining = totalMs - t;
         const tick = Math.max(minTick, Math.min(maxTick, Math.round(remaining / Math.max(1, (10 - Math.min(sent, 9))))));
-        await this.__sleep(tick);
+        this.__busyWait(tick);
       }
 
       // Final settle (clean partials by forcing full state)
@@ -654,31 +640,95 @@ extractPredictionFromText(block){
 }
 
 /** Blink a warning line if prediction is out-of-range (uses current alert limits). */
-
-
-  async blinkPredictionIfOut(session, sessionId, settings, renderedText){
+async blinkPredictionIfOut(session, sessionId, settings, renderedText){
     try {
       if (!settings) return;
+      const style = settings.prediction_alert_style || 'pulse';
+      const allowAnim = settings.blink_on_prediction !== false && (settings.enable_animations !== false);
+      // 1) Extract or fallback to last prediction mg/dL
       let pred = this.extractPredictionFromText(renderedText);
       if (!pred && Number.isFinite(this._lastPredictionMgdl)) {
         pred = { mgdl: this._lastPredictionMgdl, minutes: Number(settings.prediction_horizon_min||30) };
       }
       if (!pred) return;
+      // 2) Thresholds
       const limits = this.getAlertLimits(settings);
       const outLow  = pred.mgdl < limits.low;
       const outHigh = pred.mgdl > limits.high;
-      if (!outLow && !outHigh) return;
-      const unit = settings.units || UNITS.MGDL;
+      const triggered = (outLow || outHigh);
+      try { session.logger?.info('PRED-BLINK', { mgdl: pred.mgdl, limits, triggered, style }); } catch(_){}
+      if (!triggered) return;
+
+      const unit = (settings.units === UNITS.MMOL || String(settings.units||'').toLowerCase().includes('mmol')) ? UNITS.MMOL : UNITS.MGDL;
       const vDisp = this.convertToDisplay(pred.mgdl, unit);
       const lang = settings.language || 'en';
       const warn = lang === 'es'
         ? (outLow ? `⚠️ Predicción BAJA: ${vDisp} ${unit}` : `⚠️ Predicción ALTA: ${vDisp} ${unit}`)
         : (outLow ? `⚠️ LOW prediction: ${vDisp} ${unit}` : `⚠️ HIGH prediction: ${vDisp} ${unit}`);
-      this.showClamped(session, sessionId, `${renderedText}
-${warn}`);
-    } catch(e) {
-      try { session.logger?.error('PRED_NOTICE_ERR', e); } catch(_){}
+
+      // Fallback "solid" (si animaciones off o estilo = solid)
+      if (!allowAnim || style === 'solid') {
+        this.showClamped(session, sessionId, `${renderedText}\n${warn}`);
+        return;
+      }
+
+      // 'pulse' y 'blink' — intervalos más largos para evitar coalescing
+      const cycles = style === 'pulse' ? 3 : Math.max(1, Math.min(8, Number(settings.blink_cycles) || 4));
+      const interval = Math.max(200, Math.min(1000, Number(settings.blink_interval_ms) || (style === 'pulse' ? 260 : 220)));
+      const bust = ['\u2009', '\u200A', '']; // alterna invisibles para que el frame cambie
+
+      for (let i=0; i<cycles; i++){
+        this.showClamped(session, sessionId, `${renderedText}\n${warn}${bust[i % bust.length]}`);
+        await this.__sleep(interval);
+        this.showClamped(session, sessionId, `${renderedText}${bust[(i+1) % bust.length]}`);
+        await this.__sleep(interval);
+      }
+    } catch(_){}
+  }
+
+/** Light blink for alerts (LOW/HIGH) to increase salience. */
+async blinkAlertBlock(session, sessionId, text){
+  try{
+    for (let i=0;i<2;i++){
+      this.showClamped(session, sessionId, text);
+      await this.__sleep(200);
+      this.showClamped(session, sessionId, text + '\\n'); // minimal change for blink
+      await this.__sleep(200);
     }
+  }catch(_){}
+}
+
+  /* Compose second line: TIR label+bar and treatments.
+     Siempre baja los tratamientos a siguiente línea (sin punto delante). */
+  composeTirLines(settings, tirLine, bar, tLine) {
+    const labelBar = `${tirLine}${bar ? ' ' + bar : ''}`;
+    try {
+      // ALWAYS move treatments to the next line (both languages / any unit)
+      let clean = (tLine || '')
+        .replace(/^CH\/Ins hoy: /, '')
+        .replace(/^Carbs\/Ins today: /, '')
+        // drop any " · Last: ..." or " · Últ: ..." and all after
+        .replace(/\s*[·•]\s*(Last|Últ):[\s\S]*$/i, '')
+        .replace(/\s*Last:[\s\S]*$/i, '')
+        .replace(/\s*Últ:[\s\S]*$/i, '')
+        .replace(/\s*\/\s*/g, '/')
+        .replace(/\s+/g, ' ')
+        .trim();
+      return clean ? `${labelBar}\n${clean}` : labelBar;
+    } catch { return labelBar; }
+  }
+
+  updateDailyTirState(sessionId, readingMgdl, readingTs, settings) {
+    const range = this.getAlertLimits(settings);
+    const dayStr = this.getLocalDayStr(readingTs, settings);
+    let st = this.dailyTirState.get(sessionId);
+    if (!st || st.dayStr !== dayStr) st = { dayStr, total: 0, inRange: 0 };
+    if (Number.isFinite(readingMgdl)) {
+      st.total += 1;
+      if (readingMgdl >= range.low && readingMgdl <= range.high) st.inRange += 1;
+    }
+    this.dailyTirState.set(sessionId, st);
+    return { tirPct: st.total > 0 ? Math.round((st.inRange / st.total) * 100) : null, total: st.total };
   }
 
   async getRecentTreatments(settings, hours = 4) {
@@ -1199,23 +1249,3 @@ server.app.get('/health', (_, res) => res.json({
   activeSessions: server.activeSessions.size
 }));
 setInterval(() => axios.get(`${KEEP_ALIVE_URL}/health`).catch(() => {}), 3 * 60 * 1000);
-
-// ---- Minimal health server for PaaS (Render/Railway) ----
-try {
-  const http = require('http');
-  const PORT = Number(process.env.PORT || 0);
-  if (PORT) {
-    const srv = http.createServer((req,res) => {
-      if (req.url === '/health') {
-        res.setHeader('content-type','application/json; charset=utf-8');
-        res.end(JSON.stringify({ status:'ok', ts: Date.now(), version:'2.10.0' }));
-      } else {
-        res.statusCode = 200;
-        res.end('OK');
-      }
-    });
-    srv.listen(PORT, () => console.log('[health] listening on', PORT));
-  } else {
-    console.log('[health] PORT not set; skipping health server');
-  }
-} catch(e){ console.error('[health] server error', e); }
