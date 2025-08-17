@@ -555,6 +555,10 @@ class NightscoutMentraApp extends AppServer {
             lines.push(`Advanced: ${settings.enable_advanced_mode ? 'ON' : 'OFF'}`);
             this.showClamped(session, sessionId, lines.join('\n'));
             setTimeout(() => this.hideDisplay(session, sessionId), 2200);
+          // Preview with current settings (advanced ON/OFF)
+          setTimeout(async () => {
+            try { await this.showGlucoseTemporarily(session, sessionId, settings.display_duration_ms || 4000, settings); } catch {}
+          }, 2300);
           } catch {}
         } catch (error) {
           session.logger?.error(error, 'Failed to process settings update');
