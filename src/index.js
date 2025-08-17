@@ -33,6 +33,29 @@ if (!MENTRAOS_API_KEY) {
 const UNITS = { MGDL: 'mg/dL', MMOL: 'mmol/L' };
 
 class NightscoutMentraApp extends AppServer {
+  // --- Render token guards to avoid interleaved frames / double screens ---
+  _renderTokenMap = new Map();
+  bumpRenderToken(sessionId){
+    const cur = this._renderTokenMap.get(sessionId) || 0;
+    const next = cur + 1;
+    this._renderTokenMap.set(sessionId, next);
+    return next;
+  }
+  isCurrentToken(sessionId, token){
+    return (this._renderTokenMap.get(sessionId) || 0) === token;
+  }
+  async 
+  async delayedLoading(session, sessionId, token, label){
+    const ms = 220;
+    await this.__sleep(ms);
+    if (!this.isCurrentToken(sessionId, token)) return;
+    this.showClamped(session, sessionId, label);
+  }
+paintFrame(session, sessionId, token, text){
+    if (!this.isCurrentToken(sessionId, token)) return;
+    this.showClamped(session, sessionId, text);
+  }
+
   constructor(opts) {
     super(opts);
     this.activeSessions = new Map();
@@ -416,7 +439,85 @@ __clamp01(x){ return Math.max(0, Math.min(1, x)); }
 __barStep(r){ const slots=20; const n = Math.round(this.__clamp01(r)*slots); return '│'.repeat(n) + '·'.repeat(slots-n); }
 
 /** Compose and animate TIR block as text (when advanced+show_tir_bar). */
-  async animateTIRText(session, sessionId, settings, headerText, tirLine, tirPct, tLine='', extraLine=''){
+  async 
+  /**
+   * New TIR animation: time-based, substeps, token-guarded.
+   * options: { force: boolean }
+   */
+  async animateTIRTextV2(session, sessionId, token, settings, headerText, tirLine, tirPct, tLine='', extraLine='', options={}){
+    try{
+      const force = !!options.force;
+      const showBar = !!(settings && (settings.show_tir_bar ?? true));
+      const enableAnims = settings && settings.enable_animations !== false;
+      const canAnim = (showBar && enableAnims && Number.isFinite(tirPct)) || force;
+      const slots = Math.max(8, Number(settings.tir_slots) || 16);
+      const substeps = Math.max(1, Math.min(6, Number(settings.tir_substeps) || 4));
+      const leadInMs = Number(settings.tir_leadin_ms) || 220;
+      const speedMap = { slow: 1.35, normal: 1.0, fast: 0.75 };
+      const mult = speedMap[(settings.animation_speed||'normal')] ?? 1.0;
+      const totalMs = Math.round(Math.max(200, Math.min(2000, (Number(settings.tir_anim_ms)||500) * mult)));
+      const animMs = Math.max(0, totalMs - leadInMs);
+
+      const clamp01 = (x)=> Math.max(0, Math.min(1, x));
+      const barFor = (filled, partial=0)=>{
+        // filled: integer slots filled; partial: substep 0..(substeps-1)
+        const left = Math.max(0, Math.min(slots, filled));
+        const right = Math.max(0, slots - left);
+        const fillChar = "│";
+        const emptyChar = "·";
+        const midCharSeq = [":","!","¦","│"];
+        const midChar = midCharSeq[Math.min(midCharSeq.length-1, Math.floor((partial/(substeps||1))*(midCharSeq.length)) )];
+        const mid = (left < slots && partial>0) ? midChar : "";
+        return `[${fillChar.repeat(left)}${mid}${emptyChar.repeat(right - (mid ? 1:0))}]`;
+      };
+      const compactTreat = (tLine||'').replace(/\s+/g,' ').trim();
+      const extras = extraLine ? `\n${extraLine}` : '';
+      const compose = (bar)=> `${headerText}\n${tirLine}${showBar?(' '+bar):''}${compactTreat?('\n'+compactTreat):''}${extras}`;
+
+      // Lead-in: show empty bar briefly to anchor the eye
+      if (!this.isCurrentToken(sessionId, token)) return;
+      const emptyBar = barFor(0,0);
+      await this.paintFrame(session, sessionId, token, compose(emptyBar));
+      await this.__sleep(leadInMs);
+
+      const finalFilled = Math.round(clamp01(Number(tirPct||0)/100) * slots);
+      if (!canAnim){
+        await this.paintFrame(session, sessionId, token, compose(barFor(finalFilled, 0)));
+        return;
+      }
+
+      const start = Date.now();
+      let lastKey = "";
+      // Ease-in cubic for smoother start
+      const ease = (t)=> t*t*t;
+      // Tick at ~60–80ms for smoother pacing
+      const tick = 70;
+
+      while(true){
+        if (!this.isCurrentToken(sessionId, token)) return;
+        const elapsed = Date.now() - start;
+        const t = clamp01(animMs>0 ? (elapsed/animMs) : 1);
+        const eased = ease(t);
+        const filledF = eased * finalFilled;
+        const filledInt = Math.floor(filledF);
+        const partial = Math.floor(((filledF - filledInt) * substeps));
+
+        const bar = barFor(filledInt, partial);
+        const key = `${filledInt}-${partial}`;
+        if (key !== lastKey){
+          await this.paintFrame(session, sessionId, token, compose(bar));
+          lastKey = key;
+        }
+        if (t >= 1) break;
+        await this.__sleep(tick);
+      }
+      // Final settle frame (full bar)
+      if (this.isCurrentToken(sessionId, token)){
+        await this.paintFrame(session, sessionId, token, compose(barFor(finalFilled, 0)));
+      }
+    }catch(_){}
+  }
+animateTIRText(session, sessionId, settings, headerText, tirLine, tirPct, tLine='', extraLine=''){
 try {
       // ---- Config & defaults ----
       const showBar = !!(settings && (settings.show_tir_bar ?? true));
@@ -817,7 +918,8 @@ async blinkAlertBlock(session, sessionId, text){
 
   async showInitialAndHide(session, sessionId, settings) {
     // Show quick loading placeholder
-    try { this.showClamped(session, sessionId, (settings.language==='es' ? 'Cargando…' : 'Loading…')); } catch(_) {}
+    const __tokLoad = this.bumpRenderToken(sessionId);
+    this.delayedLoading(session, sessionId, __tokLoad, (settings.language==='es' ? 'Cargando…' : 'Loading…'));
 
     try {
       const data = await this.getGlucoseData(settings);
@@ -833,7 +935,8 @@ async blinkAlertBlock(session, sessionId, text){
         let tLine = '';
         try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {}
         try { session.logger?.info('Startup -> animate TIR', { tirPct }); } catch(_) {}
-      const __txt0 = await this.animateTIRText(session, sessionId, settings, formattedData, tirLine, tirPct, tLine);
+      const __token0 = this.bumpRenderToken(sessionId);
+      const __txt0 = await this.animateTIRTextV2(session, sessionId, __token0, settings, formattedData, tirLine, tirPct, tLine);
       await this.blinkPredictionIfOut(session, sessionId, settings, __txt0);
       } else {
         this.showClamped(session, sessionId, formattedData);
@@ -952,7 +1055,8 @@ if (settings.units === UNITS.MMOL) {
           const line2 = this.composeTirLines(s, tirLine, bar, tLine);
 try { session.logger?.info('HeadUp -> animate TIR', { tirPct }); } catch(_) {}
 // Animate TIR on head-up HUD
-const __txtHUD = await this.animateTIRText(session, sessionId, s, baseLine, tirLine, tirPct, tLine, minMaxLine);
+const __tokHUD = this.bumpRenderToken(sessionId);
+      const __txtHUD = await this.animateTIRTextV2(session, sessionId, __tokHUD, s, baseLine, tirLine, tirPct, tLine, minMaxLine, {force:true});
 await this.blinkPredictionIfOut(session, sessionId, s, __txtHUD);
 setTimeout(() => this.hideDisplay(session, sessionId), s.display_duration_ms || 4000);
 } catch (e) {
@@ -991,7 +1095,8 @@ setTimeout(() => this.hideDisplay(session, sessionId), s.display_duration_ms || 
         let tLine = '';
         try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {}
         try { session.logger?.info('HUD gesture -> animate TIR', { tirPct }); } catch(_) {}
-        const __txt1 = await this.animateTIRText(session, sessionId, settings, header, tirLine, tirPct, tLine);
+        const __token1 = this.bumpRenderToken(sessionId);
+        const __txt1 = await this.animateTIRTextV2(session, sessionId, __token1, settings, header, tirLine, tirPct, tLine, {force:true});
       await this.blinkPredictionIfOut(session, sessionId, settings, __txt1);
       } else {
         const __txt2 = await this.formatForG1WithPrediction(data, settings);
@@ -1019,7 +1124,8 @@ setTimeout(() => this.hideDisplay(session, sessionId), s.display_duration_ms || 
   async startNormalOperation(session, sessionId, userId, initialSettings) {
     const ms = (initialSettings.updateInterval || 5) * 60 * 1000;
     const iv = setInterval(async () => {
-        try { this.showClamped(session, sessionId, (s.language==='es' ? 'Cargando…' : 'Loading…')); } catch(_) {}
+        const __tokHUDLoad = this.bumpRenderToken(sessionId);
+        this.delayedLoading(session, sessionId, __tokHUDLoad, (s.language==='es' ? 'Cargando…' : 'Loading…'));
 
       if (!this.activeSessions.has(sessionId)) return clearInterval(iv);
       try {
