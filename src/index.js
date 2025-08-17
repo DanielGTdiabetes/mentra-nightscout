@@ -192,6 +192,7 @@ class NightscoutMentraApp extends AppServer {
         blink_on_prediction: (blink_on_prediction === undefined || blink_on_prediction === null) ? true : this.toBool(blink_on_prediction),
         blink_cycles: this.validateSlicerValue(blink_cycles, 1, 8, 4),
         blink_interval_ms: this.validateSlicerValue(blink_interval_ms, 80, 600, 180),
+        compact_pred: true,
         headup_cooldown_ms: this.validateSlicerValue(headup_cooldown_ms, 0, 30000, 4000),
         prediction_alert_style: (['blink','pulse','solid'].includes(String(blink_alert_style || 'pulse')) ? String(blink_alert_style || 'pulse') : 'pulse'),
         tir_slots: this.validateSlicerValue(tir_slots, 8, 24, 16),
@@ -276,6 +277,7 @@ class NightscoutMentraApp extends AppServer {
       blink_on_prediction: (o.blink_on_prediction === undefined || o.blink_on_prediction === null) ? true : this.toBool(o.blink_on_prediction),
       blink_cycles: this.validateSlicerValue(o.blink_cycles, 1, 8, 4),
       blink_interval_ms: this.validateSlicerValue(o.blink_interval_ms, 80, 600, 180),
+      compact_pred: (o.compact_pred === undefined || o.compact_pred === null) ? true : this.toBool(o.compact_pred),
       headup_cooldown_ms: this.validateSlicerValue(o.headup_cooldown_ms, 0, 30000, 4000),
       prediction_alert_style: (['blink','pulse','solid'].includes(String(o.prediction_alert_style || 'pulse')) ? String(o.prediction_alert_style || 'pulse') : 'pulse'),
       tir_slots: this.validateSlicerValue(o.tir_slots, 8, 24, 16),
@@ -312,7 +314,7 @@ class NightscoutMentraApp extends AppServer {
     const langSettings = this.getLanguageSettings(settings);
     const tz = settings.timezone ? this.validateTimezone(settings.timezone) : langSettings.timezone;
     const readingTime = new Date(data.date);
-    const timeStr = readingTime.toLocaleTimeString(langSettings.locale, { timeZone: tz, hour: '2-digit', minute: '2-digit' });
+    const timeStr = readingTime.toLocaleTimeString(langSettings.locale, { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false });
     const minutesAgo = Math.floor((Date.now() - data.date) / 60000);
     const lang = settings.language || 'en';
     const timeAgo = minutesAgo <= 1 ? (lang === 'es' ? 'ahora' : 'now') : (lang === 'es' ? `hace ${minutesAgo}m` : `${minutesAgo}m ago`);
@@ -332,7 +334,7 @@ class NightscoutMentraApp extends AppServer {
       const parts = base.split('\n');
       const l1 = parts[0] || '';
       const l2 = (parts.length > 1 ? parts[1] : '');
-      const sep = '   ·   ';
+      const sep = ' · ';
       const rest = parts.slice(2);
       return `${l1}\n${l2}${sep}${predShort}${rest.length ? `\n${rest.join('\n')}` : ''}`;
     } catch (_) {
@@ -647,7 +649,7 @@ async blinkAlertBlock(session, sessionId, text){
     if (last && (Number.isFinite(last.carbs) || Number.isFinite(last.insulin))) {
       const langSettings = this.getLanguageSettings(settings);
       const tz = settings.timezone ? this.validateTimezone(settings.timezone) : langSettings.timezone;
-      const t = new Date(last.ts).toLocaleTimeString(langSettings.locale, { timeZone: tz, hour: '2-digit', minute: '2-digit' });
+      const t = new Date(last.ts).toLocaleTimeString(langSettings.locale, { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false });
       const parts = [];
       if (Number.isFinite(last.carbs)) parts.push(`${round1(last.carbs)}g`);
       if (Number.isFinite(last.insulin)) parts.push(`${round1(last.insulin)}U`);
