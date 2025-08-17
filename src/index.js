@@ -132,6 +132,17 @@ class NightscoutMentraApp extends AppServer {
       const coolMs = Number.isFinite(this.parseSlicerValue(alert_cooldown_min, NaN))
         ? Math.min(60, Math.max(1, this.parseSlicerValue(alert_cooldown_min))) * 60 * 1000
         : this.validateSlicerValue(alert_cooldown_ms, 60000, 3600000, 600000);
+      // Read extra console settings (optional; defaults applied if missing)
+      const animation_speed = await session.settings.get('animation_speed');
+      const enable_animations = await session.settings.get('enable_animations');
+      const tir_anim_ms = await session.settings.get('tir_anim_ms');
+      const tir_fadeout_ms = await session.settings.get('tir_fadeout_ms');
+      const prediction_horizon_min = await session.settings.get('prediction_horizon_min');
+      const official_prediction_only = await session.settings.get('official_prediction_only');
+      const blink_on_prediction = await session.settings.get('blink_on_prediction');
+      const blink_cycles = await session.settings.get('blink_cycles');
+      const blink_interval_ms = await session.settings.get('blink_interval_ms');
+
 
       const showTirBar = (show_tir_bar === null && show_range_bar === null)
         ? true
@@ -163,6 +174,18 @@ class NightscoutMentraApp extends AppServer {
         time_in_range_high_mg: this.parseSlicerValue(time_in_range_high_mg, null),
         time_in_range_low_mmol: this.normalizeMmol(time_in_range_low_mmol),
         time_in_range_high_mmol: this.normalizeMmol(time_in_range_high_mmol),
+     
+        // Anim & Prediction controls
+        animation_speed: (['slow','normal','fast'].includes(String(animation_speed||'normal')) ? String(animation_speed) : 'normal'),
+        enable_animations: (enable_animations === undefined || enable_animations === null) ? true : this.toBool(enable_animations),
+        tir_anim_ms: this.validateSlicerValue(tir_anim_ms, 200, 1200, 500),
+        tir_fadeout_ms: this.validateSlicerValue(tir_fadeout_ms, 80, 600, 160),
+        prediction_horizon_min: [15,30,60].includes(Number(prediction_horizon_min)) ? Number(prediction_horizon_min) : 30,
+        official_prediction_only: this.toBool(official_prediction_only),
+        blink_on_prediction: (blink_on_prediction === undefined || blink_on_prediction === null) ? true : this.toBool(blink_on_prediction),
+        blink_cycles: this.validateSlicerValue(blink_cycles, 1, 8, 4),
+        blink_interval_ms: this.validateSlicerValue(blink_interval_ms, 80, 600, 180),
+
       };
     } catch (e) {
       console.error('Error leyendo settings:', e);
@@ -229,6 +252,18 @@ class NightscoutMentraApp extends AppServer {
       time_in_range_high_mg: this.parseSlicerValue(o.time_in_range_high_mg, null),
       time_in_range_low_mmol: this.normalizeMmol(o.time_in_range_low_mmol),
       time_in_range_high_mmol: this.normalizeMmol(o.time_in_range_high_mmol),
+   
+      // Anim & Prediction controls
+      animation_speed: (['slow','normal','fast'].includes(String(o.animation_speed||'normal')) ? String(o.animation_speed) : 'normal'),
+      enable_animations: (o.enable_animations === undefined || o.enable_animations === null) ? true : this.toBool(o.enable_animations),
+      tir_anim_ms: this.validateSlicerValue(o.tir_anim_ms, 200, 1200, 500),
+      tir_fadeout_ms: this.validateSlicerValue(o.tir_fadeout_ms, 80, 600, 160),
+      prediction_horizon_min: [15,30,60].includes(Number(o.prediction_horizon_min)) ? Number(o.prediction_horizon_min) : 30,
+      official_prediction_only: this.toBool(o.official_prediction_only),
+      blink_on_prediction: (o.blink_on_prediction === undefined || o.blink_on_prediction === null) ? true : this.toBool(o.blink_on_prediction),
+      blink_cycles: this.validateSlicerValue(o.blink_cycles, 1, 8, 4),
+      blink_interval_ms: this.validateSlicerValue(o.blink_interval_ms, 80, 600, 180),
+
     };
   }
 
@@ -367,12 +402,13 @@ async animateTIRText(session, sessionId, settings, headerText, tirLine, tirPct, 
     const showBar = !!(settings && (settings.show_tir_bar || settings.show_tir_bar === undefined));
     const advanced = !!(settings && settings.enable_advanced_mode);
     const enableAnims = settings && settings.enable_animations !== false;
-    const doAnim = showBar && advanced && enableAnims && Number.isFinite(tirPct);
+    const doAnim = showBar && enableAnims && Number.isFinite(tirPct);
     const animMs = this.__resolveMs(settings, Number(settings.tir_anim_ms||500));
     const steps = Math.max(4, Math.min(20, Math.round(animMs/60)));
     const per = Math.max(40, Math.round(animMs/steps));
     const cleanTreat = (tLine||'').replace(/\s+/g,' ').trim();
     const extras = extraLine ? `\n${extraLine}` : '';
+    try { session.logger?.info('TIR-ANIM', { doAnim: (showBar && enableAnims && Number.isFinite(tirPct)), tirPct, showBar, advanced, enableAnims, animMs, steps, per }); } catch(_) {}
 
     const __self = this;
     function compose(ratio){
@@ -688,7 +724,8 @@ async blinkAlertBlock(session, sessionId, text){
         const bar = !this.toBool(settings.show_tir_bar) || tirPct === null ? '' : this.buildTirBar(tirPct);
         let tLine = '';
         try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {}
-        const __txt0 = await this.animateTIRText(session, sessionId, settings, formattedData, tirLine, tirPct, tLine);
+        try { session.logger?.info('Startup -> animate TIR', { tirPct }); } catch(_) {}
+      const __txt0 = await this.animateTIRText(session, sessionId, settings, formattedData, tirLine, tirPct, tLine);
       await this.blinkPredictionIfOut(session, sessionId, settings, __txt0);
       } else {
         this.showClamped(session, sessionId, formattedData);
@@ -842,6 +879,7 @@ if (settings.units === UNITS.MMOL) {
         const bar = !this.toBool(settings.show_tir_bar) || tirPct === null ? '' : this.buildTirBar(tirPct);
         let tLine = '';
         try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {}
+        try { session.logger?.info('HUD gesture -> animate TIR', { tirPct }); } catch(_) {}
         const __txt1 = await this.animateTIRText(session, sessionId, settings, header, tirLine, tirPct, tLine);
       await this.blinkPredictionIfOut(session, sessionId, settings, __txt1);
       } else {
