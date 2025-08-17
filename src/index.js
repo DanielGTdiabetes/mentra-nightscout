@@ -283,19 +283,21 @@ class NightscoutMentraApp extends AppServer {
   composeTirLines(settings, tirLine, bar, tLine) {
     const labelBar = `${tirLine}${bar ? ' ' + bar : ''}`;
     try {
-      const forceNewLine = (settings.language !== 'es') && (settings.units === UNITS.MMOL);
-      if (forceNewLine) {
-        const clean = (tLine || '').replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '')
-                                   .replace(/\s*\/\s*/g, '/').replace(/\s+/g, ' ').trim();
-        return clean ? `${labelBar}\n${clean}` : labelBar;
-      } else {
-        const suffix = (tLine && tLine.trim().length)
-            ? ` · ${tLine.replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '')}`
-            : '';
-        return `${labelBar}${suffix}`;
-      }
+      // ALWAYS move treatments to the next line (both languages / any unit)
+      let clean = (tLine || '')
+        .replace(/^CH\/Ins hoy: /, '')
+        .replace(/^Carbs\/Ins today: /, '')
+        // drop any " · Last: ..." or " · Últ: ..." and all after
+        .replace(/\s*[·•]\s*(Last|Últ):[\s\S]*$/i, '')
+        .replace(/\s*Last:[\s\S]*$/i, '')
+        .replace(/\s*Últ:[\s\S]*$/i, '')
+        .replace(/\s*\/\s*/g, '/')
+        .replace(/\s+/g, ' ')
+        .trim();
+      return clean ? `${labelBar}\n${clean}` : labelBar;
     } catch { return labelBar; }
   }
+
 
   updateDailyTirState(sessionId, readingMgdl, readingTs, settings) {
     const range = this.getAlertLimits(settings);
