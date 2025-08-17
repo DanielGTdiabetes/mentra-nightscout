@@ -289,8 +289,7 @@ ${line2}`;
     const blocks = Math.max(0, Math.min(20, Math.round(tirPct / 5)));
     return '│'.repeat(blocks);
   }
-  /* Build a single TIR line (label + bar + optional treatments) clamped to display width */
-  
+  /* Safe one-line TIR + bar + treatments for GB1 */
   buildTirLine(settings, tirPct, tLine, maxWidth = 28) {
     const isEs = settings.language === 'es';
     let label = isEs ? 'TIR hoy:' : 'TIR:';
@@ -338,15 +337,6 @@ ${line2}`;
       }
     }
     return label;
-  }
-`;
-    }
-    const reserved = label.length + 1 + tShort.length;
-    const avail = Math.max(0, maxWidth - reserved);
-    const cap = Math.max(6, Math.min(18, avail));
-    const bars = Math.max(0, Math.min(cap, Math.round((Number(tirPct) || 0) * cap / 100)));
-    const bar = bars > 0 ? (' ' + '│'.repeat(bars)) : '';
-    return `${label}${bar}${tShort}`;
   }
 
   updateDailyTirState(sessionId, readingMgdl, readingTs, settings) {
