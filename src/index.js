@@ -142,6 +142,7 @@ class NightscoutMentraApp extends AppServer {
       const blink_on_prediction = await session.settings.get('blink_on_prediction');
       const blink_cycles = await session.settings.get('blink_cycles');
       const blink_interval_ms = await session.settings.get('blink_interval_ms');
+    const headup_cooldown_ms = await session.settings.get('headup_cooldown_ms');
     const blink_alert_style = await session.settings.get('prediction_alert_style');
 
 
@@ -186,6 +187,7 @@ class NightscoutMentraApp extends AppServer {
         blink_on_prediction: (blink_on_prediction === undefined || blink_on_prediction === null) ? true : this.toBool(blink_on_prediction),
         blink_cycles: this.validateSlicerValue(blink_cycles, 1, 8, 4),
         blink_interval_ms: this.validateSlicerValue(blink_interval_ms, 80, 600, 180),
+      headup_cooldown_ms: this.validateSlicerValue(headup_cooldown_ms, 0, 30000, 4000),
       prediction_alert_style: (['blink','pulse','solid'].includes(String(blink_alert_style||'pulse')) ? String(blink_alert_style||'pulse') : 'pulse'),
 
       };
@@ -265,6 +267,7 @@ class NightscoutMentraApp extends AppServer {
       blink_on_prediction: (o.blink_on_prediction === undefined || o.blink_on_prediction === null) ? true : this.toBool(o.blink_on_prediction),
       blink_cycles: this.validateSlicerValue(o.blink_cycles, 1, 8, 4),
       blink_interval_ms: this.validateSlicerValue(o.blink_interval_ms, 80, 600, 180),
+      headup_cooldown_ms: this.validateSlicerValue(o.headup_cooldown_ms, 0, 30000, 4000),
       prediction_alert_style: (['blink','pulse','solid'].includes(String(o.prediction_alert_style)) ? String(o.prediction_alert_style) : 'pulse'),
 
     };
@@ -681,7 +684,7 @@ async blinkAlertBlock(session, sessionId, text){
     let settings = null;
     try {
       settings = await this.getUserSettings(session);
-      if (!settings.nightscoutUrl || !settings.nightscoutToken) {
+      if (!settings.nightscoutUrl) {
         const msg = { en: 'Please configure Nightscout\nURL and token in settings', es: 'Configura URL y token\nde Nightscout en ajustes' };
         this.showClamped(session, sessionId, msg[settings.language || 'en']);
         return;
@@ -726,12 +729,16 @@ async blinkAlertBlock(session, sessionId, text){
     } catch (e) {
       session.logger?.error(e, 'Error en sesión');
       console.error('Error en sesión:', e);
+      try { this.showClamped(session, sessionId, (settings && settings.language==='es' ? 'Error en sesión' : 'Session error')); } catch(_) {}
       const lang = (settings && settings.language) || 'en';
       this.showClamped(session, sessionId, lang === 'es' ? 'Error: revisa configuración' : 'Error: check settings');
     }
   }
 
   async showInitialAndHide(session, sessionId, settings) {
+    // Show quick loading placeholder
+    try { this.showClamped(session, sessionId, (settings.language==='es' ? 'Cargando…' : 'Loading…')); } catch(_) {}
+
     try {
       const data = await this.getGlucoseData(settings);
       this.lastGoodEntry.set(sessionId, data);
@@ -828,12 +835,13 @@ if (settings.units === UNITS.MMOL) {
       session.events?.onSettingsChange?.(settingsHandler);
 
       session.events?.onHeadPosition?.(async (data) => {
+        try { session.logger?.info('HEAD_EVT', { pos: String((data&&data.position)||'') }); } catch(_) {}
+
         try {
-          if (data?.position !== 'up') return;
+          if (!data || String(data.position||'').toLowerCase() !== 'up') return;
           const sd = this.activeSessions.get(sessionId);
           const s = sd?.settings; if (!s) return; if (!s.enable_head_up_display) return;
-          const now = Date.now(); const last = this.headUpLastShown.get(sessionId) || 0;
-          if (now - last < 10000) return; this.headUpLastShown.set(sessionId, now);
+          const now = Date.now(); const last = this.headUpLastShown.get(sessionId) || 0; const cooldown = Number(s.headup_cooldown_ms ?? 4000); if (now - last < cooldown) return; this.headUpLastShown.set(sessionId, now);
           const reading = await this.getGlucoseData(s);
           const baseLine = await this.formatForG1WithPrediction(reading, s);
           if (!s.enable_advanced_mode) {
@@ -931,6 +939,8 @@ setTimeout(() => this.hideDisplay(session, sessionId), s.display_duration_ms || 
   async startNormalOperation(session, sessionId, userId, initialSettings) {
     const ms = (initialSettings.updateInterval || 5) * 60 * 1000;
     const iv = setInterval(async () => {
+        try { this.showClamped(session, sessionId, (s.language==='es' ? 'Cargando…' : 'Loading…')); } catch(_) {}
+
       if (!this.activeSessions.has(sessionId)) return clearInterval(iv);
       try {
         const sd = this.activeSessions.get(sessionId);
