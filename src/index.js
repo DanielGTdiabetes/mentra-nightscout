@@ -417,80 +417,111 @@ __barStep(r){ const slots=20; const n = Math.round(this.__clamp01(r)*slots); ret
 
 /** Compose and animate TIR block as text (when advanced+show_tir_bar). */
   async animateTIRText(session, sessionId, settings, headerText, tirLine, tirPct, tLine='', extraLine=''){
-    try {
+try {
       // ---- Config & defaults ----
-      const showBar = !!(settings && (settings.show_tir_bar !== false));
-      const enableAnims = !settings || settings.enable_animations !== false;
-      const slots = Math.max(8, Number(settings?.tir_slots) || 16);          // visible steps
-      const leadInMs = Math.max(0, Number(settings?.tir_leadin_ms) || 220);  // pause before fill
-      const animMs = this.__resolveMs(settings || {}, Number((settings&&settings.tir_anim_ms) || 500));
-      const totalTarget = Math.max(0, Math.min(slots, Math.round(((Number(tirPct)||0)/100) * slots)));
-      const hasTarget = Number.isFinite(totalTarget) && totalTarget > 0;
+      const showBar = !!(settings && (settings.show_tir_bar ?? true));
+      const enableAnims = settings && settings.enable_animations !== false;
+      const speedMap = { slow: 1.35, normal: 1.0, fast: 0.75 };
+      const mult = speedMap[(settings.animation_speed||'normal')] ?? 1.0;
 
-      // Compose single frame helper
-      const compose = (filled, bust='') => {
-        const ratio = slots > 0 ? Math.max(0, Math.min(1, filled/slots)) : 0;
-        const bar = ` [${this.__barStep(ratio)}]`;
-        const l2 = `${tirLine}${showBar ? bar : ''}`;
-        const tl = tLine ? `\n${tLine}` : '';
-        const ex = extraLine ? `\n${extraLine}` : '';
-        return `${headerText}\n${l2}${tl}${ex}${bust}`;
-      };
+      const leadInMs = Number(settings.tir_leadin_ms) || 220;
+      const totalMs  = Math.max(200, Math.min(2000, Math.round((Number(settings.tir_anim_ms)||500) * mult)));
+      const slots    = Math.max(8, Number(settings.tir_slots) || 16);
+      const substeps = Math.max(2, Math.min(6, Number(settings.tir_substeps) || 4)); // how many shades per slot
+      const palette  = ['·', ':', '!', '│']; // length 4 -> we will map substeps to these
 
-      // If no animating conditions, draw static
-      if (!showBar || !enableAnims || !hasTarget){
-        this.showClamped(session, sessionId, compose(totalTarget));
-        return;
-      }
+      // sanitize tirPct
+      const targetPct = Math.max(0, Math.min(100, Number(tirPct)||0));
+      const targetSlotsFloat = (targetPct/100) * slots;
 
-      // ---- Time-based animator (smooth, monotonic) ----
-      const start = Date.now();
-      const bust = ['\u2009', '\u200A', '\u200B', '']; // force unique frames (avoid coalescing)
-      let bustIdx = 0;
-      let lastFilled = -1;
+      // builders
+      const extras = extraLine ? `\n${extraLine}` : '';
+      const cleanTreat = (tLine||'').replace(/\s+/g,' ').trim();
 
-      // initial frame (empty bar)
-      this.showClamped(session, sessionId, compose(0, bust[bustIdx++ % bust.length]));
-
-      // wait lead-in (if any), but don't block too long
-      let now = Date.now();
-      while ((now = Date.now()) - start < leadInMs){
-        await this.__sleep(60);
-      }
-      const fillStart = Date.now();
-      const dur = Math.max(200, animMs);
-
-      // Easing: ease-in cubic, slower at the beginning
-      const easeIn = (t) => (t<=0?0:(t>=1?1:(t*t*t)));
-
-      while (true){
-        const t = Math.min(1, (Date.now() - fillStart) / dur);
-        const eased = easeIn(t);
-        // Target slots (0..totalTarget), monotonic
-        let filled = Math.floor(eased * totalTarget);
-        if (filled > totalTarget) filled = totalTarget;
-        if (filled !== lastFilled){
-          this.showClamped(session, sessionId, compose(filled, (t < 1 ? bust[bustIdx++ % bust.length] : '')));
-          lastFilled = filled;
+      function composeBar(progressFloat){
+        // progressFloat in slots (0..targetSlotsFloat). Allow partial fill on next slot with palette
+        const full = Math.floor(progressFloat);
+        const frac = progressFloat - full; // 0.. <1
+        let out = '[';
+        for (let i=0;i<slots;i++){
+          if (i < full) {
+            out += '│';
+          } else if (i === full && full < Math.ceil(targetSlotsFloat)) {
+            // partial slot
+            const idx = Math.max(1, Math.min(substeps-1, Math.round(frac * (substeps-1))));
+            // map idx to palette index
+            const palIndex = Math.min(palette.length-1, Math.round(idx * (palette.length-1)/(substeps-1)));
+            out += palette[palIndex];
+          } else {
+            out += '·';
+          }
         }
-        if (t >= 1) break;
-        await this.__sleep(70); // tick ~70ms -> ~14fps, stable
+        out += ']';
+        return out;
       }
 
-      // Final clean frame (no bust char, exact target)
-      this.showClamped(session, sessionId, compose(totalTarget, ''));
-    } catch (_) {
-      try {
-        // graceful fallback (static)
-        const slots = Math.max(8, Number(settings?.tir_slots) || 16);
-        const totalTarget = Math.max(0, Math.min(slots, Math.round(((Number(tirPct)||0)/100) * slots)));
-        const ratio = slots>0 ? totalTarget/slots : 0;
-        const bar = ` [${this.__barStep(ratio)}]`;
-        const l2 = `${tirLine}${(settings && settings.show_tir_bar===false)?'':bar}`;
-        const tl = tLine ? `\n${tLine}` : '';
-        const ex = extraLine ? `\n${extraLine}` : '';
-        this.showClamped(session, sessionId, `${headerText}\n${l2}${tl}${ex}`);
-      } catch(__) {}
+      function easeInCubic(t){ return t*t*t; } // 0..1 -> 0..1
+
+      function buildFrame(progressFloat){
+        const bar = showBar ? ` ${composeBar(progressFloat)}` : '';
+        const l2  = `${tirLine}${bar}`;
+        const tl  = cleanTreat ? `\n${cleanTreat}` : '';
+        return `${headerText}\n${l2}${tl}${extras}`;
+      }
+
+      const startTs = Date.now();
+      let lastFrame = '';
+      const minTick = 60;  // ms
+      const maxTick = 120; // ms
+
+      // Lead-in: show empty bar (or header only)
+      const leadFrame = buildFrame(0);
+      this.showClamped(session, sessionId, leadFrame);
+
+      if (!enableAnims || !showBar || targetSlotsFloat <= 0){
+        // No animation; show final static if needed
+        const finalFrame = buildFrame(targetSlotsFloat);
+        if (finalFrame !== leadFrame) this.showClamped(session, sessionId, finalFrame);
+        return finalFrame;
+      }
+
+      // Animate over time with ease-in; only redraw when visible change
+      let elapsed = 0;
+      while (elapsed < leadInMs) {
+        await this.__sleep(30);
+        elapsed = Date.now() - startTs;
+      }
+
+      const animStart = Date.now();
+      let sent = 0;
+      while (true){
+        const t = Date.now() - animStart;
+        const ratio = Math.max(0, Math.min(1, t / totalMs));
+        const eased = easeInCubic(ratio);
+        const prog  = targetSlotsFloat * eased; // in slots
+        const frame = buildFrame(prog);
+
+        if (frame !== lastFrame){
+          this.showClamped(session, sessionId, frame);
+          lastFrame = frame;
+          sent++;
+        }
+
+        if (ratio >= 1) break;
+
+        // adapt tick roughly to total frames (aim 10-20 frames)
+        const remaining = totalMs - t;
+        const tick = Math.max(minTick, Math.min(maxTick, Math.round(remaining / Math.max(1, (10 - Math.min(sent, 9))))));
+        await this.__sleep(tick);
+      }
+
+      // Final settle (clean partials by forcing full state)
+      const finalFrame = buildFrame(targetSlotsFloat);
+      if (finalFrame !== lastFrame) this.showClamped(session, sessionId, finalFrame);
+      return finalFrame;
+    } catch (e) {
+      try { this.showClamped(session, sessionId, `${headerText}\n${tirLine}`); } catch(_){}
+      return `${headerText}\n${tirLine}`;
     }
   }
 
