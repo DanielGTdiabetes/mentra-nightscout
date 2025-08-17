@@ -528,9 +528,7 @@ class NightscoutMentraApp extends AppServer {
         const sep = '   ·   ';
         let predShort = '';
         try { predShort = await this.buildPredictionShort(settings, 30); } catch {}
-        
-        const headerWithPred = predShort ? `${formattedData}${sep}${predShort}` : formattedData;this.showClamped(session, sessionId, `${headerWithPred}
-${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '')}` : ''}`);
+        this.showClamped(session, sessionId, `${formattedData}\n${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '')}` : ''}`);
       } else {
         this.showClamped(session, sessionId, formattedData);
       }
@@ -640,8 +638,13 @@ ${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /
           } catch {}
           let tLine = '';
           try { const sum = await this.getRecentTreatments(s, 'day'); tLine = this.formatTreatmentsLine(sum, s); } catch {}
-          const line2 = `${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '')}` : ''}`;
-          const out = minMaxLine ? `${baseLine}\n${line2}\n${minMaxLine}` : `${baseLine}\n${line2}`;
+          co
+          const sep = '   ·   ';
+          let predShort = '';
+          const baseLinePred = predShort ? (baseLine + sep + predShort) : baseLine;
+          try { predShort = await this.buildPredictionShort(s, 30); } catch {}
+nst line2 = `${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '')}` : ''}`;
+          const out = minMaxLine ? `${baseLinePred}\n${line2}\n${minMaxLine}` : `${baseLine}\n${line2}`;
           this.showClamped(session, sessionId, out);
           setTimeout(() => this.hideDisplay(session, sessionId), s.display_duration_ms || 4000);
         } catch (e) {
@@ -682,9 +685,7 @@ ${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /
         const sep = '   ·   ';
         let predShort = '';
         try { predShort = await this.buildPredictionShort(settings, 30); } catch {}
-        
-        const headerWithPred = predShort ? `${header}${sep}${predShort}` : header;this.showClamped(session, sessionId, `${headerWithPred}
-${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '')}` : ''}`);
+        this.showClamped(session, sessionId, `${header}\n${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '')}` : ''}`);
       } else {
         this.showClamped(session, sessionId, await this.formatForG1(data, settings));
       }
