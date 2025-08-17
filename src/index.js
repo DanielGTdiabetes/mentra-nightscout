@@ -44,7 +44,6 @@ class NightscoutMentraApp extends AppServer {
   isCurrentToken(sessionId, token){
     return (this._renderTokenMap.get(sessionId) || 0) === token;
   }
-  async 
   async delayedLoading(session, sessionId, token, label){
     const ms = 220;
     await this.__sleep(ms);
@@ -439,7 +438,6 @@ __clamp01(x){ return Math.max(0, Math.min(1, x)); }
 __barStep(r){ const slots=20; const n = Math.round(this.__clamp01(r)*slots); return '│'.repeat(n) + '·'.repeat(slots-n); }
 
 /** Compose and animate TIR block as text (when advanced+show_tir_bar). */
-  async 
   /**
    * New TIR animation: time-based, substeps, token-guarded.
    * options: { force: boolean }
