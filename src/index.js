@@ -42,9 +42,26 @@ class NightscoutMentraApp extends AppServer {
     this.dailyTirState = new Map();
     this.dayWatchTimers = new Map();
     this.lastGoodEntry = new Map();          // cache last valid entry
+    this.headUpPrimed = new Map();
+    this.headUpUnsub = new Map();
   }
 
   /* ---------- helpers ---------- */
+
+  async applyHeadUpEnabled(session, enabled, settings) {
+    const sid = session.id;
+    const off = this.headUpUnsub && this.headUpUnsub.get(sid);
+    if (off) { try { off(); } catch (_) {} this.headUpUnsub.delete(sid); }
+    if (!enabled) { this.headUpPrimed && this.headUpPrimed.set(sid, false); return; }
+    if (this.headUpPrimed && this.headUpPrimed.get(sid)) return;
+    // Warm-up preview to avoid needing two toggles the first time
+    this.headUpPrimed && this.headUpPrimed.set(sid, true);
+    try {
+      await new Promise(r => setTimeout(r, 300));
+      const sNow = settings || await this.getUserSettings(session);
+      this.showGlucoseTemporarily(session, sid, (sNow && sNow.display_duration_ms) || 4000, sNow).catch(() => {});
+    } catch (_) {}
+  }
   parseSlicerValue(val, fallback) {
     const n = (typeof val === 'object' && val !== null) ? parseFloat(val.value) : parseFloat(val);
     return Number.isFinite(n) ? n : fallback;
@@ -103,10 +120,7 @@ class NightscoutMentraApp extends AppServer {
         session.settings.get('alert_cooldown_min'),
         session.settings.get('show_tir_bar'),
         session.settings.get('show_range_bar'),
-        
-        session.settings.get('show_prediction'),
-        session.settings.get('prediction_horizon_min'),
-session.settings.get('display_duration_ms'),
+        session.settings.get('display_duration_ms'),
         session.settings.get('alert_duration_ms'),
         session.settings.get('alert_cooldown_ms'),
         session.settings.get('enable_advanced_mode'),
@@ -140,11 +154,7 @@ session.settings.get('display_duration_ms'),
         ? true
         : (this.toBool(show_tir_bar) || this.toBool(show_range_bar));
 
-      
-      
-    const showPrediction = this.toBool(show_prediction);
-      const predictionHorizonMin = this.validateSlicerValue(prediction_horizon_min, 10, 60, 30);
-return {
+      return {
         nightscoutUrl: String(url || '').trim() || '',
         nightscoutToken: String(token || '').trim() || '',
         updateInterval: ui,
@@ -157,11 +167,7 @@ return {
         timezone: timezone || null,
         units: units || UNITS.MGDL,
         enable_head_up_display: this.toBool(enable_head_up_display),
-        
-        show_tir_bar: showTirBar,
-        show_prediction: showPrediction,
-        prediction_horizon_min: predictionHorizonMin,
-display_duration_ms: displayMs,
+        display_duration_ms: displayMs,
         alert_duration_ms: alertMs,
         alert_cooldown_ms: coolMs,
         show_tir_bar: showTirBar,
@@ -186,10 +192,7 @@ display_duration_ms: displayMs,
         enable_head_up_display: false,
         display_duration_ms: 5000, alert_duration_ms: 15000, alert_cooldown_ms: 600000,
         show_tir_bar: true,
-        
-        show_prediction: true,
-        prediction_horizon_min: 30,
-enable_advanced_mode: false,
+        enable_advanced_mode: false,
       };
     }
   }
@@ -216,9 +219,6 @@ enable_advanced_mode: false,
     const showTirBar = (o.show_tir_bar === null && o.show_range_bar === null)
       ? true
       : (this.toBool(o.show_tir_bar) || this.toBool(o.show_range_bar));
-    const showPrediction = this.toBool(o.show_prediction);
-    const predictionHorizonMin = this.validateSlicerValue(o.prediction_horizon_min, 10, 60, 30);
-
 
     return {
       nightscoutUrl: String(o.nightscout_url || '').trim() || '',
@@ -233,11 +233,7 @@ enable_advanced_mode: false,
       timezone: o.timezone || null,
       units,
       enable_head_up_display: this.toBool(o.enable_head_up_display),
-      
-      show_tir_bar: showTirBar,
-      show_prediction: showPrediction,
-      prediction_horizon_min: predictionHorizonMin,
-display_duration_ms: displayMs,
+      display_duration_ms: displayMs,
       alert_duration_ms: alertMs,
       alert_cooldown_ms: coolMs,
       show_tir_bar: showTirBar,
@@ -373,100 +369,7 @@ display_duration_ms: displayMs,
       : (label === 'today' ? `Carbs/Ins today: ${c}g / ${i}U${lastStr}` : `Carbs/Ins ${label}: ${c}g / ${i}U${lastStr}`);
   }
 
-  
-  /* ---------- predicción ---------- */
-  async fetchDeviceStatus(settings) {
-    try {
-      let u = settings.nightscoutUrl;
-      if (!u) return null;
-      if (!u.startsWith('http')) u = 'https://' + u;
-      u = u.replace(/\/$/, '');
-      const endpoint = `${u}/api/v1/devicestatus.json?count=1`;
-      const params = settings.nightscoutToken ? { token: settings.nightscoutToken } : {};
-      const headers = { 'User-Agent': 'MentraOS-Nightscout/2.9.6' };
-      const { data } = await axios.get(endpoint, { params, timeout: 8000, headers });
-      return Array.isArray(data) ? data[0] : data;
-    } catch (_) { return null; }
-  }
-  pickPredictionFromDeviceStatus(devStat, horizonMin) {
-    try {
-      if (!devStat || !horizonMin) return null;
-      const now = Date.now();
-      const targetTs = now + horizonMin * 60 * 1000;
-      // loop.predicted.values
-      const loopPred = devStat?.loop?.predicted;
-      if (loopPred && Array.isArray(loopPred.values) && loopPred.values.length) {
-        const values = loopPred.values;
-        if (typeof values[0] === 'object') {
-          let best = null, bestDiff = Infinity;
-          for (const pt of values) {
-            const ts = +new Date(pt.startDate || pt.date || pt.timestamp || 0);
-            const v  = Number(pt.value || pt.sgv || pt.mgdl);
-            if (!Number.isFinite(ts) || !Number.isFinite(v)) continue;
-            const diff = Math.abs(ts - targetTs);
-            if (diff < bestDiff) { best = v; bestDiff = diff; }
-          }
-          if (Number.isFinite(best)) return Math.round(best);
-        } else {
-          const idx = Math.round(horizonMin / 5);
-          const v = values[Math.min(idx, values.length - 1)];
-          if (Number.isFinite(v)) return Math.round(v);
-        }
-      }
-      // openaps.suggested.predBGs
-      const sug = devStat?.openaps?.suggested;
-      if (sug?.predBGs) {
-        const seq = sug.predBGs.IOB || sug.predBGs.COB || null;
-        if (Array.isArray(seq) && seq.length) {
-          const idx = Math.round(horizonMin / 5);
-          const v = seq[Math.min(idx, seq.length - 1)];
-          if (Number.isFinite(v)) return Math.round(v);
-        }
-        const key = String(horizonMin) + 'm';
-        const vmap = sug.predBGs;
-        if (Number.isFinite(vmap[key])) return Math.round(vmap[key]);
-      }
-      // devicestatus.predicted.values
-      if (Array.isArray(devStat?.predicted?.values) && devStat.predicted.values.length) {
-        const idx = Math.round(horizonMin / 5);
-        const v = devStat.predicted.values[Math.min(idx, devStat.predicted.values.length - 1)];
-        if (Number.isFinite(v)) return Math.round(v);
-      }
-      return null;
-    } catch (_) { return null; }
-  }
-  computeLinearPrediction(entries, horizonMin) {
-    try {
-      if (!Array.isArray(entries) || entries.length < 2) return null;
-      const pts = entries.slice(0, 6).map(e => ({ t: e.date, v: e.sgv })).filter(e => Number.isFinite(e.t) && Number.isFinite(e.v));
-      if (pts.length < 2) return null;
-      pts.sort((a,b) => a.t - b.t);
-      const dt = pts[pts.length-1].t - pts[0].t;
-      if (dt <= 0) return null;
-      const dv = pts[pts.length-1].v - pts[0].v;
-      const slope = dv / dt; // mg/dL por ms
-      const last = pts[pts.length-1].v;
-      const pred = last + slope * (horizonMin * 60 * 1000);
-      return Math.round(pred);
-    } catch (_) { return null; }
-  }
-  async buildPredictionShort(settings, horizonMin) {
-    try {
-      // try server-side first
-      const devStat = await this.fetchDeviceStatus(settings);
-      let pred = this.pickPredictionFromDeviceStatus(devStat, horizonMin);
-      if (!Number.isFinite(pred)) {
-        // fallback linear with few latest entries
-        const entries = await this.getTodayEntries(settings);
-        pred = this.computeLinearPrediction(entries, horizonMin);
-      }
-      if (!Number.isFinite(pred)) return '';
-      const units = settings.units || UNITS.MGDL;
-      const display = (units === UNITS.MMOL) ? (pred / 18).toFixed(1) : Math.round(pred);
-      return `→ ${display} ${units} @${horizonMin}m`;
-    } catch (_) { return ''; }
-  }
-/* ---------- obtención de datos ---------- */
+  /* ---------- obtención de datos ---------- */
   async getTodayEntries(settings) {
     const u0 = settings.nightscoutUrl;
     if (!u0) throw new Error('URL no configurada');
@@ -603,8 +506,7 @@ display_duration_ms: displayMs,
         const bar = !this.toBool(settings.show_tir_bar) || tirPct === null ? '' : this.buildTirBar(tirPct);
         let tLine = '';
         try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {}
-        
-        try { if (settings.show_prediction !== false) { const pStr = await this.buildPredictionShort(settings, settings.prediction_horizon_min || 30); if (pStr) tLine = tLine ? (tLine + ' · ' + pStr) : pStr; } } catch {}this.showClamped(session, sessionId, `${formattedData}\n${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '')}` : ''}`);
+        this.showClamped(session, sessionId, `${formattedData}\n${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '')}` : ''}`);
       } else {
         this.showClamped(session, sessionId, formattedData);
       }
@@ -714,8 +616,7 @@ display_duration_ms: displayMs,
           } catch {}
           let tLine = '';
           try { const sum = await this.getRecentTreatments(s, 'day'); tLine = this.formatTreatmentsLine(sum, s); } catch {}
-          
-          try { if (s.show_prediction !== false) { const pStr = await this.buildPredictionShort(s, s.prediction_horizon_min || 30); if (pStr) tLine = tLine ? (tLine + ' · ' + pStr) : pStr; } } catch {}const line2 = `${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '')}` : ''}`;
+          const line2 = `${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '')}` : ''}`;
           const out = minMaxLine ? `${baseLine}\n${line2}\n${minMaxLine}` : `${baseLine}\n${line2}`;
           this.showClamped(session, sessionId, out);
           setTimeout(() => this.hideDisplay(session, sessionId), s.display_duration_ms || 4000);
@@ -754,8 +655,7 @@ display_duration_ms: displayMs,
         const bar = !this.toBool(settings.show_tir_bar) || tirPct === null ? '' : this.buildTirBar(tirPct);
         let tLine = '';
         try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {}
-        
-        try { if (settings.show_prediction !== false) { const pStr = await this.buildPredictionShort(settings, settings.prediction_horizon_min || 30); if (pStr) tLine = tLine ? (tLine + ' · ' + pStr) : pStr; } } catch {}this.showClamped(session, sessionId, `${header}\n${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '')}` : ''}`);
+        this.showClamped(session, sessionId, `${header}\n${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '')}` : ''}`);
       } else {
         this.showClamped(session, sessionId, await this.formatForG1(data, settings));
       }
