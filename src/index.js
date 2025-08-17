@@ -503,8 +503,8 @@ class NightscoutMentraApp extends AppServer {
       if (settings.enable_advanced_mode) {
         const tirPct = tirRes.tirPct;
         const tirLine = tirPct === null
-          ? (settings.language === 'es' ? 'TIR hoy: n/d' : 'Today TIR: n/a')
-          : (settings.language === 'es' ? `TIR hoy: ${tirPct}%` : `Today TIR: ${tirPct}%`);
+          ? (settings.language === 'es' ? 'TIR hoy: n/d' : 'TIR: n/a')
+          : (settings.language === 'es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
         const bar = !this.toBool(settings.show_tir_bar) || tirPct === null ? '' : this.buildTirBar(tirPct);
         let tLine = '';
         try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {}
@@ -561,14 +561,17 @@ class NightscoutMentraApp extends AppServer {
           sd.settings = settings;
           this.activeSessions.set(sessionId, sd);
           try {
-            const lines = ['Ajustes guardados'];
-            if (settings.units === UNITS.MMOL) {
-              lines.push(`Low: ${settings.low_alert_mmol} mmol/L`);
-              lines.push(`High: ${settings.high_alert_mmol} mmol/L`);
-            } else {
-              lines.push(`Low: ${settings.low_alert_mg} mg/dL`);
-              lines.push(`High: ${settings.high_alert_mg} mg/dL`);
-            }
+            const savedMsg = (settings.language === 'es') ? 'Ajustes guardados' : 'Settings saved';
+const lowLbl = (settings.language === 'es') ? 'Bajo' : 'Low';
+const highLbl = (settings.language === 'es') ? 'Alto' : 'High';
+const lines = [savedMsg];
+if (settings.units === UNITS.MMOL) {
+  lines.push(`${lowLbl}: ${settings.low_alert_mmol} mmol/L`);
+  lines.push(`${highLbl}: ${settings.high_alert_mmol} mmol/L`);
+} else {
+  lines.push(`${lowLbl}: ${settings.low_alert_mg} mg/dL`);
+  lines.push(`${highLbl}: ${settings.high_alert_mg} mg/dL`);
+}
             lines.push(`Units: ${settings.units}`);
             lines.push(`HeadUp: ${settings.enable_head_up_display ? 'ON' : 'OFF'}`);
             lines.push(`Advanced: ${settings.enable_advanced_mode ? 'ON' : 'OFF'}`);
@@ -600,8 +603,8 @@ class NightscoutMentraApp extends AppServer {
           }
           const { tirPct } = this.updateDailyTirState(sessionId, reading.sgv, reading.date, s);
           const tirLine = tirPct === null
-            ? (s.language === 'es' ? 'TIR hoy: n/d' : 'Today TIR: n/a')
-            : (s.language === 'es' ? `TIR hoy: ${tirPct}%` : `Today TIR: ${tirPct}%`);
+            ? (s.language === 'es' ? 'TIR hoy: n/d' : 'TIR: n/a')
+            : (s.language === 'es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
           const bar = !this.toBool(s.show_tir_bar) || tirPct === null ? '' : this.buildTirBar(tirPct);
           let minMaxLine = '';
           try {
@@ -652,8 +655,8 @@ class NightscoutMentraApp extends AppServer {
       if (settings.enable_advanced_mode) {
         const header = await this.formatForG1(data, settings);
         const tirLine = tirPct === null
-          ? (settings.language === 'es' ? 'TIR hoy: n/d' : 'Today TIR: n/a')
-          : (settings.language === 'es' ? `TIR hoy: ${tirPct}%` : `Today TIR: ${tirPct}%`);
+          ? (settings.language === 'es' ? 'TIR hoy: n/d' : 'TIR: n/a')
+          : (settings.language === 'es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
         const bar = !this.toBool(settings.show_tir_bar) || tirPct === null ? '' : this.buildTirBar(tirPct);
         let tLine = '';
         try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {}
@@ -762,7 +765,7 @@ class NightscoutMentraApp extends AppServer {
       const { tirPct } = this.updateDailyTirState(activeSession?.sessionId || 'tool', reading.sgv, reading.date, settings);
       let extra = '';
       if (settings.enable_advanced_mode && Number.isFinite(tirPct)) {
-        extra = lang === 'es' ? ` TIR hoy: ${tirPct}%` : ` Today TIR: ${tirPct}%`;
+        extra = lang === 'es' ? ` TIR hoy: ${tirPct}%` : ` TIR: ${tirPct}%`;
       }
       const msg = lang === 'es'
         ? `Tu glucosa está en ${display} ${settings.units || UNITS.MGDL} ${trend}. Estado: ${status}.${extra}`
