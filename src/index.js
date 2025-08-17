@@ -446,7 +446,7 @@ async animateTIRText(session, sessionId, settings, headerText, tirLine, tirPct, 
       const weights = [];
       for (let i=1;i<=targetSlots;i++){
         const t = i/targetSlots;          // 0..1
-        const w = 0.6 + (t*t)*0.8;        // start slow (bigger w), end faster
+        const w = 1.4 - (t*t)*0.8;        // ease-in: early slots longer, later shorter
         weights.push(w);
       }
       const sumW = weights.reduce((a,b)=>a+b,0) || 1;
