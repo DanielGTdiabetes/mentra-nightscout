@@ -66,6 +66,9 @@ paintFrame(session, sessionId, token, text){
   }
 
   constructor(opts) {
+    this._alertLock = new Set();
+    this._predBlinkBusy = new Set();
+
     super(opts);
     this.activeSessions = new Map();
     this.alertHistory = new Map();
@@ -527,7 +530,7 @@ __barStep(r){ const slots=20; const n = Math.round(this.__clamp01(r)*slots); ret
       }
     }catch(_){}
   }
-animateTIRText(session, sessionId, settings, headerText, tirLine, tirPct, tLine='', extraLine=''){
+async animateTIRText(session, sessionId, settings, headerText, tirLine, tirPct, tLine='', extraLine=''){
 try {
       // ---- Config & defaults ----
       const showBar = !!(settings && (settings.show_tir_bar ?? true));
@@ -650,51 +653,89 @@ extractPredictionFromText(block){
 }
 
 /** Blink a warning line if prediction is out-of-range (uses current alert limits). */
-async blinkPredictionIfOut(session, sessionId, settings, renderedText){
+
+
+  async blinkPredictionIfOut(session, sessionId, settings, renderedText){
     try {
       if (!settings) return;
-      const style = settings.prediction_alert_style || 'pulse';
-      const allowAnim = settings.blink_on_prediction !== false && (settings.enable_animations !== false);
-      // 1) Extract or fallback to last prediction mg/dL
+      // extract or fallback to last prediction
       let pred = this.extractPredictionFromText(renderedText);
       if (!pred && Number.isFinite(this._lastPredictionMgdl)) {
         pred = { mgdl: this._lastPredictionMgdl, minutes: Number(settings.prediction_horizon_min||30) };
       }
       if (!pred) return;
-      // 2) Thresholds
+      const limits = this.getAlertLimits(settings);
+      const outLow  = pred.mgdl < limits.low;
+      const outHigh = pred.mgdl > limits.high;
+      if (!outLow && !outHigh) return;
+      // Solid, non-animated highlight
+      const unit = settings.units || UNITS.MGDL;
+      const vDisp = this.convertToDisplay(pred.mgdl, unit);
+      const lang = settings.language || 'en';
+      const warn = lang === 'es'
+        ? (outLow ? `⚠️ Predicción BAJA: ${vDisp} ${unit}` : `⚠️ Predicción ALTA: ${vDisp} ${unit}`)
+        : (outLow ? `⚠️ LOW prediction: ${vDisp} ${unit}` : `⚠️ HIGH prediction: ${vDisp} ${unit}`);
+      this.showClamped(session, sessionId, `${renderedText}\n${warn}`);
+    } catch(_){}
+  }
+      if (!pred || !Number.isFinite(pred.mgdl)) return;
+
+      // 2) Thresholds (mg/dL)
       const limits = this.getAlertLimits(settings);
       const outLow  = pred.mgdl < limits.low;
       const outHigh = pred.mgdl > limits.high;
       const triggered = (outLow || outHigh);
-      try { session.logger?.info('PRED-BLINK', { mgdl: pred.mgdl, limits, triggered, style }); } catch(_){}
+      try { session.logger?.info('PRED-ALERT', { mgdl: pred.mgdl, limits, triggered, style }); } catch(_){}
       if (!triggered) return;
 
-      const unit = (settings.units === UNITS.MMOL || String(settings.units||'').toLowerCase().includes('mmol')) ? UNITS.MMOL : UNITS.MGDL;
+      // 3) Compose message (localized, with units)
+      const unit = settings.units || UNITS.MGDL;
       const vDisp = this.convertToDisplay(pred.mgdl, unit);
       const lang = settings.language || 'en';
       const warn = lang === 'es'
         ? (outLow ? `⚠️ Predicción BAJA: ${vDisp} ${unit}` : `⚠️ Predicción ALTA: ${vDisp} ${unit}`)
         : (outLow ? `⚠️ LOW prediction: ${vDisp} ${unit}` : `⚠️ HIGH prediction: ${vDisp} ${unit}`);
 
-      // Fallback "solid" (si animaciones off o estilo = solid)
+      // 4) Solid fallback or animations disabled
       if (!allowAnim || style === 'solid') {
-        this.showClamped(session, sessionId, `${renderedText}\n${warn}`);
+        this.showClamped(session, sessionId, `${renderedText}
+${warn}`);
         return;
       }
 
-      // 'pulse' y 'blink' — intervalos más largos para evitar coalescing
-      const cycles = style === 'pulse' ? 3 : Math.max(1, Math.min(8, Number(settings.blink_cycles) || 4));
-      const interval = Math.max(200, Math.min(1000, Number(settings.blink_interval_ms) || (style === 'pulse' ? 260 : 220)));
-      const bust = ['\u2009', '\u200A', '']; // alterna invisibles para que el frame cambie
+      // 5) Animated styles with watchdog + token check
+      const cycles = style === 'pulse' ? 3 : Math.max(1, Math.min(6, Number(settings.blink_cycles) || 4));
+      const interval = Math.max(180, Math.min(900, Number(settings.blink_interval_ms) || (style === 'pulse' ? 260 : 220)));
+      const bust = ['\u2009', '\u200A', '']; // alternate invisible chars
+      let failures = 0;
+      this._predBlinkBusy.add(sessionId);
+      const currentToken = this._renderToken?.get?.(sessionId);
 
-      for (let i=0; i<cycles; i++){
-        this.showClamped(session, sessionId, `${renderedText}\n${warn}${bust[i % bust.length]}`);
+      for (let i=0; i<cycles; i++) {
+        if (this._renderToken && currentToken && this._renderToken.get(sessionId) !== currentToken) break;
+        try {
+          this.showClamped(session, sessionId, `${renderedText}
+${warn}${bust[i % bust.length]}`);
+        } catch (e) { failures++; }
         await this.__sleep(interval);
-        this.showClamped(session, sessionId, `${renderedText}${bust[(i+1) % bust.length]}`);
+        if (this._renderToken && currentToken && this._renderToken.get(sessionId) !== currentToken) break;
+        try {
+          this.showClamped(session, sessionId, `${renderedText}${bust[(i+1) % bust.length]}`);
+        } catch (e) { failures++; }
         await this.__sleep(interval);
+        if (failures >= 2) break;
       }
-    } catch(_){}
+      this._predBlinkBusy.delete(sessionId);
+
+      if (failures >= 2) {
+        try { this.showClamped(session, sessionId, `${renderedText}
+${warn}`); } catch(_){}
+      }
+    } catch(_){
+      try { this.showClamped(session, sessionId, renderedText); } catch(_){}
+    }
   }
+
 
 /** Light blink for alerts (LOW/HIGH) to increase salience. */
 async blinkAlertBlock(session, sessionId, text){
