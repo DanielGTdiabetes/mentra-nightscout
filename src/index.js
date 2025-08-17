@@ -33,28 +33,6 @@ if (!MENTRAOS_API_KEY) {
 const UNITS = { MGDL: 'mg/dL', MMOL: 'mmol/L' };
 
 class NightscoutMentraApp extends AppServer {
-  // --- Render token guards to avoid interleaved frames / double screens ---
-  _renderTokenMap = new Map();
-  bumpRenderToken(sessionId){
-    const cur = this._renderTokenMap.get(sessionId) || 0;
-    const next = cur + 1;
-    this._renderTokenMap.set(sessionId, next);
-    return next;
-  }
-  isCurrentToken(sessionId, token){
-    return (this._renderTokenMap.get(sessionId) || 0) === token;
-  }
-  async delayedLoading(session, sessionId, token, label){
-    const ms = 220;
-    await this.__sleep(ms);
-    if (!this.isCurrentToken(sessionId, token)) return;
-    this.showClamped(session, sessionId, label);
-  }
-paintFrame(session, sessionId, token, text){
-    if (!this.isCurrentToken(sessionId, token)) return;
-    this.showClamped(session, sessionId, text);
-  }
-
   constructor(opts) {
     super(opts);
     this.activeSessions = new Map();
@@ -154,22 +132,6 @@ paintFrame(session, sessionId, token, text){
       const coolMs = Number.isFinite(this.parseSlicerValue(alert_cooldown_min, NaN))
         ? Math.min(60, Math.max(1, this.parseSlicerValue(alert_cooldown_min))) * 60 * 1000
         : this.validateSlicerValue(alert_cooldown_ms, 60000, 3600000, 600000);
-      // Read extra console settings (optional; defaults applied if missing)
-      const animation_speed = await session.settings.get('animation_speed');
-      const enable_animations = await session.settings.get('enable_animations');
-      const tir_anim_ms = await session.settings.get('tir_anim_ms');
-      const tir_fadeout_ms = await session.settings.get('tir_fadeout_ms');
-    const tir_slots = await session.settings.get('tir_slots');
-    const tir_leadin_ms = await session.settings.get('tir_leadin_ms');
-      const prediction_horizon_min = await session.settings.get('prediction_horizon_min');
-      const official_prediction_only = await session.settings.get('official_prediction_only');
-      const blink_on_prediction = await session.settings.get('blink_on_prediction');
-      const blink_cycles = await session.settings.get('blink_cycles');
-      const blink_interval_ms = await session.settings.get('blink_interval_ms');
-    const headup_cooldown_ms = await session.settings.get('headup_cooldown_ms');
-    const blink_alert_style = await session.settings.get('prediction_alert_style');
-    const tir_anim_style = await session.settings.get('tir_anim_style');
-
 
       const showTirBar = (show_tir_bar === null && show_range_bar === null)
         ? true
@@ -201,26 +163,7 @@ paintFrame(session, sessionId, token, text){
         time_in_range_high_mg: this.parseSlicerValue(time_in_range_high_mg, null),
         time_in_range_low_mmol: this.normalizeMmol(time_in_range_low_mmol),
         time_in_range_high_mmol: this.normalizeMmol(time_in_range_high_mmol),
-     
-        
-        // Anim & Prediction controls
-        animation_speed: (['slow','normal','fast'].includes(String(animation_speed || 'normal')) ? String(animation_speed || 'normal') : 'normal'),
-      tir_anim_style: (['fill','sweep','spinner','flip'].includes(String(tir_anim_style || 'sweep')) ? String(tir_anim_style || 'sweep') : 'sweep'),
-        enable_animations: (enable_animations === undefined || enable_animations === null) ? true : this.toBool(enable_animations),
-        tir_anim_ms: this.validateSlicerValue(tir_anim_ms, 200, 1200, 500),
-        tir_fadeout_ms: this.validateSlicerValue(tir_fadeout_ms, 80, 600, 160),
-        prediction_horizon_min: [15,30,60].includes(Number(prediction_horizon_min)) ? Number(prediction_horizon_min) : 30,
-        official_prediction_only: this.toBool(official_prediction_only),
-        blink_on_prediction: (blink_on_prediction === undefined || blink_on_prediction === null) ? true : this.toBool(blink_on_prediction),
-        blink_cycles: this.validateSlicerValue(blink_cycles, 1, 8, 4),
-        blink_interval_ms: this.validateSlicerValue(blink_interval_ms, 80, 600, 180),
-        compact_pred: true,
-        headup_cooldown_ms: this.validateSlicerValue(headup_cooldown_ms, 0, 30000, 4000),
-        prediction_alert_style: (['blink','pulse','solid'].includes(String(blink_alert_style || 'pulse')) ? String(blink_alert_style || 'pulse') : 'pulse'),
-        tir_slots: this.validateSlicerValue(tir_slots, 8, 24, 16),
-        tir_leadin_ms: this.validateSlicerValue(tir_leadin_ms, 0, 800, 220)
-
-    };
+      };
     } catch (e) {
       console.error('Error leyendo settings:', e);
       return {
@@ -286,25 +229,6 @@ paintFrame(session, sessionId, token, text){
       time_in_range_high_mg: this.parseSlicerValue(o.time_in_range_high_mg, null),
       time_in_range_low_mmol: this.normalizeMmol(o.time_in_range_low_mmol),
       time_in_range_high_mmol: this.normalizeMmol(o.time_in_range_high_mmol),
-   
-      
-      // Anim & Prediction controls
-      animation_speed: (['slow','normal','fast'].includes(String(o.animation_speed || 'normal')) ? String(o.animation_speed || 'normal') : 'normal'),
-      tir_anim_style: (['fill','sweep','spinner','flip'].includes(String(o.tir_anim_style)) ? String(o.tir_anim_style) : 'sweep'),
-      enable_animations: (o.enable_animations === undefined || o.enable_animations === null) ? true : this.toBool(o.enable_animations),
-      tir_anim_ms: this.validateSlicerValue(o.tir_anim_ms, 200, 1200, 500),
-      tir_fadeout_ms: this.validateSlicerValue(o.tir_fadeout_ms, 80, 600, 160),
-      prediction_horizon_min: [15,30,60].includes(Number(o.prediction_horizon_min)) ? Number(o.prediction_horizon_min) : 30,
-      official_prediction_only: this.toBool(o.official_prediction_only),
-      blink_on_prediction: (o.blink_on_prediction === undefined || o.blink_on_prediction === null) ? true : this.toBool(o.blink_on_prediction),
-      blink_cycles: this.validateSlicerValue(o.blink_cycles, 1, 8, 4),
-      blink_interval_ms: this.validateSlicerValue(o.blink_interval_ms, 80, 600, 180),
-      compact_pred: (o.compact_pred === undefined || o.compact_pred === null) ? true : this.toBool(o.compact_pred),
-      headup_cooldown_ms: this.validateSlicerValue(o.headup_cooldown_ms, 0, 30000, 4000),
-      prediction_alert_style: (['blink','pulse','solid'].includes(String(o.prediction_alert_style || 'pulse')) ? String(o.prediction_alert_style || 'pulse') : 'pulse'),
-      tir_slots: this.validateSlicerValue(o.tir_slots, 8, 24, 16),
-      tir_leadin_ms: this.validateSlicerValue(o.tir_leadin_ms, 0, 800, 220)
-
     };
   }
 
@@ -331,7 +255,7 @@ paintFrame(session, sessionId, token, text){
   }
 
   async formatForG1(data, settings) {
-    const display = this.convertToDisplay(Number(data?.sgv||0), settings.units || UNITS.MGDL);
+    const display = this.convertToDisplay(data.sgv, settings.units || UNITS.MGDL);
     const trend = this.getTrendArrow(data.direction);
     const langSettings = this.getLanguageSettings(settings);
     const tz = settings.timezone ? this.validateTimezone(settings.timezone) : langSettings.timezone;
@@ -370,8 +294,8 @@ paintFrame(session, sessionId, token, text){
    * Returns like "145 mg/dL @30m" or "6.7 mmol/L @30m"
    */
   async buildPredictionShort(settings, horizonMin = 30) {
-    const unit = (settings.units === UNITS.MMOL || String(settings.units||'').toLowerCase().includes('mmol')) ? UNITS.MMOL : UNITS.MGDL;
-    const fmt = (mgdl) => this.convertToDisplay(mgdl, unit) + ' ' + unit + ` @${horizonMin}m`;
+    const unit = settings.units || UNITS.MGDL;
+    const fmt = (mgdl) => this.convertToDisplay(mgdl, unit) + ` @${horizonMin}m`;
 
     // Normalize base URL
     let base = (settings.nightscoutUrl || '').trim();
@@ -392,7 +316,7 @@ paintFrame(session, sessionId, token, text){
         if (series && Array.isArray(series) && series.length) {
           const idx = Math.max(0, Math.min(series.length - 1, Math.round(horizonMin / 5)));
           const mgdl = Number(series[idx]);
-          if (Number.isFinite(mgdl)) { this._lastPredictionMgdl = mgdl; return fmt(mgdl); }
+          if (Number.isFinite(mgdl)) return fmt(mgdl);
         }
       }
     } catch (_) {}
@@ -411,7 +335,7 @@ paintFrame(session, sessionId, token, text){
           const ratePerMin = (mgNow - mgPrev) / ((tNow - tPrev) / 60000);
           let mgPred = mgNow + ratePerMin * horizonMin;
           mgPred = Math.max(40, Math.min(400, mgPred));
-          this._lastPredictionMgdl = mgPred; return fmt(mgPred);
+          return fmt(mgPred);
         }
       }
     } catch (_) {}
@@ -430,274 +354,6 @@ paintFrame(session, sessionId, token, text){
     const blocks = Math.max(0, Math.min(20, Math.round(tirPct / 5)));
     return '│'.repeat(blocks);
   }
-/* ---------- Animation & Prediction helpers ---------- */
-async __sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
-  __busyWait(ms){ const end = Date.now() + Math.max(0, Number(ms)||0); while (Date.now() < end) {} }
-
-__SPEED_MAP = { slow: 1.35, normal: 1.0, fast: 0.75 };
-__resolveMs(settings, base){ const mult = (this.__SPEED_MAP[(settings.animation_speed||'normal')] ?? 1.0); return Math.round(Math.max(60, Math.min(2000, base*mult))); }
-__clamp01(x){ return Math.max(0, Math.min(1, x)); }
-__barStep(r){ const slots=20; const n = Math.round(this.__clamp01(r)*slots); return '│'.repeat(n) + '·'.repeat(slots-n); }
-
-/** Compose and animate TIR block as text (when advanced+show_tir_bar). */
-  /**
-   * New TIR animation: time-based, substeps, token-guarded.
-   * options: { force: boolean }
-   */
-  async animateTIRTextV2(session, sessionId, token, settings, headerText, tirLine, tirPct, tLine='', extraLine='', options={}){
-    try{
-      const force = !!options.force;
-      const showBar = !!(settings && (settings.show_tir_bar ?? true));
-      const enableAnims = settings && settings.enable_animations !== false;
-      const canAnim = (showBar && enableAnims && Number.isFinite(tirPct)) || force;
-      const slots = Math.max(8, Number(settings.tir_slots) || 16);
-      const substeps = Math.max(1, Math.min(6, Number(settings.tir_substeps) || 4));
-      const leadInMs = Number(settings.tir_leadin_ms) || 220;
-      const speedMap = { slow: 1.35, normal: 1.0, fast: 0.75 };
-      const mult = speedMap[(settings.animation_speed||'normal')] ?? 1.0;
-      const totalMs = Math.round(Math.max(200, Math.min(2000, (Number(settings.tir_anim_ms)||500) * mult)));
-      const animMs = Math.max(0, totalMs - leadInMs);
-
-      const clamp01 = (x)=> Math.max(0, Math.min(1, x));
-      const barFor = (filled, partial=0)=>{
-        // filled: integer slots filled; partial: substep 0..(substeps-1)
-        const left = Math.max(0, Math.min(slots, filled));
-        const right = Math.max(0, slots - left);
-        const fillChar = "│";
-        const emptyChar = "·";
-        const midCharSeq = [":","!","¦","│"];
-        const midChar = midCharSeq[Math.min(midCharSeq.length-1, Math.floor((partial/(substeps||1))*(midCharSeq.length)) )];
-        const mid = (left < slots && partial>0) ? midChar : "";
-        return `[${fillChar.repeat(left)}${mid}${emptyChar.repeat(right - (mid ? 1:0))}]`;
-      };
-      const compactTreat = (tLine||'').replace(/\s+/g,' ').trim();
-      const extras = extraLine ? `\n${extraLine}` : '';
-      const compose = (bar)=> `${headerText}\n${tirLine}${showBar?(' '+bar):''}${compactTreat?('\n'+compactTreat):''}${extras}`;
-
-      // Lead-in: show empty bar briefly to anchor the eye
-      if (!this.isCurrentToken(sessionId, token)) return;
-      const emptyBar = barFor(0,0);
-      await this.paintFrame(session, sessionId, token, compose(emptyBar));
-      await this.__sleep(leadInMs);
-
-      const finalFilled = Math.round(clamp01(Number(tirPct||0)/100) * slots);
-      if (!canAnim){
-        await this.paintFrame(session, sessionId, token, compose(barFor(finalFilled, 0)));
-        return;
-      }
-
-      const start = Date.now();
-      let lastKey = "";
-      // Ease-in cubic for smoother start
-      const ease = (t)=> t*t*t;
-      // Tick at ~60–80ms for smoother pacing
-      const tick = 70;
-
-      while(true){
-        if (!this.isCurrentToken(sessionId, token)) return;
-        const elapsed = Date.now() - start;
-        const t = clamp01(animMs>0 ? (elapsed/animMs) : 1);
-        const eased = ease(t);
-        const filledF = eased * finalFilled;
-        const filledInt = Math.floor(filledF);
-        const partial = Math.floor(((filledF - filledInt) * substeps));
-
-        const bar = barFor(filledInt, partial);
-        const key = `${filledInt}-${partial}`;
-        if (key !== lastKey){
-          await this.paintFrame(session, sessionId, token, compose(bar));
-          lastKey = key;
-        }
-        if (t >= 1) break;
-        this.__busyWait(tick);
-      }
-      // Final settle frame (full bar)
-      if (this.isCurrentToken(sessionId, token)){
-        await this.paintFrame(session, sessionId, token, compose(barFor(finalFilled, 0)));
-      }
-    }catch(_){}
-  }
-animateTIRText(session, sessionId, settings, headerText, tirLine, tirPct, tLine='', extraLine=''){
-try {
-      // ---- Config & defaults ----
-      const showBar = !!(settings && (settings.show_tir_bar ?? true));
-      const enableAnims = settings && settings.enable_animations !== false;
-      const speedMap = { slow: 1.35, normal: 1.0, fast: 0.75 };
-      const mult = speedMap[(settings.animation_speed||'normal')] ?? 1.0;
-
-      const leadInMs = Number(settings.tir_leadin_ms) || 220;
-      const totalMs  = Math.max(200, Math.min(2000, Math.round((Number(settings.tir_anim_ms)||500) * mult)));
-      const slots    = Math.max(8, Number(settings.tir_slots) || 16);
-      const substeps = Math.max(2, Math.min(6, Number(settings.tir_substeps) || 4)); // how many shades per slot
-      const palette  = ['·', ':', '!', '│']; // length 4 -> we will map substeps to these
-
-      // sanitize tirPct
-      const targetPct = Math.max(0, Math.min(100, Number(tirPct)||0));
-      const targetSlotsFloat = (targetPct/100) * slots;
-
-      // builders
-      const extras = extraLine ? `\n${extraLine}` : '';
-      const cleanTreat = (tLine||'').replace(/\s+/g,' ').trim();
-
-      function composeBar(progressFloat){
-        // progressFloat in slots (0..targetSlotsFloat). Allow partial fill on next slot with palette
-        const full = Math.floor(progressFloat);
-        const frac = progressFloat - full; // 0.. <1
-        let out = '[';
-        for (let i=0;i<slots;i++){
-          if (i < full) {
-            out += '│';
-          } else if (i === full && full < Math.ceil(targetSlotsFloat)) {
-            // partial slot
-            const idx = Math.max(1, Math.min(substeps-1, Math.round(frac * (substeps-1))));
-            // map idx to palette index
-            const palIndex = Math.min(palette.length-1, Math.round(idx * (palette.length-1)/(substeps-1)));
-            out += palette[palIndex];
-          } else {
-            out += '·';
-          }
-        }
-        out += ']';
-        return out;
-      }
-
-      function easeInCubic(t){ return t*t*t; } // 0..1 -> 0..1
-
-      function buildFrame(progressFloat){
-        const bar = showBar ? ` ${composeBar(progressFloat)}` : '';
-        const l2  = `${tirLine}${bar}`;
-        const tl  = cleanTreat ? `\n${cleanTreat}` : '';
-        return `${headerText}\n${l2}${tl}${extras}`;
-      }
-
-      const startTs = Date.now();
-      let lastFrame = '';
-      const minTick = 60;  // ms
-      const maxTick = 120; // ms
-
-      // Lead-in: show empty bar (or header only)
-      const leadFrame = buildFrame(0);
-      this.showClamped(session, sessionId, leadFrame);
-
-      if (!enableAnims || !showBar || targetSlotsFloat <= 0){
-        // No animation; show final static if needed
-        const finalFrame = buildFrame(targetSlotsFloat);
-        if (finalFrame !== leadFrame) this.showClamped(session, sessionId, finalFrame);
-        return finalFrame;
-      }
-
-      // Animate over time with ease-in; only redraw when visible change
-      let elapsed = 0;
-      while (elapsed < leadInMs) {
-        this.__busyWait(30);
-        elapsed = Date.now() - startTs;
-      }
-
-      const animStart = Date.now();
-      let sent = 0;
-      while (true){
-        const t = Date.now() - animStart;
-        const ratio = Math.max(0, Math.min(1, t / totalMs));
-        const eased = easeInCubic(ratio);
-        const prog  = targetSlotsFloat * eased; // in slots
-        const frame = buildFrame(prog);
-
-        if (frame !== lastFrame){
-          this.showClamped(session, sessionId, frame);
-          lastFrame = frame;
-          sent++;
-        }
-
-        if (ratio >= 1) break;
-
-        // adapt tick roughly to total frames (aim 10-20 frames)
-        const remaining = totalMs - t;
-        const tick = Math.max(minTick, Math.min(maxTick, Math.round(remaining / Math.max(1, (10 - Math.min(sent, 9))))));
-        this.__busyWait(tick);
-      }
-
-      // Final settle (clean partials by forcing full state)
-      const finalFrame = buildFrame(targetSlotsFloat);
-      if (finalFrame !== lastFrame) this.showClamped(session, sessionId, finalFrame);
-      return finalFrame;
-    } catch (e) {
-      try { this.showClamped(session, sessionId, `${headerText}\n${tirLine}`); } catch(_){}
-      return `${headerText}\n${tirLine}`;
-    }
-  }
-
-
-/** Extracts "123 mg/dL @30m" or "6.8 mmol/L @30m" from any block of text. */
-extractPredictionFromText(block){
-  const rx = /([0-9]+(?:[\.,][0-9]+)?)\s*(mg\/dL|mmol\/L)\s*@\s*(\d+)m\b/;
-  const m = String(block||'').match(rx);
-  if (!m) return null;
-  const v = parseFloat(String(m[1]).replace(',', '.'));
-  const unit = m[2].toLowerCase();
-  const minutes = parseInt(m[3], 10);
-  const mgdl = unit.includes('mmol') ? v*18 : v;
-  return { mgdl, minutes };
-}
-
-/** Blink a warning line if prediction is out-of-range (uses current alert limits). */
-async blinkPredictionIfOut(session, sessionId, settings, renderedText){
-    try {
-      if (!settings) return;
-      const style = settings.prediction_alert_style || 'pulse';
-      const allowAnim = settings.blink_on_prediction !== false && (settings.enable_animations !== false);
-      // 1) Extract or fallback to last prediction mg/dL
-      let pred = this.extractPredictionFromText(renderedText);
-      if (!pred && Number.isFinite(this._lastPredictionMgdl)) {
-        pred = { mgdl: this._lastPredictionMgdl, minutes: Number(settings.prediction_horizon_min||30) };
-      }
-      if (!pred) return;
-      // 2) Thresholds
-      const limits = this.getAlertLimits(settings);
-      const outLow  = pred.mgdl < limits.low;
-      const outHigh = pred.mgdl > limits.high;
-      const triggered = (outLow || outHigh);
-      try { session.logger?.info('PRED-BLINK', { mgdl: pred.mgdl, limits, triggered, style }); } catch(_){}
-      if (!triggered) return;
-
-      const unit = (settings.units === UNITS.MMOL || String(settings.units||'').toLowerCase().includes('mmol')) ? UNITS.MMOL : UNITS.MGDL;
-      const vDisp = this.convertToDisplay(pred.mgdl, unit);
-      const lang = settings.language || 'en';
-      const warn = lang === 'es'
-        ? (outLow ? `⚠️ Predicción BAJA: ${vDisp} ${unit}` : `⚠️ Predicción ALTA: ${vDisp} ${unit}`)
-        : (outLow ? `⚠️ LOW prediction: ${vDisp} ${unit}` : `⚠️ HIGH prediction: ${vDisp} ${unit}`);
-
-      // Fallback "solid" (si animaciones off o estilo = solid)
-      if (!allowAnim || style === 'solid') {
-        this.showClamped(session, sessionId, `${renderedText}\n${warn}`);
-        return;
-      }
-
-      // 'pulse' y 'blink' — intervalos más largos para evitar coalescing
-      const cycles = style === 'pulse' ? 3 : Math.max(1, Math.min(8, Number(settings.blink_cycles) || 4));
-      const interval = Math.max(200, Math.min(1000, Number(settings.blink_interval_ms) || (style === 'pulse' ? 260 : 220)));
-      const bust = ['\u2009', '\u200A', '']; // alterna invisibles para que el frame cambie
-
-      for (let i=0; i<cycles; i++){
-        this.showClamped(session, sessionId, `${renderedText}\n${warn}${bust[i % bust.length]}`);
-        await this.__sleep(interval);
-        this.showClamped(session, sessionId, `${renderedText}${bust[(i+1) % bust.length]}`);
-        await this.__sleep(interval);
-      }
-    } catch(_){}
-  }
-
-/** Light blink for alerts (LOW/HIGH) to increase salience. */
-async blinkAlertBlock(session, sessionId, text){
-  try{
-    for (let i=0;i<2;i++){
-      this.showClamped(session, sessionId, text);
-      await this.__sleep(200);
-      this.showClamped(session, sessionId, text + '\\n'); // minimal change for blink
-      await this.__sleep(200);
-    }
-  }catch(_){}
-}
-
   /* Compose second line: TIR label+bar and treatments.
      Siempre baja los tratamientos a siguiente línea (sin punto delante). */
   composeTirLines(settings, tirLine, bar, tLine) {
@@ -865,7 +521,7 @@ async blinkAlertBlock(session, sessionId, text){
     let settings = null;
     try {
       settings = await this.getUserSettings(session);
-      if (!settings.nightscoutUrl) {
+      if (!settings.nightscoutUrl || !settings.nightscoutToken) {
         const msg = { en: 'Please configure Nightscout\nURL and token in settings', es: 'Configura URL y token\nde Nightscout en ajustes' };
         this.showClamped(session, sessionId, msg[settings.language || 'en']);
         return;
@@ -910,17 +566,12 @@ async blinkAlertBlock(session, sessionId, text){
     } catch (e) {
       session.logger?.error(e, 'Error en sesión');
       console.error('Error en sesión:', e);
-      try { this.showClamped(session, sessionId, (settings && settings.language==='es' ? 'Error en sesión' : 'Session error')); } catch(_) {}
       const lang = (settings && settings.language) || 'en';
       this.showClamped(session, sessionId, lang === 'es' ? 'Error: revisa configuración' : 'Error: check settings');
     }
   }
 
   async showInitialAndHide(session, sessionId, settings) {
-    // Show quick loading placeholder
-    const __tokLoad = this.bumpRenderToken(sessionId);
-    this.delayedLoading(session, sessionId, __tokLoad, (settings.language==='es' ? 'Cargando…' : 'Loading…'));
-
     try {
       const data = await this.getGlucoseData(settings);
       this.lastGoodEntry.set(sessionId, data);
@@ -934,13 +585,10 @@ async blinkAlertBlock(session, sessionId, text){
         const bar = !this.toBool(settings.show_tir_bar) || tirPct === null ? '' : this.buildTirBar(tirPct);
         let tLine = '';
         try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {}
-        try { session.logger?.info('Startup -> animate TIR', { tirPct }); } catch(_) {}
-      const __token0 = this.bumpRenderToken(sessionId);
-      const __txt0 = await this.animateTIRTextV2(session, sessionId, __token0, settings, formattedData, tirLine, tirPct, tLine);
-      await this.blinkPredictionIfOut(session, sessionId, settings, __txt0);
+        this.showClamped(session, sessionId, `${formattedData}
+${this.composeTirLines(settings, tirLine, bar, tLine)}`);
       } else {
         this.showClamped(session, sessionId, formattedData);
-      await this.blinkPredictionIfOut(session, sessionId, settings, formattedData);
       }
       const t = setTimeout(() => this.hideDisplay(session, sessionId), settings.display_duration_ms || 5000);
       this.displayTimers.set(sessionId, t);
@@ -1018,13 +666,12 @@ if (settings.units === UNITS.MMOL) {
       session.events?.onSettingsChange?.(settingsHandler);
 
       session.events?.onHeadPosition?.(async (data) => {
-        try { session.logger?.info('HEAD_EVT', { pos: String((data&&data.position)||'') }); } catch(_) {}
-
         try {
-          if (!data || String(data.position||'').toLowerCase() !== 'up') return;
+          if (data?.position !== 'up') return;
           const sd = this.activeSessions.get(sessionId);
           const s = sd?.settings; if (!s) return; if (!s.enable_head_up_display) return;
-          const now = Date.now(); const last = this.headUpLastShown.get(sessionId) || 0; const cooldown = Number(s.headup_cooldown_ms ?? 4000); if (now - last < cooldown) return; this.headUpLastShown.set(sessionId, now);
+          const now = Date.now(); const last = this.headUpLastShown.get(sessionId) || 0;
+          if (now - last < 10000) return; this.headUpLastShown.set(sessionId, now);
           const reading = await this.getGlucoseData(s);
           const baseLine = await this.formatForG1WithPrediction(reading, s);
           if (!s.enable_advanced_mode) {
@@ -1053,13 +700,10 @@ if (settings.units === UNITS.MMOL) {
           let tLine = '';
           try { const sum = await this.getRecentTreatments(s, 'day'); tLine = this.formatTreatmentsLine(sum, s); } catch {}
           const line2 = this.composeTirLines(s, tirLine, bar, tLine);
-try { session.logger?.info('HeadUp -> animate TIR', { tirPct }); } catch(_) {}
-// Animate TIR on head-up HUD
-const __tokHUD = this.bumpRenderToken(sessionId);
-      const __txtHUD = await this.animateTIRTextV2(session, sessionId, __tokHUD, s, baseLine, tirLine, tirPct, tLine, minMaxLine, {force:true});
-await this.blinkPredictionIfOut(session, sessionId, s, __txtHUD);
-setTimeout(() => this.hideDisplay(session, sessionId), s.display_duration_ms || 4000);
-} catch (e) {
+          const out = minMaxLine ? `${baseLine}\n${line2}\n${minMaxLine}` : `${baseLine}\n${line2}`;
+          this.showClamped(session, sessionId, out);
+          setTimeout(() => this.hideDisplay(session, sessionId), s.display_duration_ms || 4000);
+        } catch (e) {
           this.showClamped(session, sessionId, 'Error');
           setTimeout(() => this.hideDisplay(session, sessionId), 2000);
         }
@@ -1094,14 +738,10 @@ setTimeout(() => this.hideDisplay(session, sessionId), s.display_duration_ms || 
         const bar = !this.toBool(settings.show_tir_bar) || tirPct === null ? '' : this.buildTirBar(tirPct);
         let tLine = '';
         try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {}
-        try { session.logger?.info('HUD gesture -> animate TIR', { tirPct }); } catch(_) {}
-        const __token1 = this.bumpRenderToken(sessionId);
-        const __txt1 = await this.animateTIRTextV2(session, sessionId, __token1, settings, header, tirLine, tirPct, tLine, {force:true});
-      await this.blinkPredictionIfOut(session, sessionId, settings, __txt1);
+        this.showClamped(session, sessionId, `${header}
+${this.composeTirLines(settings, tirLine, bar, tLine)}`);
       } else {
-        const __txt2 = await this.formatForG1WithPrediction(data, settings);
-      this.showClamped(session, sessionId, __txt2);
-      await this.blinkPredictionIfOut(session, sessionId, settings, __txt2);
+        this.showClamped(session, sessionId, await this.formatForG1WithPrediction(data, settings));
       }
       const timer = setTimeout(() => this.hideDisplay(session, sessionId), ms);
       this.displayTimers.set(sessionId, timer);
@@ -1124,9 +764,6 @@ setTimeout(() => this.hideDisplay(session, sessionId), s.display_duration_ms || 
   async startNormalOperation(session, sessionId, userId, initialSettings) {
     const ms = (initialSettings.updateInterval || 5) * 60 * 1000;
     const iv = setInterval(async () => {
-        const __tokHUDLoad = this.bumpRenderToken(sessionId);
-        this.delayedLoading(session, sessionId, __tokHUDLoad, (s.language==='es' ? 'Cargando…' : 'Loading…'));
-
       if (!this.activeSessions.has(sessionId)) return clearInterval(iv);
       try {
         const sd = this.activeSessions.get(sessionId);
@@ -1163,7 +800,6 @@ setTimeout(() => this.hideDisplay(session, sessionId), s.display_duration_ms || 
     else if (mgdl >= limits.high) { msg = msgs[lang]?.high || msgs.en.high; this.alertHistory.set(sessionId, Date.now()); }
     if (msg) {
       this.showClamped(session, sessionId, msg);
-      await this.blinkAlertBlock(session, sessionId, msg);
       const timer = setTimeout(() => this.hideDisplay(session, sessionId), settings.alert_duration_ms || 15000);
       this.displayTimers.set(sessionId, timer);
       session.logger?.warn('Alert sent', { type: mgdl <= limits.low ? 'low' : 'high', value: mgdl });
