@@ -10,6 +10,16 @@ require('dotenv').config();
 const { AppServer } = require('@mentra/sdk');
 const axios = require('axios');
 
+/* ---- process safety: do not crash on unhandled errors ---- */
+process.on('unhandledRejection', (err) => {
+  console.error('[unhandledRejection]', err && err.stack || err);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err && err.stack || err);
+  // do not process.exit(1); keep server alive where possible
+});
+
+
 /* ---------- SHIM: compatibilidad SDK ---------- */
 if (typeof Object.prototype.updateSettingsForTesting !== 'function') {
   Object.defineProperty(Object.prototype, 'updateSettingsForTesting', {
@@ -432,7 +442,7 @@ paintFrame(session, sessionId, token, text){
   }
 /* ---------- Animation & Prediction helpers ---------- */
 async __sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
-  __busyWait(ms){ const end = Date.now() + Math.max(0, Number(ms)||0); while (Date.now() < end) {} }
+  
 
 __SPEED_MAP = { slow: 1.35, normal: 1.0, fast: 0.75 };
 __resolveMs(settings, base){ const mult = (this.__SPEED_MAP[(settings.animation_speed||'normal')] ?? 1.0); return Math.round(Math.max(60, Math.min(2000, base*mult))); }
@@ -509,7 +519,7 @@ __barStep(r){ const slots=20; const n = Math.round(this.__clamp01(r)*slots); ret
           lastKey = key;
         }
         if (t >= 1) break;
-        this.__busyWait(tick);
+        await this.__sleep(tick);
       }
       // Final settle frame (full bar)
       if (this.isCurrentToken(sessionId, token)){
@@ -589,7 +599,7 @@ try {
       // Animate over time with ease-in; only redraw when visible change
       let elapsed = 0;
       while (elapsed < leadInMs) {
-        this.__busyWait(30);
+        await this.__sleep(30);
         elapsed = Date.now() - startTs;
       }
 
@@ -613,7 +623,7 @@ try {
         // adapt tick roughly to total frames (aim 10-20 frames)
         const remaining = totalMs - t;
         const tick = Math.max(minTick, Math.min(maxTick, Math.round(remaining / Math.max(1, (10 - Math.min(sent, 9))))));
-        this.__busyWait(tick);
+        await this.__sleep(tick);
       }
 
       // Final settle (clean partials by forcing full state)
@@ -1249,3 +1259,23 @@ server.app.get('/health', (_, res) => res.json({
   activeSessions: server.activeSessions.size
 }));
 setInterval(() => axios.get(`${KEEP_ALIVE_URL}/health`).catch(() => {}), 3 * 60 * 1000);
+
+// ---- Minimal health server for PaaS (Render/Railway) ----
+try {
+  const http = require('http');
+  const PORT = Number(process.env.PORT || 0);
+  if (PORT) {
+    const srv = http.createServer((req,res) => {
+      if (req.url === '/health') {
+        res.setHeader('content-type','application/json; charset=utf-8');
+        res.end(JSON.stringify({ status:'ok', ts: Date.now(), version:'2.10.0' }));
+      } else {
+        res.statusCode = 200;
+        res.end('OK');
+      }
+    });
+    srv.listen(PORT, () => console.log('[health] listening on', PORT));
+  } else {
+    console.log('[health] PORT not set; skipping health server');
+  }
+} catch(e){ console.error('[health] server error', e); }
