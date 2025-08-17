@@ -406,7 +406,7 @@ async animateTIRText(session, sessionId, settings, headerText, tirLine, tirPct, 
 
 /** Extracts "123 mg/dL @30m" or "6.8 mmol/L @30m" from any block of text. */
 extractPredictionFromText(block){
-  const rx = /([0-9]+(?:\.[0-9]+)?)\\s*(mg\\/dL|mmol\\/L)\\s*@\\s*(\\d+)m\\b/;
+  const rx = /([0-9]+(?:\.[0-9]+)?)\s*(mg\/dL|mmol\/L)\s*@\s*(\d+)m\b/;
   const m = String(block||'').match(rx);
   if (!m) return null;
   const v = parseFloat(m[1]);
@@ -420,7 +420,7 @@ extractPredictionFromText(block){
 async blinkPredictionIfOut(session, sessionId, settings, renderedText){
   try {
     if (!settings || settings.blink_on_prediction === false) return;
-    const pred = extractPredictionFromText(renderedText);
+    const pred = this.extractPredictionFromText(renderedText);
     if (!pred) return;
     const limits = this.getAlertLimits(settings); // existing helper
     const outLow  = pred.mgdl < limits.low;
