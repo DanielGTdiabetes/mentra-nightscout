@@ -10,7 +10,6 @@ require('dotenv').config();
 
 const { AppServer } = require('@mentra/sdk');
 const axios = require('axios');
-const crypto = require('crypto');
 
 /* ---------- SHIM: evita crash si el SDK invoca método inexistente ---------- */
 if (typeof Object.prototype.updateSettingsForTesting !== 'function') {
@@ -39,7 +38,6 @@ class NightscoutMentraApp extends AppServer {
     this.alertHistory = new Map();     // sessionId -> timestamp
     this.displayTimers = new Map();    // sessionId -> timeoutId
     this.headUpLastShown = new Map();  // sessionId -> timestamp
-    this.sessionsByUser = new Map();   // userId -> { session, sessionId } (for fast lookup)
 
     // TIR y cambio de día
     this.dailyTirState = new Map();    // sessionId -> { dayStr, total, inRange }
@@ -56,11 +54,7 @@ class NightscoutMentraApp extends AppServer {
     if (!Number.isFinite(v)) return fallback;
     return Math.max(min, Math.min(max, v));
   }
-  toBool(x) {
-    if (typeof x === 'boolean') return x;
-    if (x == null) return false;
-    return ['true','1','yes','on'].includes(String(x).toLowerCase());
-  }
+  toBool(x){ return (x===true || x==='true' || x===1 || x==='1'); }
   isDifferent(a, b, tol = 0.1) { return Math.abs(Number(a) - Number(b)) > tol; }
 
   // mmol/L en consola sin decimales (x10) → normaliza a 1 decimal real
@@ -69,71 +63,6 @@ class NightscoutMentraApp extends AppServer {
     if (v === null || !Number.isFinite(v)) return null;
     return (v > 30) ? (v/10) : v; // 39 => 3.9 ; si ya viniera 3.9 lo respeta
   }
-
-  /* ---------------- Utilidades de validación ---------------- */
-  isValidHttpUrl(u) {
-  try {
-    const raw = (u == null ? '' : String(u)).trim();
-    const probe = raw.startsWith('http') ? raw : 'https://' + raw;
-    const url = new URL(probe);
-    return (url.protocol === 'http:' || url.protocol === 'https:') && !!url.host;
-  } catch {
-    return false;
-  }
-}
-  sanitizeBaseUrl(u) {
-  const raw = (u == null ? '' : String(u)).trim();
-  const withProto = raw.startsWith('http') ? raw : 'https://' + raw;
-  return withProto.replace(/\/+$/, '');
-}`;
-    return withProto.replace(/\/$/, '');
-  }
-  buildAuth(token) {
-    const ua = { 'User-Agent': 'MentraOS-Nightscout/2.9.6' };
-    if (!token || String(token).trim().length === 0) {
-      return { params: {}, headers: ua };
-    }
-    const t = String(token).trim();
-    const out = { params: {}, headers: { ...ua } };
-    // Always pass as query param for broad NS compatibility
-    out.params.token = /^token=/.test(t) ? t.replace(/^token=/, '') : t;
-    // Also send api-secret as SHA1 (if token isn't a 40-hex, hash it)
-    const isHex40 = /^[a-f0-9]{40}$/i.test(t);
-    const hashed = isHex40 ? t.toLowerCase() : crypto.createHash('sha1').update(t).digest('hex');
-    out.headers['api-secret'] = hashed;
-    // Some NS setups also accept Bearer tokens; harmless to include
-    out.headers['Authorization'] = `Bearer ${t}`;
-    return out;
-  }
-      const url = new URL(probe);
-      return (url.protocol === 'http:' || url.protocol === 'https:') && !!url.host;
-    } catch {
-      return false;
-    }
-  } catch {
-      return false;
-    }
-  }
-  isNonEmptyToken(t) {
-    return typeof t === 'string' && t.trim().length > 0;
-  }
-  ensureValidTimezone(tz, fallback = 'Europe/Madrid') {
-    try {
-      if (!tz) return fallback;
-      new Intl.DateTimeFormat('en-US', { timeZone: tz });
-      return tz;
-    } catch {
-      return fallback;
-    }
-  }
-  getSessionForUser(userId, fallbackSession) {
-    if (fallbackSession?.userId && fallbackSession?.sessionId) {
-      this.sessionsByUser.set(fallbackSession.userId, { session: fallbackSession, sessionId: fallbackSession.sessionId });
-      return { session: fallbackSession, sessionId: fallbackSession.sessionId };
-    }
-    return this.sessionsByUser.get(userId) || null;
-  }
-
 
   /* ---------------- Umbrales de alertas (mg/dL) ---------------- */
   getAlertLimits(settings) {
@@ -153,9 +82,15 @@ class NightscoutMentraApp extends AppServer {
         lowMg, highMg, lowMmol, highMmol,
         alertsEnabled, language, timezone, units,
         enable_head_up_display,
+
+        // NUEVOS (UI humana)
         display_duration_s, alert_duration_s, alert_cooldown_min,
+
+        // ANTIGUOS (ms) fallback
         display_duration_ms, alert_duration_ms, alert_cooldown_ms,
+
         enable_advanced_mode, advanced_mode_enabled,
+        // TIR opcional (por si el usuario define otro rango distinto al de alertas)
         tir_low_mg, tir_high_mg, tir_low_mmol, tir_high_mmol,
         time_in_range_low_mg, time_in_range_high_mg, time_in_range_low_mmol, time_in_range_high_mmol,
       ] = await Promise.all([
@@ -171,12 +106,17 @@ class NightscoutMentraApp extends AppServer {
         session.settings.get('timezone'),
         session.settings.get('units'),
         session.settings.get('enable_head_up_display'),
+
+        // nuevos (s/min)
         session.settings.get('display_duration_s'),
         session.settings.get('alert_duration_s'),
         session.settings.get('alert_cooldown_min'),
+
+        // antiguos (ms)
         session.settings.get('display_duration_ms'),
         session.settings.get('alert_duration_ms'),
         session.settings.get('alert_cooldown_ms'),
+
         session.settings.get('enable_advanced_mode'),
         session.settings.get('advanced_mode_enabled'),
         session.settings.get('tir_low_mg'),
@@ -189,19 +129,23 @@ class NightscoutMentraApp extends AppServer {
         session.settings.get('time_in_range_high_mmol'),
       ]);
 
+      // "1"|"5"|"15" → minutos
       const uiMin = parseInt(updateInterval, 10);
       const ui = Number.isFinite(uiMin) ? uiMin : 5;
 
+      // Detecta presencia real de s/min (no usar validate* aquí, para no forzar defaults si no existen)
       const dispSRaw   = this.parseSlicerValue(display_duration_s, NaN);
       const alertSRaw  = this.parseSlicerValue(alert_duration_s, NaN);
       const coolMinRaw = this.parseSlicerValue(alert_cooldown_min, NaN);
-      
+
       const displayMs = Number.isFinite(dispSRaw)
         ? Math.min(15, Math.max(1, dispSRaw)) * 1000
         : this.validateSlicerValue(display_duration_ms, 1000, 15000, 5000);
+
       const alertMs = Number.isFinite(alertSRaw)
         ? Math.min(60, Math.max(2, alertSRaw)) * 1000
         : this.validateSlicerValue(alert_duration_ms, 2000, 60000, 15000);
+
       const coolMs = Number.isFinite(coolMinRaw)
         ? Math.min(60, Math.max(1, coolMinRaw)) * 60 * 1000
         : this.validateSlicerValue(alert_cooldown_ms, 60000, 3600000, 600000);
@@ -209,35 +153,44 @@ class NightscoutMentraApp extends AppServer {
       const result = {
         nightscoutUrl: String(url || '').trim() || '',
         nightscoutToken: String(token || '').trim() || '',
-        updateInterval: ui,
+        updateInterval: ui, // MINUTOS
+
         low_alert_mg: this.validateSlicerValue(lowMg, 40, 90, 70),
         high_alert_mg: this.validateSlicerValue(highMg, 180, 400, 250),
         low_alert_mmol: this.normalizeMmol(lowMmol) ?? 3.9,
         high_alert_mmol: this.normalizeMmol(highMmol) ?? 13.9,
+
         alertsEnabled: this.toBool(alertsEnabled),
         language: language || 'en',
         timezone: timezone || null,
         units: units || UNITS.MGDL,
         enable_head_up_display: this.toBool(enable_head_up_display),
+
+        // siempre en ms internamente
         display_duration_ms: displayMs,
         alert_duration_ms:   alertMs,
         alert_cooldown_ms:   coolMs,
+
         enable_advanced_mode: this.toBool(enable_advanced_mode) || this.toBool(advanced_mode_enabled),
+
+        // familias TIR aceptadas
         tir_low_mg: this.parseSlicerValue(tir_low_mg, null),
         tir_high_mg: this.parseSlicerValue(tir_high_mg, null),
         tir_low_mmol: this.normalizeMmol(tir_low_mmol),
         tir_high_mmol: this.normalizeMmol(tir_high_mmol),
+
         time_in_range_low_mg: this.parseSlicerValue(time_in_range_low_mg, null),
         time_in_range_high_mg: this.parseSlicerValue(time_in_range_high_mg, null),
         time_in_range_low_mmol: this.normalizeMmol(time_in_range_low_mmol),
         time_in_range_high_mmol: this.normalizeMmol(time_in_range_high_mmol),
       };
 
+      // Sincroniza mg/dL ↔ mmol/L para las alertas (igual que ya hacías)
       try {
         if (result.units === UNITS.MMOL) {
           const mgLow = Math.round(result.low_alert_mmol * 18);
           const mgHigh = Math.round(result.high_alert_mmol * 18);
-          if (this.isDifferent(result.low_alert_mg, mgLow) || this.isDifferent(result.high_alert_mg, mgHigh)) {
+          if (this.isDifferent(result.low_alert_mg, mgLow, 1) || this.isDifferent(result.high_alert_mg, mgHigh, 1)) {
             await Promise.all([
               session.settings.set('low_alert_mg', mgLow),
               session.settings.set('high_alert_mg', mgHigh),
@@ -283,19 +236,24 @@ class NightscoutMentraApp extends AppServer {
     const o = {};
     (arr || []).forEach(s => (o[s.key] = s.value));
     const units = o.units || UNITS.MGDL;
+
+    // update_interval llega como "1"|"5"|"15"
     const uiMin = parseInt(o.update_interval, 10);
     const ui = Number.isFinite(uiMin) ? uiMin : 5;
 
+    // Detectar presencia real de s/min
     const dispSRaw   = this.parseSlicerValue(o.display_duration_s, NaN);
     const alertSRaw  = this.parseSlicerValue(o.alert_duration_s, NaN);
     const coolMinRaw = this.parseSlicerValue(o.alert_cooldown_min, NaN);
-    
+
     const displayMs = Number.isFinite(dispSRaw)
       ? Math.min(15, Math.max(1, dispSRaw)) * 1000
       : this.validateSlicerValue(o.display_duration_ms, 1000, 15000, 5000);
+
     const alertMs = Number.isFinite(alertSRaw)
       ? Math.min(60, Math.max(2, alertSRaw)) * 1000
       : this.validateSlicerValue(o.alert_duration_ms, 2000, 60000, 15000);
+
     const coolMs = Number.isFinite(coolMinRaw)
       ? Math.min(60, Math.max(1, coolMinRaw)) * 60 * 1000
       : this.validateSlicerValue(o.alert_cooldown_ms, 60000, 3600000, 600000);
@@ -303,24 +261,35 @@ class NightscoutMentraApp extends AppServer {
     return {
       nightscoutUrl: String(o.nightscout_url || '').trim() || '',
       nightscoutToken: String(o.nightscout_token || '').trim() || '',
-      updateInterval: ui,
+      updateInterval: ui, // MINUTOS
+
       low_alert_mg: this.validateSlicerValue(o.low_alert_mg, 40, 90, 70),
       high_alert_mg: this.validateSlicerValue(o.high_alert_mg, 180, 400, 250),
+
+      // mmol normalizados (x10 si vienen como enteros)
       low_alert_mmol: this.normalizeMmol(o.low_alert_mmol) ?? 3.9,
       high_alert_mmol: this.normalizeMmol(o.high_alert_mmol) ?? 13.9,
+
       alertsEnabled: this.toBool(o.alerts_enabled),
       language: o.language || 'en',
       timezone: o.timezone || null,
       units,
       enable_head_up_display: this.toBool(o.enable_head_up_display),
+
+      // interno en ms
       display_duration_ms: displayMs,
       alert_duration_ms:   alertMs,
       alert_cooldown_ms:   coolMs,
+
+      // toggle avanzado
       enable_advanced_mode: this.toBool(o.enable_advanced_mode) || this.toBool(o.advanced_mode_enabled),
+
+      // familias TIR aceptadas
       tir_low_mg: this.parseSlicerValue(o.tir_low_mg, null),
       tir_high_mg: this.parseSlicerValue(o.tir_high_mg, null),
       tir_low_mmol: this.normalizeMmol(o.tir_low_mmol),
       tir_high_mmol: this.normalizeMmol(o.tir_high_mmol),
+
       time_in_range_low_mg: this.parseSlicerValue(o.time_in_range_low_mg, null),
       time_in_range_high_mg: this.parseSlicerValue(o.time_in_range_high_mg, null),
       time_in_range_low_mmol: this.normalizeMmol(o.time_in_range_low_mmol),
@@ -361,15 +330,18 @@ class NightscoutMentraApp extends AppServer {
   async formatForG1(data, settings) {
     const display = this.convertToDisplay(data.sgv, settings.units || UNITS.MGDL);
     const trend = this.getTrendArrow(data.direction);
+
     const langSettings = this.getLanguageSettings(settings);
     const timezone = settings.timezone ? this.validateTimezone(settings.timezone) : langSettings.timezone;
     const readingTime = new Date(data.date);
     const timeStr = readingTime.toLocaleTimeString(langSettings.locale, {
       timeZone: timezone, hour: '2-digit', minute: '2-digit'
     });
+
     const minutesAgo = Math.floor((Date.now() - data.date) / 60000);
     const lang = settings.language || 'en';
     const timeAgo = minutesAgo <= 1 ? (lang === 'es' ? 'ahora' : 'now') : (lang === 'es' ? `hace ${minutesAgo}m` : `${minutesAgo}m ago`);
+
     return `${display} ${settings.units || UNITS.MGDL} ${trend}\n${timeStr} (${timeAgo})`;
   }
 
@@ -382,41 +354,49 @@ class NightscoutMentraApp extends AppServer {
   buildTirBar(tirPct) {
     if (tirPct === null || !Number.isFinite(tirPct)) return '';
     const blocks = Math.max(0, Math.min(20, Math.round(tirPct / 5)));
+    // Usamos barra vertical U+2502 para evitar que el visor la trate como tabla
     const BAR = '│';
     return BAR.repeat(blocks);
   }
   updateDailyTirState(sessionId, readingMgdl, readingTs, settings) {
-    const range = this.getAlertLimits(settings);
+    const range = this.getAlertLimits(settings); // rango: low_alert_mg – high_alert_mg
     const dayStr = this.getLocalDayStr(readingTs, settings);
+
     let st = this.dailyTirState.get(sessionId);
     if (!st || st.dayStr !== dayStr) {
       st = { dayStr, total: 0, inRange: 0 };
     }
+
     if (Number.isFinite(readingMgdl)) {
       st.total += 1;
       if (readingMgdl >= range.low && readingMgdl <= range.high) st.inRange += 1;
     }
+
     this.dailyTirState.set(sessionId, st);
     const tirPct = st.total > 0 ? Math.round((st.inRange / st.total) * 100) : null;
     return { tirPct, total: st.total };
   }
 
+  // Tratamientos: 'hours' (número) o 'day' para todo el día local
   async getRecentTreatments(settings, hours = 4) {
     try {
       const base = (settings.nightscoutUrl || '').trim();
-    const u = this.sanitizeBaseUrl(base);
-    // validation relaxed: proceed after sanitizeBaseUrl
-const token = settings.nightscoutToken;
-    // validation relaxed: allow token fallback
-const endpoint = `${u}/api/v1/treatments.json?count=1000`;
-    const params = token ? { token: token } : {};
-    const headers = { 'User-Agent': 'MentraOS-Nightscout/2.9.6' };
-    const { data } = await axios.get(endpoint, { params, headers, timeout: 10000 });
+      if (!base) return null;
+      let u = base.startsWith('http') ? base : ('https://' + base);
+      u = u.replace(/\/$/, '');
+      const endpoint = `${u}/api/v1/treatments.json?count=1000`;
+      const params = settings.nightscoutToken ? { token: settings.nightscoutToken } : {};
+      const { data } = await axios.get(endpoint, {
+        params, timeout: 10000,
+        headers: { 'User-Agent': 'MentraOS-Nightscout/2.9.6' }
+      });
       const arr = Array.isArray(data) ? data : (data ? [data] : []);
+
       const langSettings = this.getLanguageSettings(settings);
-      const tz = this.ensureValidTimezone(settings.timezone, langSettings.timezone);
+      const tz = settings.timezone ? this.validateTimezone(settings.timezone) : langSettings.timezone;
       const locale = langSettings.locale;
       const todayStr = new Date().toLocaleDateString(locale, { timeZone: tz });
+
       const events = arr.map(t => {
         const dateStr = t.created_at || t.timestamp || t.dateString || t.date || null;
         let ts = null;
@@ -424,6 +404,7 @@ const endpoint = `${u}/api/v1/treatments.json?count=1000`;
         else if (typeof dateStr === 'string') ts = Date.parse(dateStr);
         return { ts, carbs: Number(t.carbs), insulin: Number(t.insulin) };
       }).filter(e => e.ts && (Number.isFinite(e.carbs) || Number.isFinite(e.insulin)));
+
       let windowed, label;
       if (hours === 'day') {
         windowed = events.filter(e =>
@@ -435,7 +416,9 @@ const endpoint = `${u}/api/v1/treatments.json?count=1000`;
         windowed = events.filter(e => e.ts >= since);
         label = `${hours}h`;
       }
+
       if (!windowed.length) return { label, totalCarbs: 0, totalInsulin: 0, last: null };
+
       let totalCarbs = 0, totalInsulin = 0; let last = null;
       for (const e of windowed) {
         if (Number.isFinite(e.carbs)) totalCarbs += e.carbs;
@@ -451,35 +434,42 @@ const endpoint = `${u}/api/v1/treatments.json?count=1000`;
     const lang = settings.language || 'en';
     const round1 = (x) => Number.isFinite(x) ? Math.round(x * 10) / 10 : 0;
     const c = round1(totalCarbs); const i = round1(totalInsulin);
+
     let lastStr = '';
     if (last && (Number.isFinite(last.carbs) || Number.isFinite(last.insulin))) {
       const langSettings = this.getLanguageSettings(settings);
-      const tz = this.ensureValidTimezone(settings.timezone, langSettings.timezone);
+      const tz = settings.timezone ? this.validateTimezone(settings.timezone) : langSettings.timezone;
       const t = new Date(last.ts).toLocaleTimeString(langSettings.locale, { timeZone: tz, hour: '2-digit', minute: '2-digit' });
       const parts = [];
       if (Number.isFinite(last.carbs)) parts.push(`${round1(last.carbs)}g`);
       if (Number.isFinite(last.insulin)) parts.push(`${round1(last.insulin)}U`);
       lastStr = parts.length ? (lang==='es' ? ` · Últ: ${parts.join(', ')} ${t}` : ` · Last: ${parts.join(', ')} ${t}`) : '';
     }
+
     if (lang==='es') return label === 'hoy' ? `CH/Ins hoy: ${c}g / ${i}U${lastStr}` : `CH/Ins ${label}: ${c}g / ${i}U${lastStr}`;
     return label === 'today' ? `Carbs/Ins today: ${c}g / ${i}U${lastStr}` : `Carbs/Ins ${label}: ${c}g / ${i}U${lastStr}`;
   }
 
   /* ---------------- Nightscout data ---------------- */
   async getTodayEntries(settings) {
-    const u = this.sanitizeBaseUrl(settings.nightscoutUrl);
-    const token = settings.nightscoutToken;
-    // validation relaxed: proceed after sanitizeBaseUrl
-// validation relaxed: allow token fallback
-const endpoint = `${u}/api/v1/entries/sgv.json?count=400`;
-    const params = token ? { token: token } : {};
-    const headers = { 'User-Agent': 'MentraOS-Nightscout/2.9.6' };
-    const { data } = await axios.get(endpoint, { params, headers, timeout: 10000 });
+    const u0 = settings.nightscoutUrl;
+    if (!u0) throw new Error('URL no configurada');
+    let u = u0.startsWith('http') ? u0 : ('https://' + u0);
+    u = u.replace(/\/$/, '');
+
+    const endpoint = `${u}/api/v1/entries/sgv.json?count=400`;
+    const params = settings.nightscoutToken ? { token: settings.nightscoutToken } : {};
+    const { data } = await axios.get(endpoint, {
+      params, timeout: 10000,
+      headers: { 'User-Agent': 'MentraOS-Nightscout/2.9.6' }
+    });
+
     const arr = Array.isArray(data) ? data : (data ? [data] : []);
     const langSettings = this.getLanguageSettings(settings);
-    const tz = this.ensureValidTimezone(settings.timezone, langSettings.timezone);
+    const tz = settings.timezone ? this.validateTimezone(settings.timezone) : langSettings.timezone;
     const locale = langSettings.locale;
     const todayStr = new Date().toLocaleDateString(locale, { timeZone: tz });
+
     const today = arr
       .map(r => ({
         mgdl: Number(r.sgv ?? r.glucose),
@@ -487,33 +477,41 @@ const endpoint = `${u}/api/v1/entries/sgv.json?count=400`;
       }))
       .filter(r => Number.isFinite(r.mgdl) && r.date)
       .filter(r => new Date(r.date).toLocaleDateString(locale, { timeZone: tz }) === todayStr);
+
     today.sort((a,b)=>a.date-b.date);
     return today;
   }
 
   async getGlucoseData(settings) {
-    const token = settings.nightscoutToken;
-    const u = this.sanitizeBaseUrl(settings.nightscoutUrl);
-    // validation relaxed: proceed after sanitizeBaseUrl
-// validation relaxed: allow token fallback
-const endpoints = [
-  u + '/api/v1/entries/sgv.json?count=1',
-  u + '/api/v1/entries.json?count=1',
-  u + '/api/v1/entries/current.json'
-];
+    let u = settings.nightscoutUrl;
+    if (!u) throw new Error('URL no configurada');
+    if (!u.startsWith('http')) u = 'https://' + u;
+    u = u.replace(/\/$/, '');
+
+    const endpoints = [
+      `${u}/api/v1/entries/sgv.json?count=1`,
+      `${u}/api/v1/entries.json?count=1`,
+      `${u}/api/v1/entries/current.json`
+    ];
+
     let lastError;
     for (const endpoint of endpoints) {
       try {
-        const params = token ? { token: token } : {};
-    const headers = { 'User-Agent': 'MentraOS-Nightscout/2.9.6' };
-    const { data } = await axios.get(endpoint, { params, headers, timeout: 10000 });
+        const params = settings.nightscoutToken ? { token: settings.nightscoutToken } : {};
+        const { data } = await axios.get(endpoint, {
+          params, timeout: 10000,
+          headers: { 'User-Agent': 'MentraOS-Nightscout/2.9.6' }
+        });
         const reading = Array.isArray(data) ? data[0] : data;
         if (!reading) throw new Error('Empty response');
+
         const glucoseRaw = (reading.sgv ?? reading.glucose);
         const glucose = Number(glucoseRaw);
         if (!Number.isFinite(glucose)) throw new Error('No glucose data found');
+
         const dateValue = reading.date || reading.dateString || reading.sysTime;
         if (!dateValue) throw new Error('No date found');
+
         return {
           sgv: glucose,
           date: typeof dateValue === 'string' ? new Date(dateValue).getTime() : dateValue,
@@ -540,28 +538,26 @@ const endpoints = [
   /* ---------------- Ciclo de vida de sesión ---------------- */
   async onSession(session, sessionId, userId) {
     console.log(`🚀 Nueva sesión: ${sessionId} para ${userId}`);
+
     if (typeof session.updateSettingsForTesting !== 'function') {
-      Object.defineProperty(session, 'updateSettingsForTesting', {
-        value: async () => { session.logger?.debug?.('Compat shim: updateSettingsForTesting noop'); },
-        writable: true, configurable: true, enumerable: false
-      });
+      session.updateSettingsForTesting = async () => { session.logger?.debug?.('Compat shim: updateSettingsForTesting noop'); };
     }
+
     session.logger?.info('Session started', { userId, sessionId });
+
     try {
-      this.sessionsByUser.set(userId, { session, sessionId });
       const settings = await this.getUserSettings(session);
-      if (!this.isValidHttpUrl(settings.nightscoutUrl)) {
-        const msg = { en: 'Please configure Nightscout\nURL in settings', es: 'Configura la URL de Nightscout\nen los ajustes' };
+
+      if (!settings.nightscoutUrl || !settings.nightscoutToken) {
+        const msg = { en: 'Please configure Nightscout\nURL and token in settings', es: 'Configura URL y token\nde Nightscout en ajustes' };
         this.showClamped(session, sessionId, msg[settings.language] || msg.en);
         return;
       }
-      if (settings.nightscoutToken && !this.isNonEmptyToken(settings.nightscoutToken)) {
-        const msg = { en: 'Please configure Nightscout\ntoken in settings', es: 'Configura el token de Nightscout\nen los ajustes' };
-        this.showClamped(session, sessionId, msg[settings.language] || msg.en);
-        return;
-      }
+
       this.activeSessions.set(sessionId, { session, userId, settings, updateInterval: null });
       this.setupEventHandlers(session, sessionId, userId);
+
+      // Semilla inicial con lecturas de hoy → TIR coherente desde el arranque
       try {
         const entries = await this.getTodayEntries(settings);
         const dayStr = this.getLocalDayStr(Date.now(), settings);
@@ -577,6 +573,8 @@ const endpoints = [
       } catch (e) {
         session.logger?.debug?.('Seed TIR failed', { err: e?.message });
       }
+
+      // Reloj de cambio de día (reset a 00:00 local)
       const dayWatch = setInterval(() => {
         const sd = this.activeSessions.get(sessionId);
         if (!sd) return;
@@ -588,8 +586,10 @@ const endpoints = [
         }
       }, 60 * 1000);
       this.dayWatchTimers.set(sessionId, dayWatch);
+
       await this.showInitialAndHide(session, sessionId, settings);
       await this.startNormalOperation(session, sessionId, userId, settings);
+
     } catch (e) {
       session.logger?.error(e, 'Error en sesión');
       console.error('Error en sesión:', e);
@@ -600,7 +600,9 @@ const endpoints = [
   async showInitialAndHide(session, sessionId, settings) {
     try {
       const data = await this.getGlucoseData(settings);
+      // contabiliza lectura para TIR (UNA sola vez)
       const tirRes = this.updateDailyTirState(sessionId, data.sgv, data.date, settings);
+
       const formattedData = await this.formatForG1(data, settings);
       if (settings.enable_advanced_mode) {
         const tirPct = tirRes.tirPct;
@@ -608,21 +610,26 @@ const endpoints = [
           ? (settings.language==='es' ? 'TIR hoy: n/d' : 'Today TIR: n/a')
           : (settings.language==='es' ? `TIR hoy: ${tirPct}%` : `Today TIR: ${tirPct}%`);
         const bar = (tirPct === null) ? '' : this.buildTirBar(tirPct);
+
+        // Tratamientos del día completo (solo en avanzado)
         let tLine = '';
         try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {}
+
+        // Compacto: 2 líneas (glucosa) + (TIR% + barra + CH/Ins)
         this.showClamped(session, sessionId,
           `${formattedData}
 ${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '')}` : ''}`
         );
       } else {
+        // Modo simple: solo glucosa
         this.showClamped(session, sessionId, `${formattedData}`);
       }
       const t = setTimeout(() => this.hideDisplay(session, sessionId), settings.display_duration_ms || 5000);
       this.displayTimers.set(sessionId, t);
     } catch (error) {
       const errorMsg =
-        error.message?.includes('Invalid Nightscout') ? { en: 'Nightscout URL or token invalid\nCheck settings', es: 'URL o token de Nightscout no válido\nRevisa ajustes' } :
-        (error.message?.includes('No data') || error.message?.includes('timeout')) ? { en: 'Cannot connect to Nightscout\nCheck URL and token', es: 'No se puede conectar\nRevisa URL y token' } :
+        error.message?.includes('URL no configurada') ? { en: 'Nightscout URL not set\nCheck settings', es: 'URL de Nightscout no configurada\nRevisa ajustes' } :
+        (error.message?.includes('Sin datos') || error.message?.includes('timeout')) ? { en: 'Cannot connect to Nightscout\nCheck URL and token', es: 'No se puede conectar\nRevisa URL y token' } :
         { en: 'Error loading glucose data\nCheck your settings', es: 'Error cargando datos\nRevisa tu configuración' };
       const msg = errorMsg[settings.language] || errorMsg.en;
       this.showClamped(session, sessionId, msg);
@@ -634,27 +641,39 @@ ${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /
   /* ---------------- Handlers de eventos ---------------- */
   setupEventHandlers(session, sessionId, userId) {
     try {
+      // Botón físico (tap)
       session.events?.onButtonPress?.(async () => {
         const sd = this.activeSessions.get(sessionId);
         const s = sd?.settings || await this.getUserSettings(session);
         await this.showGlucoseTemporarily(session, sessionId, s.display_duration_ms || 4000, s);
       });
+
+      // Cambios de ajustes
       const settingsHandler = async (settingsData) => {
         session.logger?.info('Settings update received', { settingsCount: settingsData?.length });
         try {
           const parsed = this.parseSettingsFromArray(settingsData || []);
           const sd = this.activeSessions.get(sessionId);
           if (!sd) return;
+
           const old = sd.settings || {};
+
+          // restart ciclo si cambia intervalo
           if (old.updateInterval !== parsed.updateInterval) {
             if (sd.updateInterval) { clearInterval(sd.updateInterval); sd.updateInterval = null; }
             await this.startNormalOperation(session, sessionId, userId, parsed);
           }
+
+          // limpiar historial de alertas si cambian límites
           if (this.alertLimitsChanged(old, parsed)) {
             this.alertHistory.delete(sessionId);
           }
+
+          // cache settings
           sd.settings = parsed;
           this.activeSessions.set(sessionId, sd);
+
+          // sincronización de alertas mg<->mmol (como en arranque)
           try {
             if (parsed.units === UNITS.MMOL) {
               const mgLow = Math.round(parsed.low_alert_mmol * 18);
@@ -682,6 +701,8 @@ ${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /
           } catch (e) {
             session.logger?.debug('Sync (onChange) skipped/failed', { err: e?.message });
           }
+
+          // ECO: mostrar estado mínimo
           try {
             const lines = ['Ajustes guardados'];
             if (parsed.units === UNITS.MMOL) {
@@ -701,29 +722,43 @@ ${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /
           session.logger?.error(error, 'Failed to process settings update');
         }
       };
+
       session.events?.onAppSettingsUpdate?.(settingsHandler);
       session.events?.onSettingsUpdate?.(settingsHandler);
+      session.events?.onSettingsChange?.(settingsHandler);
+
+      // HUD por gesto: levantar la cabeza (usamos display_duration_ms)
       session.events?.onHeadPosition?.(async (data) => {
         try {
           if (data?.position !== 'up') return;
+
           const sd = this.activeSessions.get(sessionId);
           const s = sd?.settings;
           if (!s) return;
           if (!s.enable_head_up_display) return;
+
+          // Cooldown 10s para HUD
           const now = Date.now();
           const last = this.headUpLastShown.get(sessionId) || 0;
           if (now - last < 10_000) return;
           this.headUpLastShown.set(sessionId, now);
+
           const reading = await this.getGlucoseData(s);
           const baseLine = await this.formatForG1(reading, s);
+
+          // MODO SIMPLE: solo glucosa
           if (!s.enable_advanced_mode) {
             this.showClamped(session, sessionId, baseLine);
             setTimeout(() => this.hideDisplay(session, sessionId), s.display_duration_ms || 4000);
             return;
           }
+
+          // MODO AVANZADO
           const { tirPct } = this.updateDailyTirState(sessionId, reading.sgv, reading.date, s);
           const tirLine = (tirPct === null) ? (s.language==='es' ? 'TIR hoy: n/d' : 'Today TIR: n/a') : (s.language==='es' ? `TIR hoy: ${tirPct}%` : `Today TIR: ${tirPct}%`);
           const bar = (tirPct === null) ? '' : this.buildTirBar(tirPct);
+
+          // Min/Max del día (SOLO en gesto y SOLO en avanzado)
           let minMaxLine = '';
           try {
             const entries = await this.getTodayEntries(s);
@@ -737,9 +772,14 @@ ${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /
                 : `Min/Max today: ${minDisp} / ${maxDisp} ${s.units}`;
             }
           } catch {}
+
+          // CH/Ins del día (SOLO en avanzado)
           let tLine = '';
           try { const sum = await this.getRecentTreatments(s, 'day'); tLine = this.formatTreatmentsLine(sum, s); } catch {}
+
+          // Línea 1 = glucosa; Línea 2 = TIR + barra + CH/Ins; Línea 3 = Min/Max (si hay)
           const line2 = `${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '')}` : ''}`;
+
           const out = minMaxLine ? `${baseLine}\n${line2}\n${minMaxLine}` : `${baseLine}\n${line2}`;
           this.showClamped(session, sessionId, out);
           setTimeout(() => this.hideDisplay(session, sessionId), s.display_duration_ms || 4000);
@@ -748,22 +788,29 @@ ${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /
           setTimeout(() => this.hideDisplay(session, sessionId), 2000);
         }
       });
+
+      // Limpieza
       session.events?.onDisconnected?.(() => {
         const t = this.displayTimers.get(sessionId);
         if (t) clearTimeout(t);
         this.displayTimers.delete(sessionId);
+
         const sd = this.activeSessions.get(sessionId);
         if (sd?.updateInterval) clearInterval(sd.updateInterval);
+
+        // limpiar reloj de cambio de día
         const dw = this.dayWatchTimers.get(sessionId);
         if (dw) clearInterval(dw);
         this.dayWatchTimers.delete(sessionId);
+
         this.activeSessions.delete(sessionId);
         this.alertHistory.delete(sessionId);
         this.headUpLastShown.delete(sessionId);
         this.dailyTirState.delete(sessionId);
-        this.sessionsByUser.delete(userId);
+
         session.logger?.info('Session disconnected');
       });
+
     } catch (error) {
       console.error('❌ Error setting up event handlers:', error);
       session.logger?.error(error, 'Failed to setup event handlers');
@@ -777,15 +824,21 @@ ${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /
       if (!sd) return;
       const settings = providedSettings || sd.settings || await this.getUserSettings(sd.session);
       const data = await this.getGlucoseData(settings);
+
+      // contabiliza lectura para TIR
       const { tirPct } = this.updateDailyTirState(sessionId, data.sgv, data.date, settings);
+
       if (settings.enable_advanced_mode) {
         const header = `${await this.formatForG1(data, settings)}`;
         const tirLine = (tirPct === null)
           ? (settings.language==='es' ? 'TIR hoy: n/d' : 'Today TIR: n/a')
           : (settings.language==='es' ? `TIR hoy: ${tirPct}%` : `Today TIR: ${tirPct}%`);
         const bar = (tirPct === null) ? '' : this.buildTirBar(tirPct);
+
+        // Resumen CH/Ins (del día)
         let tLine = '';
         try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {}
+
         this.showClamped(session, sessionId,
           `${header}
 ${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '')}` : ''}`
@@ -793,6 +846,7 @@ ${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /
       } else {
         this.showClamped(session, sessionId, `${await this.formatForG1(data, settings)}`);
       }
+
       const timer = setTimeout(() => this.hideDisplay(session, sessionId), ms);
       this.displayTimers.set(sessionId, timer);
     } catch (error) {
@@ -802,19 +856,23 @@ ${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /
 
   /* ---------------- Bucle normal: fetch + alertas (no pinta HUD) ---------------- */
   async startNormalOperation(session, sessionId, userId, initialSettings) {
-    const ms = (initialSettings.updateInterval || 5) * 60 * 1000;
+    const ms = (initialSettings.updateInterval || 5) * 60 * 1000; // minutos → ms
     const iv = setInterval(async () => {
       if (!this.activeSessions.has(sessionId)) return clearInterval(iv);
       try {
         const sd = this.activeSessions.get(sessionId);
         const s = (sd && sd.settings) ? sd.settings : await this.getUserSettings(session);
         const d = await this.getGlucoseData(s);
+
+        // contabiliza lectura para TIR
         this.updateDailyTirState(sessionId, d.sgv, d.date, s);
+
         if (s.alertsEnabled) await this.checkAlerts(session, sessionId, d, s);
       } catch (error) {
         session.logger?.debug('Normal operation cycle failed', { error: error.message });
       }
     }, ms);
+
     const sd = this.activeSessions.get(sessionId);
     if (sd) {
       if (sd.updateInterval) clearInterval(sd.updateInterval);
@@ -828,17 +886,21 @@ ${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /
     const limits = this.getAlertLimits(settings);
     const mgdl = data.sgv;
     const display = this.convertToDisplay(mgdl, settings.units || UNITS.MGDL);
+
     const last = this.alertHistory.get(sessionId);
     const cooldown = settings.alert_cooldown_ms || 600000;
     if (last && Date.now() - last < cooldown) return;
+
     const msgs = {
       en: { low: `🚨 LOW GLUCOSE!\n${display} ${settings.units || UNITS.MGDL}`, high: `🚨 HIGH GLUCOSE!\n${display} ${settings.units || UNITS.MGDL}` },
       es: { low: `🚨 ¡GLUCOSA BAJA!\n${display} ${settings.units || UNITS.MGDL}`, high: `🚨 ¡GLUCOSA ALTA!\n${display} ${settings.units || UNITS.MGDL}` }
     };
     const lang = settings.language || 'en';
     let msg = null;
+
     if (mgdl <= limits.low) { msg = msgs[lang]?.low || msgs.en.low; this.alertHistory.set(sessionId, Date.now()); }
     else if (mgdl >= limits.high) { msg = msgs[lang]?.high || msgs.en.high; this.alertHistory.set(sessionId, Date.now()); }
+
     if (msg) {
       this.showClamped(session, sessionId, msg);
       const timer = setTimeout(() => this.hideDisplay(session, sessionId), settings.alert_duration_ms || 15000);
@@ -862,30 +924,42 @@ ${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /
   async onToolCall(data) {
     const toolId = data.toolId || data.toolName;
     const userId = data.userId;
-    const found = this.getSessionForUser(userId, data.activeSession);
+    const activeSession = data.activeSession;
     const isSpanish = ['obtener_glucosa', 'revisar_glucosa', 'nivel_glucosa', 'mi_glucosa'].includes(toolId);
     const lang = isSpanish ? 'es' : 'en';
 
-    if (!found) return { success: false, error: lang === 'es' ? 'Sin sesión activa' : 'No active session' };
-    const { session: activeSession, sessionId } = found;
-
     try {
-      const settings = await this.getUserSettings(activeSession);
-      if (!this.isValidHttpUrl(settings?.nightscoutUrl) || (settings.nightscoutToken && !this.isNonEmptyToken(settings.nightscoutToken))) {
+      let settings = null;
+      if (activeSession?.settings?.settings) {
+        settings = this.parseSettingsFromArray(activeSession.settings.settings);
+      } else {
+        for (const [, sData] of this.activeSessions) {
+          if (sData.userId === userId) { settings = sData.settings || await this.getUserSettings(sData.session); break; }
+        }
+      }
+
+      if (!settings?.nightscoutUrl || !settings?.nightscoutToken) {
         throw new Error(lang === 'es' ? 'Nightscout no configurado' : 'Nightscout not configured');
       }
+
       const reading = await this.getGlucoseData(settings);
       const display = this.convertToDisplay(reading.sgv, settings.units || UNITS.MGDL);
       const trend = this.getTrendArrow(reading.direction);
       const status = this.getGlucoseStatusText(reading.sgv, settings, lang);
-      const { tirPct } = this.updateDailyTirState(sessionId, reading.sgv, reading.date, settings);
+
+      // Actualiza TIR
+      const { tirPct } = this.updateDailyTirState(activeSession?.sessionId || 'tool', reading.sgv, reading.date, settings);
+
+      // Si modo avanzado ON, añadimos TIR en el mensaje de MIRA
       let extra = '';
       if (settings.enable_advanced_mode && Number.isFinite(tirPct)) {
         extra = (lang==='es') ? ` TIR hoy: ${tirPct}%` : ` Today TIR: ${tirPct}%`;
       }
+
       const msg = lang === 'es'
         ? `Tu glucosa está en ${display} ${settings.units || UNITS.MGDL} ${trend}. Estado: ${status}.${extra}`
         : `Your glucose is ${display} ${settings.units || UNITS.MGDL} ${trend}. Status: ${status}.${extra}`;
+
       return { success: true, data: { glucose: display, unit: settings.units || UNITS.MGDL, trend, status, tirPct: Number.isFinite(tirPct) ? tirPct : null }, message: msg };
     } catch (e) {
       return { success: false, error: lang === 'es' ? `Error: ${e.message}` : `Error: ${e.message}` };
@@ -894,21 +968,11 @@ ${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /
 
   getGlucoseStatusText(value, settings, lang) {
     const limits = this.getAlertLimits(settings);
-    // CRITERIO ACTUAL (Límites fijos)
     if (value < 70) return lang === 'es' ? 'Crítico Bajo' : 'Critical Low';
     if (value <= limits.low) return lang === 'es' ? 'Bajo' : 'Low';
     if (value > 250) return lang === 'es' ? 'Crítico Alto' : 'Critical High';
     if (value >= limits.high) return lang === 'es' ? 'Alto' : 'High';
     return lang === 'es' ? 'Normal' : 'Normal';
-
-    // ALTERNATIVA (basado en límites configurables)
-    // const lowCritical = limits.low - 10;
-    // const highCritical = limits.high + 70;
-    // if (value < lowCritical) return lang === 'es' ? 'Crítico Bajo' : 'Critical Low';
-    // if (value <= limits.low) return lang === 'es' ? 'Bajo' : 'Low';
-    // if (value > highCritical) return lang === 'es' ? 'Crítico Alto' : 'Critical High';
-    // if (value >= limits.high) return lang === 'es' ? 'Alto' : 'High';
-    // return lang === 'es' ? 'Normal' : 'Normal';
   }
 }
 
@@ -926,9 +990,12 @@ server.start().catch(err => {
 
 console.log('🚀 Nightscout MentraOS v2.9.6 — HUD texto + TIR │ inline + CH/Ins día + Min/Max gesto + reset diario');
 
-const KEEP_ALIVE_URL = process.env.RENDER_URL || '';
-const ENABLE_KEEP_ALIVE = process.env.ENABLE_KEEP_ALIVE === '1';
+const KEEP_ALIVE_URL = process.env.RENDER_URL || 'https://mentra-nightscout.onrender.com';
+server.app.get('/health', (_, res) => res.json({
+  status: 'alive',
+  timestamp: new Date().toISOString(),
+  version: '2.9.6',
+  activeSessions: server.activeSessions.size
+}));
 
-if (ENABLE_KEEP_ALIVE && KEEP_ALIVE_URL) {
-  setInterval(() => axios.get(`${KEEP_ALIVE_URL.replace(/\/$/, '')}/health`).catch(() => {}), 3 * 60 * 1000);
-}
+setInterval(() => axios.get(`${KEEP_ALIVE_URL}/health`).catch(() => {}), 3 * 60 * 1000);
