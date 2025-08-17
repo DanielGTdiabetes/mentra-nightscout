@@ -658,7 +658,6 @@ extractPredictionFromText(block){
   async blinkPredictionIfOut(session, sessionId, settings, renderedText){
     try {
       if (!settings) return;
-      // extract or fallback to last prediction
       let pred = this.extractPredictionFromText(renderedText);
       if (!pred && Number.isFinite(this._lastPredictionMgdl)) {
         pred = { mgdl: this._lastPredictionMgdl, minutes: Number(settings.prediction_horizon_min||30) };
@@ -668,118 +667,17 @@ extractPredictionFromText(block){
       const outLow  = pred.mgdl < limits.low;
       const outHigh = pred.mgdl > limits.high;
       if (!outLow && !outHigh) return;
-      // Solid, non-animated highlight
       const unit = settings.units || UNITS.MGDL;
       const vDisp = this.convertToDisplay(pred.mgdl, unit);
       const lang = settings.language || 'en';
       const warn = lang === 'es'
         ? (outLow ? `⚠️ Predicción BAJA: ${vDisp} ${unit}` : `⚠️ Predicción ALTA: ${vDisp} ${unit}`)
         : (outLow ? `⚠️ LOW prediction: ${vDisp} ${unit}` : `⚠️ HIGH prediction: ${vDisp} ${unit}`);
-      this.showClamped(session, sessionId, `${renderedText}\n${warn}`);
-    } catch(_){}
-  }
-      if (!pred || !Number.isFinite(pred.mgdl)) return;
-
-      // 2) Thresholds (mg/dL)
-      const limits = this.getAlertLimits(settings);
-      const outLow  = pred.mgdl < limits.low;
-      const outHigh = pred.mgdl > limits.high;
-      const triggered = (outLow || outHigh);
-      try { session.logger?.info('PRED-ALERT', { mgdl: pred.mgdl, limits, triggered, style }); } catch(_){}
-      if (!triggered) return;
-
-      // 3) Compose message (localized, with units)
-      const unit = settings.units || UNITS.MGDL;
-      const vDisp = this.convertToDisplay(pred.mgdl, unit);
-      const lang = settings.language || 'en';
-      const warn = lang === 'es'
-        ? (outLow ? `⚠️ Predicción BAJA: ${vDisp} ${unit}` : `⚠️ Predicción ALTA: ${vDisp} ${unit}`)
-        : (outLow ? `⚠️ LOW prediction: ${vDisp} ${unit}` : `⚠️ HIGH prediction: ${vDisp} ${unit}`);
-
-      // 4) Solid fallback or animations disabled
-      if (!allowAnim || style === 'solid') {
-        this.showClamped(session, sessionId, `${renderedText}
+      this.showClamped(session, sessionId, `${renderedText}
 ${warn}`);
-        return;
-      }
-
-      // 5) Animated styles with watchdog + token check
-      const cycles = style === 'pulse' ? 3 : Math.max(1, Math.min(6, Number(settings.blink_cycles) || 4));
-      const interval = Math.max(180, Math.min(900, Number(settings.blink_interval_ms) || (style === 'pulse' ? 260 : 220)));
-      const bust = ['\u2009', '\u200A', '']; // alternate invisible chars
-      let failures = 0;
-      this._predBlinkBusy.add(sessionId);
-      const currentToken = this._renderToken?.get?.(sessionId);
-
-      for (let i=0; i<cycles; i++) {
-        if (this._renderToken && currentToken && this._renderToken.get(sessionId) !== currentToken) break;
-        try {
-          this.showClamped(session, sessionId, `${renderedText}
-${warn}${bust[i % bust.length]}`);
-        } catch (e) { failures++; }
-        await this.__sleep(interval);
-        if (this._renderToken && currentToken && this._renderToken.get(sessionId) !== currentToken) break;
-        try {
-          this.showClamped(session, sessionId, `${renderedText}${bust[(i+1) % bust.length]}`);
-        } catch (e) { failures++; }
-        await this.__sleep(interval);
-        if (failures >= 2) break;
-      }
-      this._predBlinkBusy.delete(sessionId);
-
-      if (failures >= 2) {
-        try { this.showClamped(session, sessionId, `${renderedText}
-${warn}`); } catch(_){}
-      }
-    } catch(_){
-      try { this.showClamped(session, sessionId, renderedText); } catch(_){}
+    } catch(e) {
+      try { session.logger?.error('PRED_NOTICE_ERR', e); } catch(_){}
     }
-  }
-
-
-/** Light blink for alerts (LOW/HIGH) to increase salience. */
-async blinkAlertBlock(session, sessionId, text){
-  try{
-    for (let i=0;i<2;i++){
-      this.showClamped(session, sessionId, text);
-      await this.__sleep(200);
-      this.showClamped(session, sessionId, text + '\\n'); // minimal change for blink
-      await this.__sleep(200);
-    }
-  }catch(_){}
-}
-
-  /* Compose second line: TIR label+bar and treatments.
-     Siempre baja los tratamientos a siguiente línea (sin punto delante). */
-  composeTirLines(settings, tirLine, bar, tLine) {
-    const labelBar = `${tirLine}${bar ? ' ' + bar : ''}`;
-    try {
-      // ALWAYS move treatments to the next line (both languages / any unit)
-      let clean = (tLine || '')
-        .replace(/^CH\/Ins hoy: /, '')
-        .replace(/^Carbs\/Ins today: /, '')
-        // drop any " · Last: ..." or " · Últ: ..." and all after
-        .replace(/\s*[·•]\s*(Last|Últ):[\s\S]*$/i, '')
-        .replace(/\s*Last:[\s\S]*$/i, '')
-        .replace(/\s*Últ:[\s\S]*$/i, '')
-        .replace(/\s*\/\s*/g, '/')
-        .replace(/\s+/g, ' ')
-        .trim();
-      return clean ? `${labelBar}\n${clean}` : labelBar;
-    } catch { return labelBar; }
-  }
-
-  updateDailyTirState(sessionId, readingMgdl, readingTs, settings) {
-    const range = this.getAlertLimits(settings);
-    const dayStr = this.getLocalDayStr(readingTs, settings);
-    let st = this.dailyTirState.get(sessionId);
-    if (!st || st.dayStr !== dayStr) st = { dayStr, total: 0, inRange: 0 };
-    if (Number.isFinite(readingMgdl)) {
-      st.total += 1;
-      if (readingMgdl >= range.low && readingMgdl <= range.high) st.inRange += 1;
-    }
-    this.dailyTirState.set(sessionId, st);
-    return { tirPct: st.total > 0 ? Math.round((st.inRange / st.total) * 100) : null, total: st.total };
   }
 
   async getRecentTreatments(settings, hours = 4) {
