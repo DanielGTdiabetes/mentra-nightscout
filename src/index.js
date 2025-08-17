@@ -414,165 +414,84 @@ __clamp01(x){ return Math.max(0, Math.min(1, x)); }
 __barStep(r){ const slots=20; const n = Math.round(this.__clamp01(r)*slots); return '│'.repeat(n) + '·'.repeat(slots-n); }
 
 /** Compose and animate TIR block as text (when advanced+show_tir_bar). */
-async animateTIRText(session, sessionId, settings, headerText, tirLine, tirPct, tLine='', extraLine=''){
+  async animateTIRText(session, sessionId, settings, headerText, tirLine, tirPct, tLine='', extraLine=''){
     try {
-      const showBar = !!(settings && (settings.show_tir_bar || settings.show_tir_bar === undefined));
-      const enableAnims = settings && settings.enable_animations !== false;
-      const ratioTarget = Number.isFinite(tirPct) ? Math.max(0, Math.min(100, Number(tirPct))) / 100 : 0;
-      const style = String(settings.tir_anim_style || 'sweep'); // 'fill' | 'sweep' | 'spinner' | 'flip'
+      // ---- Config & defaults ----
+      const showBar = !!(settings && (settings.show_tir_bar !== false));
+      const enableAnims = !settings || settings.enable_animations !== false;
+      const slots = Math.max(8, Number(settings?.tir_slots) || 16);          // visible steps
+      const leadInMs = Math.max(0, Number(settings?.tir_leadin_ms) || 220);  // pause before fill
+      const animMs = this.__resolveMs(settings || {}, Number((settings&&settings.tir_anim_ms) || 500));
+      const totalTarget = Math.max(0, Math.min(slots, Math.round(((Number(tirPct)||0)/100) * slots)));
+      const hasTarget = Number.isFinite(totalTarget) && totalTarget > 0;
 
-      // slots & timings
-      const slots    = Math.max(8, Number(settings.tir_slots) || 16);
-      const leadInMs = Number(settings.tir_leadin_ms) || 220;
-      const baseDur  = Math.max(300, Math.min(3000, Number(settings.tir_anim_ms) || 500));
-      const speedMult = (this.__SPEED_MAP[(settings.animation_speed || 'normal')] ?? 1.0);
-      const animMs  = Math.round(baseDur * speedMult);
+      // Compose single frame helper
+      const compose = (filled, bust='') => {
+        const ratio = slots > 0 ? Math.max(0, Math.min(1, filled/slots)) : 0;
+        const bar = ` [${this.__barStep(ratio)}]`;
+        const l2 = `${tirLine}${showBar ? bar : ''}`;
+        const tl = tLine ? `\n${tLine}` : '';
+        const ex = extraLine ? `\n${extraLine}` : '';
+        return `${headerText}\n${l2}${tl}${ex}${bust}`;
+      };
 
-      // Compose helper: builds the bar with "filled" count (for fill/flip)
-      function composeFilled(filled, bustChar=''){
-        const f = Math.max(0, Math.min(slots, filled|0));
-        const fillChar = (style === 'flip') ? '█' : '│';
-        const on  = fillChar.repeat(f);
-        const off = '·'.repeat(slots - f);
-        const bar = showBar ? ` [${on}${off}]` : '';
-        const l2  = `${tirLine}${bar}`;
-        const tl  = (tLine || '').replace(/\s+/g, ' ').trim();
-        const extra = extraLine ? `\n${extraLine}` : '';
-        return `${headerText}\n${l2}${tl ? `\n${tl}` : ''}${extra}${bustChar}`;
+      // If no animating conditions, draw static
+      if (!showBar || !enableAnims || !hasTarget){
+        this.showClamped(session, sessionId, compose(totalTarget));
+        return;
       }
 
-      // Compose helper for "sweep" (moving bright window)
-      function composeSweep(pos, win=3, bustChar=''){
-        const window = Math.max(1, Math.min(5, win));
-        const idx = Math.max(0, Math.min(slots-1, pos|0));
-        let arr = new Array(slots).fill('·');
-        for (let i=0;i<window;i++){
-          const j = idx + i;
-          if (j < slots) arr[j] = '█';
+      // ---- Time-based animator (smooth, monotonic) ----
+      const start = Date.now();
+      const bust = ['\u2009', '\u200A', '\u200B', '']; // force unique frames (avoid coalescing)
+      let bustIdx = 0;
+      let lastFilled = -1;
+
+      // initial frame (empty bar)
+      this.showClamped(session, sessionId, compose(0, bust[bustIdx++ % bust.length]));
+
+      // wait lead-in (if any), but don't block too long
+      let now = Date.now();
+      while ((now = Date.now()) - start < leadInMs){
+        await this.__sleep(60);
+      }
+      const fillStart = Date.now();
+      const dur = Math.max(200, animMs);
+
+      // Easing: ease-in cubic, slower at the beginning
+      const easeIn = (t) => (t<=0?0:(t>=1?1:(t*t*t)));
+
+      while (true){
+        const t = Math.min(1, (Date.now() - fillStart) / dur);
+        const eased = easeIn(t);
+        // Target slots (0..totalTarget), monotonic
+        let filled = Math.floor(eased * totalTarget);
+        if (filled > totalTarget) filled = totalTarget;
+        if (filled !== lastFilled){
+          this.showClamped(session, sessionId, compose(filled, (t < 1 ? bust[bustIdx++ % bust.length] : '')));
+          lastFilled = filled;
         }
-        const bar = showBar ? ` [${arr.join('')}]` : '';
-        const l2  = `${tirLine}${bar}`;
-        const tl  = (tLine || '').replace(/\s+/g, ' ').trim();
-        const extra = extraLine ? `\n${extraLine}` : '';
-        return `${headerText}\n${l2}${tl ? `\n${tl}` : ''}${extra}${bustChar}`;
+        if (t >= 1) break;
+        await this.__sleep(70); // tick ~70ms -> ~14fps, stable
       }
 
-      // Compose helper for "spinner"
-      const SPINS = ['|','/','-','\\'];
-      function composeSpinner(step, filledCount){
-        const f = Math.max(0, Math.min(slots, filledCount|0));
-        const on  = '█'.repeat(f);
-        const off = '·'.repeat(slots - f);
-        const spin = SPINS[step % SPINS.length];
-        const bar = showBar ? ` [${on}${off}] ${spin}` : '';
-        const l2  = `${tirLine}${bar}`;
-        const tl  = (tLine || '').replace(/\s+/g, ' ').trim();
-        const extra = extraLine ? `\n${extraLine}` : '';
-        return `${headerText}\n${l2}${tl ? `\n${tl}` : ''}${extra}`;
-      }
-
-      // Lead-in: display empty state briefly
-      this.showClamped(session, sessionId, composeFilled(0));
-      await this.__sleep(leadInMs);
-
-      // If animations off or bar hidden, show static
-      if (!enableAnims || !showBar){
-        const filled = Math.round(ratioTarget * slots);
-        const textFinal = composeFilled(filled);
-        this.showClamped(session, sessionId, textFinal);
-        return textFinal;
-      }
-
-      // Allocate durations with ease-in (more time at start)
-      const bust = ['\u2009', '\u200A', ''];
-      const minPer = 90, maxPer = 260;
-
-      if (style === 'sweep'){
-        const totalSteps = Math.max(4, slots + 2); // move window across whole bar
-        const per = Math.max(minPer, Math.min(maxPer, Math.round(animMs / totalSteps)));
-        let last = '';
-        for (let step = 0; step < totalSteps; step++){
-          const text = composeSweep(step, 3, bust[step % bust.length]);
-          if (text !== last) this.showClamped(session, sessionId, text);
-          last = text;
-          await this.__sleep(per);
-        }
-        // settle to final filled bar according to ratioTarget
-        const textFinal = composeFilled(Math.round(ratioTarget * slots));
-        this.showClamped(session, sessionId, textFinal);
-        return textFinal;
-      }
-
-      if (style === 'spinner'){
-        // Keep bar showing the final ratio while spinning a few cycles
-        const filled = Math.round(ratioTarget * slots);
-        const steps = Math.max(6, Math.min(24, Math.round(animMs / 120)));
-        for (let s=0; s<steps; s++){
-          this.showClamped(session, sessionId, composeSpinner(s, filled));
-          await this.__sleep(Math.max(minPer, Math.min(maxPer, Math.round(animMs / steps))));
-        }
-        const textFinal = composeSpinner(0, filled).replace(/[|\/\-\\]$/, ''); // remove spinner char
-        this.showClamped(session, sessionId, composeFilled(filled));
-        return composeFilled(filled);
-      }
-
-      if (style === 'flip'){
-        // Each slot flips through ░▒▓█ then locks
-        const targetFilled = Math.max(0, Math.min(slots, Math.round(ratioTarget * slots)));
-        if (targetFilled <= 0){
-          const textFinal = composeFilled(0);
-          this.showClamped(session, sessionId, textFinal);
-          return textFinal;
-        }
-        const phases = ['░','▒','▓','█'];
-        const per = Math.max(minPer, Math.min(maxPer, Math.round(animMs / (targetFilled * phases.length))));
-        let arr = new Array(slots).fill('·');
-        for (let i=0;i<targetFilled;i++){
-          for (let ph=0; ph<phases.length; ph++){
-            arr[i] = phases[ph];
-            const bar = showBar ? ` [${arr.join('')}]` : '';
-            const l2  = `${tirLine}${bar}`;
-            const tl  = (tLine || '').replace(/\s+/g, ' ').trim();
-            const extra = extraLine ? `\n${extraLine}` : '';
-            this.showClamped(session, sessionId, `${headerText}\n${l2}${tl ? `\n${tl}` : ''}${extra}${bust[(i+ph)%bust.length]}`);
-            await this.__sleep(per);
-          }
-        }
-        const textFinal = composeFilled(targetFilled);
-        this.showClamped(session, sessionId, textFinal);
-        return textFinal;
-      }
-
-      // Default: classic fill with ease-in
-      const targetFilled = Math.max(0, Math.min(slots, Math.round(ratioTarget * slots)));
-      if (targetFilled <= 0){
-        const textFinal = composeFilled(0);
-        this.showClamped(session, sessionId, textFinal);
-        return textFinal;
-      }
-      const weights = Array.from({length: targetFilled}, (_,i)=> (targetFilled - i)); // ease-in
-      const sum = weights.reduce((a,b)=>a+b,0);
-      const alloc = weights.map(w => {
-        const t = Math.round(animMs * (w/sum));
-        return Math.max(minPer, Math.min(maxPer, t));
-      });
-
-      let last = '';
-      for (let filled=1; filled<=targetFilled; filled++){
-        const text = composeFilled(filled, bust[filled % bust.length]);
-        if (text !== last) this.showClamped(session, sessionId, text);
-        last = text;
-        await this.__sleep(alloc[filled-1] || 120);
-      }
-      const textFinal = composeFilled(targetFilled, '');
-      this.showClamped(session, sessionId, textFinal);
-      return textFinal;
-
-    } catch (e) {
-      try { this.showClamped(session, sessionId, `${headerText}\n${tirLine}`); } catch(_){}
-      return `${headerText}\n${tirLine}`;
+      // Final clean frame (no bust char, exact target)
+      this.showClamped(session, sessionId, compose(totalTarget, ''));
+    } catch (_) {
+      try {
+        // graceful fallback (static)
+        const slots = Math.max(8, Number(settings?.tir_slots) || 16);
+        const totalTarget = Math.max(0, Math.min(slots, Math.round(((Number(tirPct)||0)/100) * slots)));
+        const ratio = slots>0 ? totalTarget/slots : 0;
+        const bar = ` [${this.__barStep(ratio)}]`;
+        const l2 = `${tirLine}${(settings && settings.show_tir_bar===false)?'':bar}`;
+        const tl = tLine ? `\n${tLine}` : '';
+        const ex = extraLine ? `\n${extraLine}` : '';
+        this.showClamped(session, sessionId, `${headerText}\n${l2}${tl}${ex}`);
+      } catch(__) {}
     }
   }
+
 
 /** Extracts "123 mg/dL @30m" or "6.8 mmol/L @30m" from any block of text. */
 extractPredictionFromText(block){
