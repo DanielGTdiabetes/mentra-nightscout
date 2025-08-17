@@ -66,7 +66,7 @@ class NightscoutMentraApp extends AppServer {
 
   /* ---------------- Umbrales de alertas (mg/dL) ---------------- */
   getAlertLimits(settings) {
-    if (settings.units === UNITS.MMOL) {
+    if (setting((settings && settings.units) ? settings.units : UNITS.MGDL) === UNITS.MMOL) {
       const lowM = this.normalizeMmol(settings.low_alert_mmol);
       const highM = this.normalizeMmol(settings.high_alert_mmol);
       return { low: Math.round(lowM * 18), high: Math.round(highM * 18) };
@@ -326,7 +326,7 @@ const o = {};
       es: { locale: 'es-ES', timezone: 'Europe/Madrid' },
       en: { locale: 'en-US', timezone: 'America/New_York' },
     };
-    return langMap[settings.language] || langMap['en'];
+    return langMap[setting((settings && settings.language) ? settings.language : 'en')] || langMap['en'];
   }
   validateTimezone(tz) {
     const valid = [
@@ -339,7 +339,7 @@ const o = {};
   }
 
   async formatForG1(data, settings) {
-    const display = this.convertToDisplay(data.sgv, settings.units || UNITS.MGDL);
+    const display = this.convertToDisplay(data.sgv, setting((settings && settings.units) ? settings.units : UNITS.MGDL) || UNITS.MGDL);
     const trend = this.getTrendArrow(data.direction);
 
     const langSettings = this.getLanguageSettings(settings);
@@ -350,10 +350,10 @@ const o = {};
     });
 
     const minutesAgo = Math.floor((Date.now() - data.date) / 60000);
-    const lang = settings.language || 'en';
+    const lang = setting((settings && settings.language) ? settings.language : 'en') || 'en';
     const timeAgo = minutesAgo <= 1 ? (lang === 'es' ? 'ahora' : 'now') : (lang === 'es' ? `hace ${minutesAgo}m` : `${minutesAgo}m ago`);
 
-    return `${display} ${settings.units || UNITS.MGDL} ${trend}\n${timeStr} (${timeAgo})`;
+    return `${display} ${setting((settings && settings.units) ? settings.units : UNITS.MGDL) || UNITS.MGDL} ${trend}\n${timeStr} (${timeAgo})`;
   }
 
   /* ---------------- Día local + TIR + tratamientos ---------------- */
@@ -421,7 +421,7 @@ const o = {};
         windowed = events.filter(e =>
           new Date(e.ts).toLocaleDateString(locale, { timeZone: tz }) === todayStr
         );
-        label = settings.language === 'es' ? 'hoy' : 'today';
+        label = setting((settings && settings.language) ? settings.language : 'en') === 'es' ? 'hoy' : 'today';
       } else {
         const since = Date.now() - Math.max(1, hours) * 60 * 60 * 1000;
         windowed = events.filter(e => e.ts >= since);
@@ -442,7 +442,7 @@ const o = {};
   formatTreatmentsLine(summary, settings) {
     if (!summary) return '';
     const { label, totalCarbs, totalInsulin, last } = summary;
-    const lang = settings.language || 'en';
+    const lang = setting((settings && settings.language) ? settings.language : 'en') || 'en';
     const round1 = (x) => Number.isFinite(x) ? Math.round(x * 10) / 10 : 0;
     const c = round1(totalCarbs); const i = round1(totalInsulin);
 
@@ -557,11 +557,11 @@ const o = {};
     session.logger?.info('Session started', { userId, sessionId });
 
     try {
-      const settings = await this.getUserSettings(session);
+      settings = await this.getUserSettings(session);
 
       if (!settings.nightscoutUrl || !settings.nightscoutToken) {
         const msg = { en: 'Please configure Nightscout\nURL and token in settings', es: 'Configura URL y token\nde Nightscout en ajustes' };
-        this.showClamped(session, sessionId, msg[settings.language] || msg.en);
+        this.showClamped(session, sessionId, msg[setting((settings && settings.language) ? settings.language : 'en')] || msg.en);
         return;
       }
 
@@ -619,8 +619,8 @@ const o = {};
       if (settings.enable_advanced_mode) {
         const tirPct = tirRes.tirPct;
         const tirLine = (tirPct === null)
-          ? (settings.language==='es' ? 'TIR hoy: n/d' : 'Today TIR: n/a')
-          : (settings.language==='es' ? `TIR hoy: ${tirPct}%` : `Today TIR: ${tirPct}%`);
+          ? (setting((settings && settings.language) ? settings.language : 'en')==='es' ? 'TIR hoy: n/d' : 'Today TIR: n/a')
+          : (setting((settings && settings.language) ? settings.language : 'en')==='es' ? `TIR hoy: ${tirPct}%` : `Today TIR: ${tirPct}%`);
         const bar = (!this.toBool(settings.show_tir_bar) || tirPct === null) ? '' : this.buildTirBar(tirPct);
 
         // Tratamientos del día completo (solo en avanzado)
@@ -655,7 +655,7 @@ ${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /
         error.message?.includes('URL no configurada') ? { en: 'Nightscout URL not set\nCheck settings', es: 'URL de Nightscout no configurada\nRevisa ajustes' } :
         (error.message?.includes('Sin datos') || error.message?.includes('timeout')) ? { en: 'Cannot connect to Nightscout\nCheck URL and token', es: 'No se puede conectar\nRevisa URL y token' } :
         { en: 'Error loading glucose data\nCheck your settings', es: 'Error cargando datos\nRevisa tu configuración' };
-      const msg = errorMsg[settings.language] || errorMsg.en;
+      const msg = errorMsg[setting((settings && settings.language) ? settings.language : 'en')] || errorMsg.en;
       this.showClamped(session, sessionId, msg);
       const t = setTimeout(() => this.hideDisplay(session, sessionId), 5000);
       this.displayTimers.set(sessionId, t);
@@ -781,7 +781,7 @@ ${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /
 
           // MODO AVANZADO
           const { tirPct } = this.updateDailyTirState(sessionId, reading.sgv, reading.date, s);
-          const tirLine = (tirPct === null) ? (s.language==='es' ? 'TIR hoy: n/d' : 'Today TIR: n/a') : (s.language==='es' ? `TIR hoy: ${tirPct}%` : `Today TIR: ${tirPct}%`);
+          const tirLine = (tirPct === null) ? (((settings && settings.language) ? settings.language : 'en')==='es' ? 'TIR hoy: n/d' : 'Today TIR: n/a') : (((settings && settings.language) ? settings.language : 'en')==='es' ? `TIR hoy: ${tirPct}%` : `Today TIR: ${tirPct}%`);
           const bar = (!this.toBool(settings.show_tir_bar) || tirPct === null) ? '' : this.buildTirBar(tirPct);
 
           // Min/Max del día (SOLO en gesto y SOLO en avanzado)
@@ -791,11 +791,11 @@ ${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /
             const vals = entries.map(e => e.mgdl).filter(Number.isFinite);
             if (vals.length) {
               const min = Math.min(...vals), max = Math.max(...vals);
-              const minDisp = this.convertToDisplay(min, s.units);
-              const maxDisp = this.convertToDisplay(max, s.units);
-              minMaxLine = s.language==='es'
-                ? `Min/Max hoy: ${minDisp} / ${maxDisp} ${s.units}`
-                : `Min/Max today: ${minDisp} / ${maxDisp} ${s.units}`;
+              const minDisp = this.convertToDisplay(min, ((settings && settings.units) ? settings.units : UNITS.MGDL));
+              const maxDisp = this.convertToDisplay(max, ((settings && settings.units) ? settings.units : UNITS.MGDL));
+              minMaxLine = ((settings && settings.language) ? settings.language : 'en')==='es'
+                ? `Min/Max hoy: ${minDisp} / ${maxDisp} ${((settings && settings.units) ? settings.units : UNITS.MGDL)}`
+                : `Min/Max today: ${minDisp} / ${maxDisp} ${((settings && settings.units) ? settings.units : UNITS.MGDL)}`;
             }
           } catch {}
 
@@ -820,11 +820,11 @@ ${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /
               const ms = (s.display_duration_ms || 4000);
               setTimeout(() => this.hideDisplay(session, sessionId), ms);
             } else {
-              this.showClamped(session, sessionId, s.language==='es' ? 'Sin datos' : 'No data');
+              this.showClamped(session, sessionId, ((settings && settings.language) ? settings.language : 'en')==='es' ? 'Sin datos' : 'No data');
               setTimeout(() => this.hideDisplay(session, sessionId), 2000);
             }
           } catch (_) {
-            this.showClamped(session, sessionId, s.language==='es' ? 'Sin datos' : 'No data');
+            this.showClamped(session, sessionId, ((settings && settings.language) ? settings.language : 'en')==='es' ? 'Sin datos' : 'No data');
             setTimeout(() => this.hideDisplay(session, sessionId), 2000);
           }
         }
@@ -872,8 +872,8 @@ ${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /
       if (settings.enable_advanced_mode) {
         const header = `${await this.formatForG1(data, settings)}`;
         const tirLine = (tirPct === null)
-          ? (settings.language==='es' ? 'TIR hoy: n/d' : 'Today TIR: n/a')
-          : (settings.language==='es' ? `TIR hoy: ${tirPct}%` : `Today TIR: ${tirPct}%`);
+          ? (setting((settings && settings.language) ? settings.language : 'en')==='es' ? 'TIR hoy: n/d' : 'Today TIR: n/a')
+          : (setting((settings && settings.language) ? settings.language : 'en')==='es' ? `TIR hoy: ${tirPct}%` : `Today TIR: ${tirPct}%`);
         const bar = (!this.toBool(settings.show_tir_bar) || tirPct === null) ? '' : this.buildTirBar(tirPct);
 
         // Resumen CH/Ins (del día)
@@ -941,17 +941,17 @@ ${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /
   async checkAlerts(session, sessionId, data, settings) {
     const limits = this.getAlertLimits(settings);
     const mgdl = data.sgv;
-    const display = this.convertToDisplay(mgdl, settings.units || UNITS.MGDL);
+    const display = this.convertToDisplay(mgdl, setting((settings && settings.units) ? settings.units : UNITS.MGDL) || UNITS.MGDL);
 
     const last = this.alertHistory.get(sessionId);
     const cooldown = settings.alert_cooldown_ms || 600000;
     if (last && Date.now() - last < cooldown) return;
 
     const msgs = {
-      en: { low: `🚨 LOW GLUCOSE!\n${display} ${settings.units || UNITS.MGDL}`, high: `🚨 HIGH GLUCOSE!\n${display} ${settings.units || UNITS.MGDL}` },
-      es: { low: `🚨 ¡GLUCOSA BAJA!\n${display} ${settings.units || UNITS.MGDL}`, high: `🚨 ¡GLUCOSA ALTA!\n${display} ${settings.units || UNITS.MGDL}` }
+      en: { low: `🚨 LOW GLUCOSE!\n${display} ${setting((settings && settings.units) ? settings.units : UNITS.MGDL) || UNITS.MGDL}`, high: `🚨 HIGH GLUCOSE!\n${display} ${setting((settings && settings.units) ? settings.units : UNITS.MGDL) || UNITS.MGDL}` },
+      es: { low: `🚨 ¡GLUCOSA BAJA!\n${display} ${setting((settings && settings.units) ? settings.units : UNITS.MGDL) || UNITS.MGDL}`, high: `🚨 ¡GLUCOSA ALTA!\n${display} ${setting((settings && settings.units) ? settings.units : UNITS.MGDL) || UNITS.MGDL}` }
     };
-    const lang = settings.language || 'en';
+    const lang = setting((settings && settings.language) ? settings.language : 'en') || 'en';
     let msg = null;
 
     if (mgdl <= limits.low) { msg = msgs[lang]?.low || msgs.en.low; this.alertHistory.set(sessionId, Date.now()); }
@@ -972,7 +972,7 @@ ${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /
       oldSettings.high_alert_mg !== newSettings.high_alert_mg ||
       oldSettings.low_alert_mmol !== newSettings.low_alert_mmol ||
       oldSettings.high_alert_mmol !== newSettings.high_alert_mmol ||
-      oldSettings.units !== newSettings.units
+      oldSetting((settings && settings.units) ? settings.units : UNITS.MGDL) !== newSetting((settings && settings.units) ? settings.units : UNITS.MGDL)
     );
   }
 
@@ -999,7 +999,7 @@ ${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /
       }
 
       const reading = await this.getGlucoseData(settings);
-      const display = this.convertToDisplay(reading.sgv, settings.units || UNITS.MGDL);
+      const display = this.convertToDisplay(reading.sgv, setting((settings && settings.units) ? settings.units : UNITS.MGDL) || UNITS.MGDL);
       const trend = this.getTrendArrow(reading.direction);
       const status = this.getGlucoseStatusText(reading.sgv, settings, lang);
 
@@ -1013,10 +1013,10 @@ ${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /
       }
 
       const msg = lang === 'es'
-        ? `Tu glucosa está en ${display} ${settings.units || UNITS.MGDL} ${trend}. Estado: ${status}.${extra}`
-        : `Your glucose is ${display} ${settings.units || UNITS.MGDL} ${trend}. Status: ${status}.${extra}`;
+        ? `Tu glucosa está en ${display} ${setting((settings && settings.units) ? settings.units : UNITS.MGDL) || UNITS.MGDL} ${trend}. Estado: ${status}.${extra}`
+        : `Your glucose is ${display} ${setting((settings && settings.units) ? settings.units : UNITS.MGDL) || UNITS.MGDL} ${trend}. Status: ${status}.${extra}`;
 
-      return { success: true, data: { glucose: display, unit: settings.units || UNITS.MGDL, trend, status, tirPct: Number.isFinite(tirPct) ? tirPct : null }, message: msg };
+      return { success: true, data: { glucose: display, unit: setting((settings && settings.units) ? settings.units : UNITS.MGDL) || UNITS.MGDL, trend, status, tirPct: Number.isFinite(tirPct) ? tirPct : null }, message: msg };
     } catch (e) {
       return { success: false, error: lang === 'es' ? `Error: ${e.message}` : `Error: ${e.message}` };
     }
