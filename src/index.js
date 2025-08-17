@@ -868,24 +868,42 @@ class NightscoutMentraApp extends AppServer {
     return null;
   }
 
-  computeLinearPrediction(entries, horizonMin = 30) {
+  
+computeLinearPrediction(entries, horizonMin = 30) {
     try {
       if (!Array.isArray(entries) || entries.length < 2) return null;
-      const last = entries.slice(-6);
-      const pts = last.map(e => ({
-        t: Number(e.date || e.dateString || 0),
-        v: Number((e.sgv != null ? e.sgv : (e.mgdl != null ? e.mgdl : (e.glucose != null ? e.glucose : e.value))))
-      })).filter(e => Number.isFinite(e.t) && Number.isFinite(e.v)).sort((a,b) => a.t - b.t);
+
+      // usa las lecturas más recientes (hasta ~8)
+      const pts = entries
+        .slice(0, 8)
+        .map(e => {
+          const t = Number.isFinite(e.date)
+            ? e.date
+            : +new Date(e.dateString || e.date || 0); // soporta dateString ISO
+          const v = Number(
+            (e.sgv != null ? e.sgv :
+             (e.mgdl != null ? e.mgdl :
+              (e.glucose != null ? e.glucose : e.value)))
+          );
+          return { t, v };
+        })
+        .filter(p => Number.isFinite(p.t) && Number.isFinite(p.v))
+        .sort((a, b) => a.t - b.t);
+
       if (pts.length < 2) return null;
-      const dt = (pts[pts.length-1].t - pts[0].t);
+
+      const dt = pts[pts.length - 1].t - pts[0].t;
       if (dt <= 0) return null;
-      const dv = (pts[pts.length-1].v - pts[0].v);
-      const slope = dv / dt;
-      const pred = pts[pts.length-1].v + slope * (horizonMin * 60 * 1000);
+
+      const dv = pts[pts.length - 1].v - pts[0].v;
+      const slope = dv / dt; // mg/dL por ms
+      const pred = pts[pts.length - 1].v + slope * (horizonMin * 60 * 1000);
       return Math.round(pred);
     } catch {
       return null;
     }
+  }
+
   }
 
   async buildPredictionShort(settings, horizonMin = 30) {
@@ -899,6 +917,7 @@ class NightscoutMentraApp extends AppServer {
           pred = this.computeLinearPrediction(todays, horizonMin);
         } catch (_) {}
       }
+      console.debug && console.debug('Prediction unavailable (no devicestatus/fallback).');
       if (!Number.isFinite(pred)) return '';
 
       if (settings.units === UNITS.MMOL) {
