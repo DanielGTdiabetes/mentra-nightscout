@@ -355,27 +355,28 @@ class NightscoutMentraApp extends AppServer {
     return '│'.repeat(blocks);
   }
 /* ---------- Animation & Prediction helpers ---------- */
-async function __sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
-const __SPEED_MAP = { slow: 1.35, normal: 1.0, fast: 0.75 };
-function __resolveMs(settings, base){ const mult = __SPEED_MAP[(settings.animation_speed||'normal')] ?? 1.0; return Math.round(Math.max(60, Math.min(2000, base*mult))); }
-function __clamp01(x){ return Math.max(0, Math.min(1, x)); }
-function __barStep(r){ const slots=20; const n = Math.round(__clamp01(r)*slots); return '│'.repeat(n) + '·'.repeat(slots-n); }
+async __sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
+__SPEED_MAP = { slow: 1.35, normal: 1.0, fast: 0.75 };
+__resolveMs(settings, base){ const mult = (this.__SPEED_MAP[(settings.animation_speed||'normal')] ?? 1.0); return Math.round(Math.max(60, Math.min(2000, base*mult))); }
+__clamp01(x){ return Math.max(0, Math.min(1, x)); }
+__barStep(r){ const slots=20; const n = Math.round(this.__clamp01(r)*slots); return '│'.repeat(n) + '·'.repeat(slots-n); }
 
 /** Compose and animate TIR block as text (when advanced+show_tir_bar). */
-async function animateTIRText(session, sessionId, settings, headerText, tirLine, tirPct, tLine='', extraLine=''){
+async animateTIRText(session, sessionId, settings, headerText, tirLine, tirPct, tLine='', extraLine=''){
   try {
     const showBar = !!(settings && (settings.show_tir_bar || settings.show_tir_bar === undefined));
     const advanced = !!(settings && settings.enable_advanced_mode);
     const enableAnims = settings && settings.enable_animations !== false;
     const doAnim = showBar && advanced && enableAnims && Number.isFinite(tirPct);
-    const animMs = __resolveMs(settings, Number(settings.tir_anim_ms||500));
+    const animMs = this.__resolveMs(settings, Number(settings.tir_anim_ms||500));
     const steps = Math.max(4, Math.min(20, Math.round(animMs/60)));
     const per = Math.max(40, Math.round(animMs/steps));
     const cleanTreat = (tLine||'').replace(/\s+/g,' ').trim();
     const extras = extraLine ? `\n${extraLine}` : '';
 
+    const __self = this;
     function compose(ratio){
-      const bar = showBar ? ` [${__barStep(ratio)}]` : '';
+      const bar = showBar ? ` [${__self.__barStep(ratio)}]` : '';
       const l2 = `${tirLine}${bar}`;
       const tl = cleanTreat ? `\n${cleanTreat}` : '';
       return `${headerText}\n${l2}${tl}${extras}`;
@@ -392,7 +393,7 @@ async function animateTIRText(session, sessionId, settings, headerText, tirLine,
       const ratio = (tirPct/100)*(i/steps);
       last = compose(ratio);
       this.showClamped(session, sessionId, last);
-      await __sleep(per);
+      await this.__sleep(per);
     }
     // tiny settle frame
     this.showClamped(session, sessionId, last);
@@ -404,7 +405,7 @@ async function animateTIRText(session, sessionId, settings, headerText, tirLine,
 }
 
 /** Extracts "123 mg/dL @30m" or "6.8 mmol/L @30m" from any block of text. */
-function extractPredictionFromText(block){
+extractPredictionFromText(block){
   const rx = /([0-9]+(?:\.[0-9]+)?)\\s*(mg\\/dL|mmol\\/L)\\s*@\\s*(\\d+)m\\b/;
   const m = String(block||'').match(rx);
   if (!m) return null;
@@ -416,7 +417,7 @@ function extractPredictionFromText(block){
 }
 
 /** Blink a warning line if prediction is out-of-range (uses current alert limits). */
-async function blinkPredictionIfOut(session, sessionId, settings, renderedText){
+async blinkPredictionIfOut(session, sessionId, settings, renderedText){
   try {
     if (!settings || settings.blink_on_prediction === false) return;
     const pred = extractPredictionFromText(renderedText);
@@ -437,21 +438,21 @@ async function blinkPredictionIfOut(session, sessionId, settings, renderedText){
     const interval = Math.max(80, Math.min(600, Number(settings.blink_interval_ms) || 180));
     for (let i=0;i<cycles;i++){
       this.showClamped(session, sessionId, `${renderedText}\n${warn}`);
-      await __sleep(interval);
+      await this.__sleep(interval);
       this.showClamped(session, sessionId, renderedText);
-      await __sleep(interval);
+      await this.__sleep(interval);
     }
   } catch(_){}
 }
 
 /** Light blink for alerts (LOW/HIGH) to increase salience. */
-async function blinkAlertBlock(session, sessionId, text){
+async blinkAlertBlock(session, sessionId, text){
   try{
     for (let i=0;i<2;i++){
       this.showClamped(session, sessionId, text);
-      await __sleep(200);
+      await this.__sleep(200);
       this.showClamped(session, sessionId, text + '\\n'); // minimal change for blink
-      await __sleep(200);
+      await this.__sleep(200);
     }
   }catch(_){}
 }
@@ -687,11 +688,11 @@ async function blinkAlertBlock(session, sessionId, text){
         const bar = !this.toBool(settings.show_tir_bar) || tirPct === null ? '' : this.buildTirBar(tirPct);
         let tLine = '';
         try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {}
-        const __txt0 = await animateTIRText.call(this, session, sessionId, settings, formattedData, tirLine, tirPct, tLine);
-      await blinkPredictionIfOut.call(this, session, sessionId, settings, __txt0);
+        const __txt0 = await this.animateTIRText(session, sessionId, settings, formattedData, tirLine, tirPct, tLine);
+      await this.blinkPredictionIfOut(session, sessionId, settings, __txt0);
       } else {
         this.showClamped(session, sessionId, formattedData);
-      await blinkPredictionIfOut.call(this, session, sessionId, settings, formattedData);
+      await this.blinkPredictionIfOut(session, sessionId, settings, formattedData);
       }
       const t = setTimeout(() => this.hideDisplay(session, sessionId), settings.display_duration_ms || 5000);
       this.displayTimers.set(sessionId, t);
@@ -841,12 +842,12 @@ if (settings.units === UNITS.MMOL) {
         const bar = !this.toBool(settings.show_tir_bar) || tirPct === null ? '' : this.buildTirBar(tirPct);
         let tLine = '';
         try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {}
-        const __txt1 = await animateTIRText.call(this, session, sessionId, settings, header, tirLine, tirPct, tLine);
-      await blinkPredictionIfOut.call(this, session, sessionId, settings, __txt1);
+        const __txt1 = await this.animateTIRText(session, sessionId, settings, header, tirLine, tirPct, tLine);
+      await this.blinkPredictionIfOut(session, sessionId, settings, __txt1);
       } else {
         const __txt2 = await this.formatForG1WithPrediction(data, settings);
       this.showClamped(session, sessionId, __txt2);
-      await blinkPredictionIfOut.call(this, session, sessionId, settings, __txt2);
+      await this.blinkPredictionIfOut(session, sessionId, settings, __txt2);
       }
       const timer = setTimeout(() => this.hideDisplay(session, sessionId), ms);
       this.displayTimers.set(sessionId, timer);
@@ -905,6 +906,7 @@ if (settings.units === UNITS.MMOL) {
     else if (mgdl >= limits.high) { msg = msgs[lang]?.high || msgs.en.high; this.alertHistory.set(sessionId, Date.now()); }
     if (msg) {
       this.showClamped(session, sessionId, msg);
+      await this.blinkAlertBlock(session, sessionId, msg);
       const timer = setTimeout(() => this.hideDisplay(session, sessionId), settings.alert_duration_ms || 15000);
       this.displayTimers.set(sessionId, timer);
       session.logger?.warn('Alert sent', { type: mgdl <= limits.low ? 'low' : 'high', value: mgdl });
