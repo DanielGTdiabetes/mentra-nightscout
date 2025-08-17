@@ -38,7 +38,7 @@ class NightscoutMentraApp extends AppServer {
     this.alertHistory = new Map();     // sessionId -> timestamp
     this.displayTimers = new Map();    // sessionId -> timeoutId
     this.headUpLastShown = new Map();  // sessionId -> timestamp
-    this.sessionsByUser = new Map();   // userId -> session (for fast lookup)
+    this.sessionsByUser = new Map();   // userId -> { session, sessionId } (for fast lookup)
 
     // TIR y cambio de día
     this.dailyTirState = new Map();    // sessionId -> { dayStr, total, inRange }
@@ -60,12 +60,7 @@ class NightscoutMentraApp extends AppServer {
     if (x == null) return false;
     return ['true','1','yes','on'].includes(String(x).toLowerCase());
   }
-  unitsSyncDifferent(a, b, mode = 'mg_to_mmol') {
-    if (mode === 'mg_to_mmol') {
-      return Math.abs(Number(a) - Number(b)) > 0.1;
-    }
-    return Math.abs(Number(a) - Number(b)) > 1;
-  }
+  isDifferent(a, b, tol = 0.1) { return Math.abs(Number(a) - Number(b)) > tol; }
 
   // mmol/L en consola sin decimales (x10) → normaliza a 1 decimal real
   normalizeMmol(x){
@@ -96,9 +91,9 @@ class NightscoutMentraApp extends AppServer {
     }
   }
   getSessionForUser(userId, fallbackSession) {
-    if (fallbackSession?.userId) {
-      this.sessionsByUser.set(fallbackSession.userId, fallbackSession);
-      return fallbackSession;
+    if (fallbackSession?.userId && fallbackSession?.sessionId) {
+      this.sessionsByUser.set(fallbackSession.userId, { session: fallbackSession, sessionId: fallbackSession.sessionId });
+      return { session: fallbackSession, sessionId: fallbackSession.sessionId };
     }
     return this.sessionsByUser.get(userId) || null;
   }
@@ -206,7 +201,7 @@ class NightscoutMentraApp extends AppServer {
         if (result.units === UNITS.MMOL) {
           const mgLow = Math.round(result.low_alert_mmol * 18);
           const mgHigh = Math.round(result.high_alert_mmol * 18);
-          if (this.unitsSyncDifferent(result.low_alert_mg, mgLow, 'mg') || this.unitsSyncDifferent(result.high_alert_mg, mgHigh, 'mg')) {
+          if (this.isDifferent(result.low_alert_mg, mgLow) || this.isDifferent(result.high_alert_mg, mgHigh)) {
             await Promise.all([
               session.settings.set('low_alert_mg', mgLow),
               session.settings.set('high_alert_mg', mgHigh),
@@ -219,7 +214,7 @@ class NightscoutMentraApp extends AppServer {
           const mmolHigh = Number((result.high_alert_mg / 18).toFixed(1));
           const storeLow  = Math.round(mmolLow * 10);
           const storeHigh = Math.round(mmolHigh * 10);
-          if (this.unitsSyncDifferent(result.low_alert_mmol, mmolLow, 'mg_to_mmol') || this.unitsSyncDifferent(result.high_alert_mmol, mmolHigh, 'mg_to_mmol')) {
+          if (this.isDifferent(result.low_alert_mmol, mmolLow) || this.isDifferent(result.high_alert_mmol, mmolHigh)) {
             await Promise.all([
               session.settings.set('low_alert_mmol', storeLow),
               session.settings.set('high_alert_mmol', storeHigh),
@@ -317,12 +312,21 @@ class NightscoutMentraApp extends AppServer {
     };
     return langMap[settings.language] || langMap['en'];
   }
+  validateTimezone(tz) {
+    const valid = [
+      'Europe/Madrid', 'Atlantic/Canary', 'Europe/London', 'Europe/Paris',
+      'Europe/Berlin', 'Europe/Rome', 'America/New_York', 'America/Chicago',
+      'America/Los_Angeles', 'America/Mexico_City', 'America/Argentina/Buenos_Aires',
+      'America/Sao_Paulo', 'Asia/Tokyo', 'Australia/Sydney', 'UTC',
+    ];
+    return valid.includes(tz) ? tz : 'UTC';
+  }
 
   async formatForG1(data, settings) {
     const display = this.convertToDisplay(data.sgv, settings.units || UNITS.MGDL);
     const trend = this.getTrendArrow(data.direction);
     const langSettings = this.getLanguageSettings(settings);
-    const timezone = this.ensureValidTimezone(settings.timezone, langSettings.timezone);
+    const timezone = settings.timezone ? this.validateTimezone(settings.timezone) : langSettings.timezone;
     const readingTime = new Date(data.date);
     const timeStr = readingTime.toLocaleTimeString(langSettings.locale, {
       timeZone: timezone, hour: '2-digit', minute: '2-digit'
@@ -336,7 +340,7 @@ class NightscoutMentraApp extends AppServer {
   /* ---------------- Día local + TIR + tratamientos ---------------- */
   getLocalDayStr(ts, settings) {
     const langSettings = this.getLanguageSettings(settings);
-    const tz = this.ensureValidTimezone(settings.timezone, langSettings.timezone);
+    const tz = settings.timezone ? this.validateTimezone(settings.timezone) : langSettings.timezone;
     return new Date(ts).toLocaleDateString(langSettings.locale, { timeZone: tz });
   }
   buildTirBar(tirPct) {
@@ -512,10 +516,14 @@ class NightscoutMentraApp extends AppServer {
   async onSession(session, sessionId, userId) {
     console.log(`🚀 Nueva sesión: ${sessionId} para ${userId}`);
     if (typeof session.updateSettingsForTesting !== 'function') {
-      session.updateSettingsForTesting = async () => { session.logger?.debug?.('Compat shim: updateSettingsForTesting noop'); };
+      Object.defineProperty(session, 'updateSettingsForTesting', {
+        value: async () => { session.logger?.debug?.('Compat shim: updateSettingsForTesting noop'); },
+        writable: true, configurable: true, enumerable: false
+      });
     }
     session.logger?.info('Session started', { userId, sessionId });
     try {
+      this.sessionsByUser.set(userId, { session, sessionId });
       const settings = await this.getUserSettings(session);
       if (!this.isValidHttpUrl(settings.nightscoutUrl)) {
         const msg = { en: 'Please configure Nightscout\nURL in settings', es: 'Configura la URL de Nightscout\nen los ajustes' };
@@ -528,7 +536,6 @@ class NightscoutMentraApp extends AppServer {
         return;
       }
       this.activeSessions.set(sessionId, { session, userId, settings, updateInterval: null });
-      this.sessionsByUser.set(userId, session);
       this.setupEventHandlers(session, sessionId, userId);
       try {
         const entries = await this.getTodayEntries(settings);
@@ -627,7 +634,7 @@ ${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /
             if (parsed.units === UNITS.MMOL) {
               const mgLow = Math.round(parsed.low_alert_mmol * 18);
               const mgHigh = Math.round(parsed.high_alert_mmol * 18);
-              if (this.unitsSyncDifferent(parsed.low_alert_mg, mgLow, 'mg') || this.unitsSyncDifferent(parsed.high_alert_mg, mgHigh, 'mg')) {
+              if (this.isDifferent(parsed.low_alert_mg, mgLow) || this.isDifferent(parsed.high_alert_mg, mgHigh)) {
                 await Promise.all([
                   session.settings.set('low_alert_mg', mgLow),
                   session.settings.set('high_alert_mg', mgHigh),
@@ -639,7 +646,7 @@ ${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /
               const mmolHigh = Number((parsed.high_alert_mg / 18).toFixed(1));
               const storeLow  = Math.round(mmolLow * 10);
               const storeHigh = Math.round(mmolHigh * 10);
-              if (this.unitsSyncDifferent(parsed.low_alert_mmol, mmolLow, 'mg_to_mmol') || this.unitsSyncDifferent(parsed.high_alert_mmol, mmolHigh, 'mg_to_mmol')) {
+              if (this.isDifferent(parsed.low_alert_mmol, mmolLow) || this.isDifferent(parsed.high_alert_mmol, mmolHigh)) {
                 await Promise.all([
                   session.settings.set('low_alert_mmol', storeLow),
                   session.settings.set('high_alert_mmol', storeHigh),
@@ -830,23 +837,23 @@ ${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /
   async onToolCall(data) {
     const toolId = data.toolId || data.toolName;
     const userId = data.userId;
-    const activeSession = this.getSessionForUser(userId, data.activeSession);
+    const found = this.getSessionForUser(userId, data.activeSession);
     const isSpanish = ['obtener_glucosa', 'revisar_glucosa', 'nivel_glucosa', 'mi_glucosa'].includes(toolId);
     const lang = isSpanish ? 'es' : 'en';
 
-    if (!activeSession) return { success: false, error: lang === 'es' ? 'Sin sesión activa' : 'No active session' };
+    if (!found) return { success: false, error: lang === 'es' ? 'Sin sesión activa' : 'No active session' };
+    const { session: activeSession, sessionId } = found;
 
     try {
       const settings = await this.getUserSettings(activeSession);
       if (!this.isValidHttpUrl(settings?.nightscoutUrl) || (settings.nightscoutToken && !this.isNonEmptyToken(settings.nightscoutToken))) {
         throw new Error(lang === 'es' ? 'Nightscout no configurado' : 'Nightscout not configured');
       }
-
       const reading = await this.getGlucoseData(settings);
       const display = this.convertToDisplay(reading.sgv, settings.units || UNITS.MGDL);
       const trend = this.getTrendArrow(reading.direction);
       const status = this.getGlucoseStatusText(reading.sgv, settings, lang);
-      const { tirPct } = this.updateDailyTirState(activeSession?.sessionId || 'tool', reading.sgv, reading.date, settings);
+      const { tirPct } = this.updateDailyTirState(sessionId, reading.sgv, reading.date, settings);
       let extra = '';
       if (settings.enable_advanced_mode && Number.isFinite(tirPct)) {
         extra = (lang==='es') ? ` TIR hoy: ${tirPct}%` : ` Today TIR: ${tirPct}%`;
@@ -862,11 +869,21 @@ ${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /
 
   getGlucoseStatusText(value, settings, lang) {
     const limits = this.getAlertLimits(settings);
+    // CRITERIO ACTUAL (Límites fijos)
     if (value < 70) return lang === 'es' ? 'Crítico Bajo' : 'Critical Low';
     if (value <= limits.low) return lang === 'es' ? 'Bajo' : 'Low';
     if (value > 250) return lang === 'es' ? 'Crítico Alto' : 'Critical High';
     if (value >= limits.high) return lang === 'es' ? 'Alto' : 'High';
     return lang === 'es' ? 'Normal' : 'Normal';
+
+    // ALTERNATIVA (basado en límites configurables)
+    // const lowCritical = limits.low - 10;
+    // const highCritical = limits.high + 70;
+    // if (value < lowCritical) return lang === 'es' ? 'Crítico Bajo' : 'Critical Low';
+    // if (value <= limits.low) return lang === 'es' ? 'Bajo' : 'Low';
+    // if (value > highCritical) return lang === 'es' ? 'Crítico Alto' : 'Critical High';
+    // if (value >= limits.high) return lang === 'es' ? 'Alto' : 'High';
+    // return lang === 'es' ? 'Normal' : 'Normal';
   }
 }
 
