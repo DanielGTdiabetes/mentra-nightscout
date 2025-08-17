@@ -769,6 +769,7 @@ ${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /
           this.headUpLastShown.set(sessionId, now);
 
           const reading = await this.getGlucoseData(s);
+          this.lastGoodEntry.set(sessionId, reading);
           const baseLine = await this.formatForG1(reading, s);
 
           // MODO SIMPLE: solo glucosa
@@ -808,9 +809,24 @@ ${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /
           const out = minMaxLine ? `${baseLine}\n${line2}\n${minMaxLine}` : `${baseLine}\n${line2}`;
           this.showClamped(session, sessionId, out);
           setTimeout(() => this.hideDisplay(session, sessionId), s.display_duration_ms || 4000);
+        
         } catch (e) {
-          this.showClamped(session, sessionId, 'Error');
-          setTimeout(() => this.hideDisplay(session, sessionId), 2000);
+          try {
+            const cached = this.lastGoodEntry.get(sessionId);
+            const s = (this.activeSessions.get(sessionId)?.settings) || {};
+            if (cached) {
+              const txt = await this.formatForG1(cached, s);
+              this.showClamped(session, sessionId, `${txt}`);
+              const ms = (s.display_duration_ms || 4000);
+              setTimeout(() => this.hideDisplay(session, sessionId), ms);
+            } else {
+              this.showClamped(session, sessionId, s.language==='es' ? 'Sin datos' : 'No data');
+              setTimeout(() => this.hideDisplay(session, sessionId), 2000);
+            }
+          } catch (_) {
+            this.showClamped(session, sessionId, s.language==='es' ? 'Sin datos' : 'No data');
+            setTimeout(() => this.hideDisplay(session, sessionId), 2000);
+          }
         }
       });
 
