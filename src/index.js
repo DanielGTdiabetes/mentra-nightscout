@@ -524,11 +524,10 @@ class NightscoutMentraApp extends AppServer {
           : (settings.language === 'es' ? `TIR hoy: ${tirPct}%` : `Today TIR: ${tirPct}%`);
         const bar = !this.toBool(settings.show_tir_bar) || tirPct === null ? '' : this.buildTirBar(tirPct);
         let tLine = '';
-        try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } 
+        try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {}
         const sep = '   ·   ';
         let predShort = '';
         try { predShort = await this.buildPredictionShort(settings, 30); } catch {}
-catch {}
         this.showClamped(session, sessionId, `${formattedData}\n${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '')}` : ''}`);
       } else {
         this.showClamped(session, sessionId, formattedData);
@@ -677,11 +676,10 @@ catch {}
           : (settings.language === 'es' ? `TIR hoy: ${tirPct}%` : `Today TIR: ${tirPct}%`);
         const bar = !this.toBool(settings.show_tir_bar) || tirPct === null ? '' : this.buildTirBar(tirPct);
         let tLine = '';
-        try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } 
+        try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {}
         const sep = '   ·   ';
         let predShort = '';
         try { predShort = await this.buildPredictionShort(settings, 30); } catch {}
-catch {}
         this.showClamped(session, sessionId, `${header}\n${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '')}` : ''}`);
       } else {
         this.showClamped(session, sessionId, await this.formatForG1(data, settings));
