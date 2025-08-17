@@ -351,7 +351,7 @@ class NightscoutMentraApp extends AppServer {
         if (series && Array.isArray(series) && series.length) {
           const idx = Math.max(0, Math.min(series.length - 1, Math.round(horizonMin / 5)));
           const mgdl = Number(series[idx]);
-          if (Number.isFinite(mgdl)) { this._lastPredictionMgdl = mgdl; return fmt(mgdl); }
+          if (Number.isFinite(mgdl)) return fmt(mgdl);
         }
       }
     } catch (_) {}
@@ -370,7 +370,7 @@ class NightscoutMentraApp extends AppServer {
           const ratePerMin = (mgNow - mgPrev) / ((tNow - tPrev) / 60000);
           let mgPred = mgNow + ratePerMin * horizonMin;
           mgPred = Math.max(40, Math.min(400, mgPred));
-          this._lastPredictionMgdl = mgPred; return fmt(mgPred);
+          return fmt(mgPred);
         }
       }
     } catch (_) {}
@@ -442,10 +442,10 @@ async animateTIRText(session, sessionId, settings, headerText, tirLine, tirPct, 
 
 /** Extracts "123 mg/dL @30m" or "6.8 mmol/L @30m" from any block of text. */
 extractPredictionFromText(block){
-  const rx = /([0-9]+(?:[\.,][0-9]+)?)\s*(mg\/dL|mmol\/L)\s*@\s*(\d+)m\b/;
+  const rx = /([0-9]+(?:\.[0-9]+)?)\s*(mg\/dL|mmol\/L)\s*@\s*(\d+)m\b/;
   const m = String(block||'').match(rx);
   if (!m) return null;
-  const v = parseFloat(String(m[1]).replace(',', '.'));
+  const v = parseFloat(m[1]);
   const unit = m[2].toLowerCase();
   const minutes = parseInt(m[3], 10);
   const mgdl = unit.includes('mmol') ? v*18 : v;
@@ -456,13 +456,10 @@ extractPredictionFromText(block){
 async blinkPredictionIfOut(session, sessionId, settings, renderedText){
   try {
     if (!settings || settings.blink_on_prediction === false) return;
-    let pred = this.extractPredictionFromText(renderedText);
-    if (!pred && Number.isFinite(this._lastPredictionMgdl)) {
-      pred = { mgdl: this._lastPredictionMgdl, minutes: Number(settings.prediction_horizon_min||30) };
-    }
+    const pred = this.extractPredictionFromText(renderedText);
     if (!pred) return;
     const limits = this.getAlertLimits(settings); // existing helper
-    const outLow  = pred.mgdl < limits.low; try { session.logger?.info('PRED-BLINK', { mgdl: pred.mgdl, limits, triggered: (pred.mgdl<limits.low)||(pred.mgdl>limits.high) }); } catch(_) {}
+    const outLow  = pred.mgdl < limits.low;
     const outHigh = pred.mgdl > limits.high;
     if (!outLow && !outHigh) return;
 
