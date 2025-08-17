@@ -643,8 +643,8 @@ class NightscoutMentraApp extends AppServer {
           let predShort = '';
           const baseLinePred = predShort ? (baseLine + sep + predShort) : baseLine;
           try { predShort = await this.buildPredictionShort(s, 30); } catch {}
-nst line2 = `${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '')}` : ''}`;
-          const out = minMaxLine ? `${baseLinePred}\n${line2}\n${minMaxLine}` : `${baseLine}\n${line2}`;
+const line2 = `${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '')}` : ''}`;
+          const out = minMaxLine ? `${baseLinePred}\n${line2}\n${minMaxLine}` : `${baseLinePred}\n${line2}`;
           this.showClamped(session, sessionId, out);
           setTimeout(() => this.hideDisplay(session, sessionId), s.display_duration_ms || 4000);
         } catch (e) {
