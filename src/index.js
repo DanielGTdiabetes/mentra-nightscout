@@ -266,25 +266,82 @@ class NightscoutMentraApp extends AppServer {
     const timeAgo = minutesAgo <= 1 ? (lang === 'es' ? 'ahora' : 'now') : (lang === 'es' ? `hace ${minutesAgo}m` : `${minutesAgo}m ago`);
     return `${display} ${settings.units || UNITS.MGDL} ${trend}\n${timeStr} (${timeAgo})`;
   }
-  // Augment the base header (two lines) with prediction at the end of line 2.
+
+  // Añade la predicción al final de la línea 2 del header
   async formatForG1WithPrediction(data, settings) {
     try {
-      const base = await this.formatForG1WithPrediction(data, settings);
+      const base = await this.formatForG1(data, settings);  // ✅ base sin predicción
       let horizonMin = Number(settings.prediction_horizon_min || settings.prediction_horizon_mins || 30);
       if (!Number.isFinite(horizonMin) || horizonMin <= 0) horizonMin = 30;
+
       const predShort = await this.buildPredictionShort(settings, horizonMin);
       if (!predShort) return base;
+
       const parts = base.split('\n');
       const l1 = parts[0] || '';
       const l2 = (parts.length > 1 ? parts[1] : '');
       const sep = '   ·   ';
       const rest = parts.slice(2);
       return `${l1}\n${l2}${sep}${predShort}${rest.length ? `\n${rest.join('\n')}` : ''}`;
-    } catch (e) {
-      return await this.formatForG1WithPrediction(data, settings);
+    } catch (_) {
+      return await this.formatForG1(data, settings);        // ✅ fallback sin recursión
     }
   }
 
+  /**
+   * Build a short prediction string using Nightscout devicestatus (predBGs) if available.
+   * Fallback: linear extrapolation from last two SGVs.
+   * Returns like "145 mg/dL @30m" or "6.7 mmol/L @30m"
+   */
+  async buildPredictionShort(settings, horizonMin = 30) {
+    const unit = settings.units || UNITS.MGDL;
+    const fmt = (mgdl) => this.convertToDisplay(mgdl, unit) + ' ' + unit + ` @${horizonMin}m`;
+
+    // Normalize base URL
+    let base = (settings.nightscoutUrl || '').trim();
+    if (!base) return null;
+    if (!base.startsWith('http')) base = 'https://' + base;
+    base = base.replace(/\/$/, '');
+    const params = settings.nightscoutToken ? { token: settings.nightscoutToken } : {};
+    const headers = { 'User-Agent': 'MentraOS-Nightscout/2.10.0' };
+
+    // 1) Try devicestatus for predBGs
+    try {
+      const { data } = await axios.get(`${base}/api/v1/devicestatus.json?count=5`, { params, timeout: 8000, headers });
+      const arr = Array.isArray(data) ? data : (data ? [data] : []);
+      for (const ds of arr) {
+        const predBGs = (ds && (ds.predBGs || ds?.openaps?.suggested?.predBGs || ds?.ar2?.predBGs)) || null;
+        if (!predBGs) continue;
+        const series = predBGs.IOB || predBGs.COB || predBGs.UAM || predBGs.ZT || (Array.isArray(predBGs) ? predBGs : null);
+        if (series && Array.isArray(series) && series.length) {
+          const idx = Math.max(0, Math.min(series.length - 1, Math.round(horizonMin / 5)));
+          const mgdl = Number(series[idx]);
+          if (Number.isFinite(mgdl)) return fmt(mgdl);
+        }
+      }
+    } catch (_) {}
+
+    // 2) Fallback: linear extrapolation from last entries
+    try {
+      const { data } = await axios.get(`${base}/api/v1/entries.json?count=4`, { params, timeout: 8000, headers });
+      const arr = Array.isArray(data) ? data : (data ? [data] : []);
+      if (arr.length >= 2) {
+        const a = arr[0], b = arr[1];
+        const mgNow = Number(a.sgv ?? a.glucose);
+        const tNow = new Date(a.dateString || a.date || a.mills || a.sysTime).getTime();
+        const mgPrev = Number(b.sgv ?? b.glucose);
+        const tPrev = new Date(b.dateString || b.date || b.mills || b.sysTime).getTime();
+        if (Number.isFinite(mgNow) && Number.isFinite(mgPrev) && Number.isFinite(tNow) && Number.isFinite(tPrev) && tNow > tPrev) {
+          const ratePerMin = (mgNow - mgPrev) / ((tNow - tPrev) / 60000);
+          let mgPred = mgNow + ratePerMin * horizonMin;
+          mgPred = Math.max(40, Math.min(400, mgPred));
+          return fmt(mgPred);
+        }
+      }
+    } catch (_) {}
+
+    return null;
+  }
 
   /* ---------- día local + TIR + tratamientos ---------- */
   getLocalDayStr(ts, settings) {
@@ -298,7 +355,7 @@ class NightscoutMentraApp extends AppServer {
     return '│'.repeat(blocks);
   }
   /* Compose second line: TIR label+bar and treatments.
-     EN+mmol -> put treatments on the next line (no leading dot). */
+     Siempre baja los tratamientos a siguiente línea (sin punto delante). */
   composeTirLines(settings, tirLine, bar, tLine) {
     const labelBar = `${tirLine}${bar ? ' ' + bar : ''}`;
     try {
@@ -316,7 +373,6 @@ class NightscoutMentraApp extends AppServer {
       return clean ? `${labelBar}\n${clean}` : labelBar;
     } catch { return labelBar; }
   }
-
 
   updateDailyTirState(sessionId, readingMgdl, readingTs, settings) {
     const range = this.getAlertLimits(settings);
