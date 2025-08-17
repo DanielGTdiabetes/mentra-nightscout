@@ -65,11 +65,11 @@ paintFrame(session, sessionId, token, text){
     this.showClamped(session, sessionId, text);
   }
 
-  constructor(opts) {
+    constructor(opts) {
+    super(opts);
     this._alertLock = new Set();
     this._predBlinkBusy = new Set();
 
-    super(opts);
     this.activeSessions = new Map();
     this.alertHistory = new Map();
     this.displayTimers = new Map();
@@ -78,6 +78,7 @@ paintFrame(session, sessionId, token, text){
     this.dayWatchTimers = new Map();
     this.lastGoodEntry = new Map();          // cache last valid entry
   }
+
 
   /* ---------- helpers ---------- */
   parseSlicerValue(val, fallback) {
