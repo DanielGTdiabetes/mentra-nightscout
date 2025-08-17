@@ -42,26 +42,9 @@ class NightscoutMentraApp extends AppServer {
     this.dailyTirState = new Map();
     this.dayWatchTimers = new Map();
     this.lastGoodEntry = new Map();          // cache last valid entry
-    this.headUpPrimed = new Map();
-    this.headUpUnsub = new Map();
   }
 
   /* ---------- helpers ---------- */
-
-  async applyHeadUpEnabled(session, enabled, settings) {
-    const sid = session.id;
-    const off = this.headUpUnsub && this.headUpUnsub.get(sid);
-    if (off) { try { off(); } catch (_) {} this.headUpUnsub.delete(sid); }
-    if (!enabled) { this.headUpPrimed && this.headUpPrimed.set(sid, false); return; }
-    if (this.headUpPrimed && this.headUpPrimed.get(sid)) return;
-    // Warm-up preview to avoid needing two toggles the first time
-    this.headUpPrimed && this.headUpPrimed.set(sid, true);
-    try {
-      await new Promise(r => setTimeout(r, 300));
-      const sNow = settings || await this.getUserSettings(session);
-      this.showGlucoseTemporarily(session, sid, (sNow && sNow.display_duration_ms) || 4000, sNow).catch(() => {});
-    } catch (_) {}
-  }
   parseSlicerValue(val, fallback) {
     const n = (typeof val === 'object' && val !== null) ? parseFloat(val.value) : parseFloat(val);
     return Number.isFinite(n) ? n : fallback;
@@ -311,6 +294,107 @@ class NightscoutMentraApp extends AppServer {
   async getRecentTreatments(settings, hours = 4) {
     try {
       const base = (settings.nightscoutUrl || '').trim();
+  /* ---------- Predicciones Nightscout (devicestatus) + fallback local ---------- */
+  async buildPredictionShort(settings, horizonMin) {
+    try {
+      const base = (settings.nightscoutUrl || '').trim();
+      if (!base) return '';
+      let u = base.startsWith('http') ? base : 'https://' + base;
+      u = u.replace(/\/$/, '');
+      const endpoint = `${u}/api/v1/devicestatus.json?count=1`;
+      const params = settings.nightscoutToken ? { token: settings.nightscoutToken } : {};
+      const { data } = await axios.get(endpoint, { params, timeout: 10000, headers: { 'User-Agent': 'MentraOS-Nightscout/2.9.6' } });
+      const devStat = Array.isArray(data) ? data[0] : data;
+      const predMg = this.pickPredictionFromDeviceStatus(devStat, horizonMin);
+      if (Number.isFinite(predMg)) {
+        const disp = this.convertToDisplay(predMg, settings.units || UNITS.MGDL);
+        return `→ ${disp} ${settings.units || UNITS.MGDL} @${horizonMin}m`;
+      }
+    } catch (_) {}
+    // Fallback lineal simple con entradas del día
+    try {
+      const entries = await this.getTodayEntries(settings);
+      const last = (entries || []).slice(-6); // ~30min
+      const predMg = this.computeLinearPrediction(last, horizonMin);
+      if (Number.isFinite(predMg)) {
+        const disp = this.convertToDisplay(predMg, settings.units || UNITS.MGDL);
+        return `→ ${disp} ${settings.units || UNITS.MGDL} @${horizonMin}m`;
+      }
+    } catch (_) {}
+    return '';
+  }
+
+  pickPredictionFromDeviceStatus(devStat, horizonMin) {
+    if (!devStat || !horizonMin) return null;
+    const minutes = Math.max(5, Math.min(60, parseInt(horizonMin, 10) || 30));
+
+    // Loop predicted: array de objetos con fecha/valor o array numérico por pasos de 5m
+    const loopPred = devStat.loop && devStat.loop.predicted;
+    if (loopPred) {
+      const values = Array.isArray(loopPred.values) ? loopPred.values : null;
+      if (values && values.length) {
+        if (typeof values[0] === 'object') {
+          let bestVal = null, bestDiff = Infinity;
+          const target = Date.now() + minutes * 60000;
+          for (const pt of values) {
+            const ts = +new Date(pt.startDate || pt.date || pt.timestamp || 0);
+            const v  = Number(pt.value ?? pt.sgv ?? pt.mgdl);
+            if (!Number.isFinite(ts) || !Number.isFinite(v)) continue;
+            const d = Math.abs(ts - target);
+            if (d < bestDiff) { bestDiff = d; bestVal = v; }
+          }
+          if (Number.isFinite(bestVal)) return Math.round(bestVal);
+        } else {
+          const idx = Math.round(minutes / 5);
+          const v = values[Math.min(idx, values.length - 1)];
+          if (Number.isFinite(v)) return Math.round(v);
+        }
+      }
+    }
+
+    // OpenAPS suggested.predBGs
+    const sug = devStat.openaps && devStat.openaps.suggested;
+    if (sug && sug.predBGs) {
+      const seq = Array.isArray(sug.predBGs.IOB) ? sug.predBGs.IOB
+                : (Array.isArray(sug.predBGs.COB) ? sug.predBGs.COB : null);
+      if (seq && seq.length) {
+        const idx = Math.round(minutes / 5);
+        const v = seq[Math.min(idx, seq.length - 1)];
+        if (Number.isFinite(v)) return Math.round(v);
+      }
+      const key = String(minutes) + 'm';
+      if (Number.isFinite(sug.predBGs[key])) return Math.round(sug.predBGs[key]);
+    }
+
+    // Otros forks: devicestatus.predicted.values
+    if (devStat.predicted && Array.isArray(devStat.predicted.values) && devStat.predicted.values.length) {
+      const idx = Math.round(minutes / 5);
+      const v = devStat.predicted.values[Math.min(idx, devStat.predicted.values.length - 1)];
+      if (Number.isFinite(v)) return Math.round(v);
+    }
+
+    return null;
+  }
+
+  computeLinearPrediction(entries, horizonMin) {
+    try {
+      const minutes = Math.max(5, Math.min(60, parseInt(horizonMin, 10) || 30));
+      const pts = (entries || []).map(e => ({ t: e.date, v: e.mgdl })).filter(e => Number.isFinite(e.t) && Number.isFinite(e.v));
+      if (pts.length < 2) return null;
+      pts.sort((a, b) => a.t - b.t);
+      const a = pts[0], b = pts[pts.length - 1];
+      const dt = b.t - a.t;
+      if (dt <= 0) return null;
+      const dv = b.v - a.v;
+      const slope = dv / dt; // mg/dL por ms
+      const last = b.v;
+      const pred = last + slope * (minutes * 60000);
+      return Math.round(pred);
+    } catch (_) {
+      return null;
+    }
+  }
+
       if (!base) return null;
       let u = base.startsWith('http') ? base : 'https://' + base;
       u = u.replace(/\/$/, '');
@@ -506,7 +590,19 @@ class NightscoutMentraApp extends AppServer {
         const bar = !this.toBool(settings.show_tir_bar) || tirPct === null ? '' : this.buildTirBar(tirPct);
         let tLine = '';
         try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {}
-        this.showClamped(session, sessionId, `${formattedData}\n${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '')}` : ''}`);
+        
+        // Predicción opcional: se fusiona en la línea de tratamientos para no añadir líneas
+        try {
+          const sp = (settings.show_prediction == null) ? true : this.toBool(settings.show_prediction);
+          const horizon = Number.isFinite(parseInt(settings.prediction_horizon_min, 10))
+            ? Math.max(10, Math.min(60, parseInt(settings.prediction_horizon_min, 10)))
+            : 30;
+          if (sp) {
+            const predShort = await this.buildPredictionShort(settings, horizon);
+            if (predShort) tLine = tLine ? (tLine + ' · ' + predShort) : predShort;
+          }
+        } catch (_) {}
+this.showClamped(session, sessionId, `${formattedData}\n${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '')}` : ''}`);
       } else {
         this.showClamped(session, sessionId, formattedData);
       }
