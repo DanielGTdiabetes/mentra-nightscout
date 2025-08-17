@@ -137,6 +137,8 @@ class NightscoutMentraApp extends AppServer {
       const enable_animations = await session.settings.get('enable_animations');
       const tir_anim_ms = await session.settings.get('tir_anim_ms');
       const tir_fadeout_ms = await session.settings.get('tir_fadeout_ms');
+    const tir_slots = await session.settings.get('tir_slots');
+    const tir_leadin_ms = await session.settings.get('tir_leadin_ms');
       const prediction_horizon_min = await session.settings.get('prediction_horizon_min');
       const official_prediction_only = await session.settings.get('official_prediction_only');
       const blink_on_prediction = await session.settings.get('blink_on_prediction');
@@ -190,7 +192,10 @@ class NightscoutMentraApp extends AppServer {
       headup_cooldown_ms: this.validateSlicerValue(headup_cooldown_ms, 0, 30000, 4000),
       prediction_alert_style: (['blink','pulse','solid'].includes(String(blink_alert_style||'pulse')) ? String(blink_alert_style||'pulse') : 'pulse'),
 
-      };
+      ,
+      tir_slots: this.validateSlicerValue(tir_slots, 8, 24, 16),
+      tir_leadin_ms: this.validateSlicerValue(tir_leadin_ms, 0, 800, 220)
+    };
     } catch (e) {
       console.error('Error leyendo settings:', e);
       return {
@@ -270,6 +275,9 @@ class NightscoutMentraApp extends AppServer {
       headup_cooldown_ms: this.validateSlicerValue(o.headup_cooldown_ms, 0, 30000, 4000),
       prediction_alert_style: (['blink','pulse','solid'].includes(String(o.prediction_alert_style)) ? String(o.prediction_alert_style) : 'pulse'),
 
+    ,
+      tir_slots: this.validateSlicerValue(o.tir_slots, 8, 24, 16),
+      tir_leadin_ms: this.validateSlicerValue(o.tir_leadin_ms, 0, 800, 220)
     };
   }
 
@@ -404,53 +412,53 @@ __barStep(r){ const slots=20; const n = Math.round(this.__clamp01(r)*slots); ret
 
 /** Compose and animate TIR block as text (when advanced+show_tir_bar). */
 async animateTIRText(session, sessionId, settings, headerText, tirLine, tirPct, tLine='', extraLine=''){
-    try {
-      const showBar = !(settings && settings.show_tir_bar === false);
-      const allowAnim = !(settings && settings.enable_animations === false);
-      const slots = Math.max(6, Math.min(24, Number(settings?.tir_slots || 14)));
-      const pct = Number.isFinite(Number(tirPct)) ? Number(tirPct) : 0;
-      const targetSlots = Math.max(0, Math.min(slots, Math.round((pct/100) * slots)));
-      const cleanTreat = (tLine||'').replace(/\s+/g,' ').trim();
+    try{
+      const showBar = !!(settings && (settings.show_tir_bar || settings.show_tir_bar === undefined));
+      const enableAnims = settings && settings.enable_animations !== false;
+      const targetPct = Number.isFinite(tirPct) ? Math.max(0, Math.min(100, Number(tirPct))) : 0;
+      const slots = Number(settings.tir_slots || 16);
+      const targetSlots = Math.max(0, Math.min(slots, Math.round((targetPct/100) * slots)));
+      const animMs = this.__resolveMs(settings, Number(settings.tir_anim_ms||600));
+      const leadIn = Math.max(0, Number(settings.tir_leadin_ms||220));
+      const tline = (tLine||'').replace(/\s+/g,' ').trim();
       const extras = extraLine ? `\n${extraLine}` : '';
+      const makeBar = (n) => ` [${'│'.repeat(n)}${'·'.repeat(slots-n)}]`;
 
-      const self = this;
-      function compose(nSlots){
-        const ratio = slots ? (nSlots/slots) : 0;
-        const bar = showBar ? ` [${self.__barStep(ratio)}]` : '';
+      const compose = (n) => {
+        const bar = showBar ? makeBar(n) : '';
         const l2 = `${tirLine}${bar}`;
-        const tl = cleanTreat ? `\n${cleanTreat}` : '';
+        const tl = tline ? `\n${tline}` : '';
         return `${headerText}\n${l2}${tl}${extras}`;
-      }
+      };
 
-      // Static if no anim or no slots to fill
-      if (!allowAnim || targetSlots <= 0){
-        const txt = compose(targetSlots);
-        self.showClamped(session, sessionId, txt);
-        return txt;
+      // Initial frame empty + optional lead-in
+      let last = compose(0);
+      this.showClamped(session, sessionId, last);
+      if (!enableAnims || !showBar || targetSlots === 0){
+        return last;
       }
+      if (leadIn > 0){ await this.__sleep(leadIn); }
 
-      // Frame pacing by slot increments (coalescing-friendly)
-      const baseMs = self.__resolveMs(settings, Number(settings.tir_anim_ms||500));
-      const maxFrames = Math.max(1, Math.ceil(baseMs/100)); // >=100ms/frame
-      const frames = Math.max(1, Math.min(targetSlots, maxFrames));
-      const step = Math.max(1, Math.floor(targetSlots/frames) || 1);
-      const totalSteps = Math.ceil(targetSlots/step);
-      const perFrame = Math.max(90, Math.min(160, Math.round(baseMs / totalSteps)));
-
-      let lastText = '';
-      let filled = 0;
-      for (let i=0; i<totalSteps; i++){
-        filled = Math.min(targetSlots, filled + step);
-        const txt = compose(filled);
-        if (txt !== lastText){
-          self.showClamped(session, sessionId, txt);
-          lastText = txt;
-        }
-        await self.__sleep(perFrame);
+      // Per-slot timing with ease-in (slow start -> faster)
+      // Compute remaining time for fill after leadIn
+      const fillMs = Math.max(120, animMs - leadIn);
+      // Build per-slot intervals that sum to fillMs using ease-in weights
+      const weights = [];
+      for (let i=1;i<=targetSlots;i++){
+        const t = i/targetSlots;          // 0..1
+        const w = 0.6 + (t*t)*0.8;        // start slow (bigger w), end faster
+        weights.push(w);
       }
-      return lastText;
-    } catch (e) {
-      try { this.showClamped(session, sessionId, `${headerText}\n${tirLine}`); } catch(_){}
+      const sumW = weights.reduce((a,b)=>a+b,0) || 1;
+      for (let s=1;s<=targetSlots;s++){
+        last = compose(s);
+        this.showClamped(session, sessionId, last);
+        const slotMs = Math.round(fillMs * (weights[s-1]/sumW));
+        await this.__sleep(Math.max(90, Math.min(260, slotMs)));
+      }
+      return last;
+    }catch(_){
+      try{ this.showClamped(session, sessionId, `${headerText}\n${tirLine}`); }catch(__){}
       return `${headerText}\n${tirLine}`;
     }
   }
