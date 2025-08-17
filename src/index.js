@@ -412,53 +412,89 @@ __barStep(r){ const slots=20; const n = Math.round(this.__clamp01(r)*slots); ret
 
 /** Compose and animate TIR block as text (when advanced+show_tir_bar). */
 async animateTIRText(session, sessionId, settings, headerText, tirLine, tirPct, tLine='', extraLine=''){
-    try{
+    try {
       const showBar = !!(settings && (settings.show_tir_bar || settings.show_tir_bar === undefined));
       const enableAnims = settings && settings.enable_animations !== false;
-      const targetPct = Number.isFinite(tirPct) ? Math.max(0, Math.min(100, Number(tirPct))) : 0;
-      const slots = Number(settings.tir_slots || 16);
-      const targetSlots = Math.max(0, Math.min(slots, Math.round((targetPct/100) * slots)));
-      const animMs = this.__resolveMs(settings, Number(settings.tir_anim_ms||600));
-      const leadIn = Math.max(0, Number(settings.tir_leadin_ms||220));
-      const tline = (tLine||'').replace(/\s+/g,' ').trim();
-      const extras = extraLine ? `\n${extraLine}` : '';
-      const makeBar = (n) => ` [${'│'.repeat(n)}${'·'.repeat(slots-n)}]`;
+      const ratioTarget = Number.isFinite(tirPct) ? Math.max(0, Math.min(100, Number(tirPct))) / 100 : 0;
 
-      const compose = (n) => {
-        const bar = showBar ? makeBar(n) : '';
-        const l2 = `${tirLine}${bar}`;
-        const tl = tline ? `\n${tline}` : '';
-        return `${headerText}\n${l2}${tl}${extras}`;
-      };
+      // slots & timings
+      const slots    = Math.max(8, Number(settings.tir_slots) || 16);
+      const leadInMs = Number(settings.tir_leadin_ms) || 220;
+      const baseDur  = Math.max(300, Math.min(3000, Number(settings.tir_anim_ms) || 500));
+      const speedMult = (this.__SPEED_MAP[(settings.animation_speed || 'normal')] ?? 1.0);
+      const animMs  = Math.round(baseDur * speedMult);
 
-      // Initial frame empty + optional lead-in
-      let last = compose(0);
-      this.showClamped(session, sessionId, last);
-      if (!enableAnims || !showBar || targetSlots === 0){
-        return last;
+      // Compose helper
+      function compose(countFilled, bustChar=''){
+        const filled = Math.max(0, Math.min(slots, countFilled|0));
+        const on  = '│'.repeat(filled);
+        const off = '·'.repeat(slots - filled);
+        const bar = showBar ? ` [${on}${off}]` : '';
+        const l2  = `${tirLine}${bar}`;
+        const tl  = (tLine || '').replace(/\s+/g, ' ').trim();
+        const extras = extraLine ? `\n${extraLine}` : '';
+        return `${headerText}\n${l2}${tl ? `\n${tl}` : ''}${extras}${bustChar}`;
       }
-      if (leadIn > 0){ await this.__sleep(leadIn); }
 
-      // Per-slot timing with ease-in (slow start -> faster)
-      // Compute remaining time for fill after leadIn
-      const fillMs = Math.max(120, animMs - leadIn);
-      // Build per-slot intervals that sum to fillMs using ease-in weights
-      const weights = [];
-      for (let i=1;i<=targetSlots;i++){
-        const t = i/targetSlots;          // 0..1
-        const w = 1.4 - (t*t)*0.8;        // ease-in: early slots longer, later shorter
-        weights.push(w);
+      // If no animation or no bar, render final immediately
+      if (!enableAnims || !showBar || !Number.isFinite(tirPct)){
+        const targetFilled = Math.round(ratioTarget * slots);
+        const textFinal = compose(targetFilled);
+        this.showClamped(session, sessionId, textFinal);
+        return textFinal;
       }
-      const sumW = weights.reduce((a,b)=>a+b,0) || 1;
-      for (let s=1;s<=targetSlots;s++){
-        last = compose(s);
-        this.showClamped(session, sessionId, last);
-        const slotMs = Math.round(fillMs * (weights[s-1]/sumW));
-        await this.__sleep(Math.max(90, Math.min(260, slotMs)));
+
+      // Lead-in: show empty bar briefly so the eye sees the start
+      let currentText = compose(0, '');
+      this.showClamped(session, sessionId, currentText);
+      await this.__sleep(leadInMs);
+
+      // Build per-slot durations with ease-in (more time at the beginning)
+      const targetFilled = Math.max(0, Math.min(slots, Math.round(ratioTarget * slots)));
+      if (targetFilled <= 0){
+        // nothing to fill
+        this.showClamped(session, sessionId, compose(0));
+        return compose(0);
       }
-      return last;
-    }catch(_){
-      try{ this.showClamped(session, sessionId, `${headerText}\n${tirLine}`); }catch(__){}
+
+      // Weights sum approach
+      const w = [];
+      for (let i=1; i<=targetFilled; i++){
+        // Ease-in: weight higher at the beginning
+        const t = i / targetFilled;
+        const weight = Math.pow(1 - t, 1.2); // emphasis early
+        w.push(weight);
+      }
+      const sumW = w.reduce((a,b)=>a+b,0) || 1;
+      const minFrame = 90, maxFrame = 260;
+      // Convert weights to per-step ms while respecting min/max per-frame
+      let alloc = w.map(wi => Math.max(minFrame, Math.min(maxFrame, Math.round(animMs * wi / sumW))));
+      // Normalize total to be near animMs by adjusting a little if too long/short
+      const totalAlloc = alloc.reduce((a,b)=>a+b,0);
+      if (totalAlloc > animMs*1.5 || totalAlloc < animMs*0.5){
+        const scale = animMs / totalAlloc;
+        alloc = alloc.map(ms => Math.max(minFrame, Math.min(maxFrame, Math.round(ms*scale))));
+      }
+
+      // To avoid coalescing of frames, alternate an invisible bust char
+      const bust = ['\u2009', '\u200A', '']; // thin spaces and empty
+      let bustIdx = 0;
+
+      // Animate per slot
+      for (let filled=1; filled<=targetFilled; filled++){
+        bustIdx = (bustIdx + 1) % bust.length;
+        currentText = compose(filled, bust[bustIdx]);
+        this.showClamped(session, sessionId, currentText);
+        await this.__sleep(alloc[filled-1] || 120);
+      }
+
+      // Final settle frame (without bust char)
+      currentText = compose(targetFilled, '');
+      this.showClamped(session, sessionId, currentText);
+      return currentText;
+
+    } catch (e) {
+      try { this.showClamped(session, sessionId, `${headerText}\n${tirLine}`); } catch(_){}
       return `${headerText}\n${tirLine}`;
     }
   }
