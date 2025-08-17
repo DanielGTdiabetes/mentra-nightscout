@@ -528,7 +528,9 @@ class NightscoutMentraApp extends AppServer {
         const sep = '   ·   ';
         let predShort = '';
         try { predShort = await this.buildPredictionShort(settings, 30); } catch {}
-        this.showClamped(session, sessionId, `${formattedData}\n${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '')}` : ''}`);
+        
+        const headerWithPred = predShort ? `${formattedData}${sep}${predShort}` : formattedData;this.showClamped(session, sessionId, `${headerWithPred}
+${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '')}` : ''}`);
       } else {
         this.showClamped(session, sessionId, formattedData);
       }
@@ -680,7 +682,9 @@ class NightscoutMentraApp extends AppServer {
         const sep = '   ·   ';
         let predShort = '';
         try { predShort = await this.buildPredictionShort(settings, 30); } catch {}
-        this.showClamped(session, sessionId, `${header}\n${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '')}` : ''}`);
+        
+        const headerWithPred = predShort ? `${header}${sep}${predShort}` : header;this.showClamped(session, sessionId, `${headerWithPred}
+${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '')}` : ''}`);
       } else {
         this.showClamped(session, sessionId, await this.formatForG1(data, settings));
       }
