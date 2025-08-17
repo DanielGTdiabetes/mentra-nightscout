@@ -904,8 +904,7 @@ computeLinearPrediction(entries, horizonMin = 30) {
     }
   }
 
-  }
-
+  
   async buildPredictionShort(settings, horizonMin = 30) {
     try {
       let pred = null;
