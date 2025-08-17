@@ -179,8 +179,9 @@ class NightscoutMentraApp extends AppServer {
         time_in_range_low_mmol: this.normalizeMmol(time_in_range_low_mmol),
         time_in_range_high_mmol: this.normalizeMmol(time_in_range_high_mmol),
      
+        
         // Anim & Prediction controls
-        animation_speed: (['slow','normal','fast'].includes(String(animation_speed||'normal')) ? String(animation_speed) : 'normal'),
+        animation_speed: (['slow','normal','fast'].includes(String(animation_speed || 'normal')) ? String(animation_speed || 'normal') : 'normal'),
         enable_animations: (enable_animations === undefined || enable_animations === null) ? true : this.toBool(enable_animations),
         tir_anim_ms: this.validateSlicerValue(tir_anim_ms, 200, 1200, 500),
         tir_fadeout_ms: this.validateSlicerValue(tir_fadeout_ms, 80, 600, 160),
@@ -189,12 +190,11 @@ class NightscoutMentraApp extends AppServer {
         blink_on_prediction: (blink_on_prediction === undefined || blink_on_prediction === null) ? true : this.toBool(blink_on_prediction),
         blink_cycles: this.validateSlicerValue(blink_cycles, 1, 8, 4),
         blink_interval_ms: this.validateSlicerValue(blink_interval_ms, 80, 600, 180),
-      headup_cooldown_ms: this.validateSlicerValue(headup_cooldown_ms, 0, 30000, 4000),
-      prediction_alert_style: (['blink','pulse','solid'].includes(String(blink_alert_style||'pulse')) ? String(blink_alert_style||'pulse') : 'pulse'),
+        headup_cooldown_ms: this.validateSlicerValue(headup_cooldown_ms, 0, 30000, 4000),
+        prediction_alert_style: (['blink','pulse','solid'].includes(String(blink_alert_style || 'pulse')) ? String(blink_alert_style || 'pulse') : 'pulse'),
+        tir_slots: this.validateSlicerValue(tir_slots, 8, 24, 16),
+        tir_leadin_ms: this.validateSlicerValue(tir_leadin_ms, 0, 800, 220)
 
-      ,
-      tir_slots: this.validateSlicerValue(tir_slots, 8, 24, 16),
-      tir_leadin_ms: this.validateSlicerValue(tir_leadin_ms, 0, 800, 220)
     };
     } catch (e) {
       console.error('Error leyendo settings:', e);
@@ -262,8 +262,9 @@ class NightscoutMentraApp extends AppServer {
       time_in_range_low_mmol: this.normalizeMmol(o.time_in_range_low_mmol),
       time_in_range_high_mmol: this.normalizeMmol(o.time_in_range_high_mmol),
    
+      
       // Anim & Prediction controls
-      animation_speed: (['slow','normal','fast'].includes(String(o.animation_speed||'normal')) ? String(o.animation_speed) : 'normal'),
+      animation_speed: (['slow','normal','fast'].includes(String(o.animation_speed || 'normal')) ? String(o.animation_speed || 'normal') : 'normal'),
       enable_animations: (o.enable_animations === undefined || o.enable_animations === null) ? true : this.toBool(o.enable_animations),
       tir_anim_ms: this.validateSlicerValue(o.tir_anim_ms, 200, 1200, 500),
       tir_fadeout_ms: this.validateSlicerValue(o.tir_fadeout_ms, 80, 600, 160),
@@ -273,11 +274,10 @@ class NightscoutMentraApp extends AppServer {
       blink_cycles: this.validateSlicerValue(o.blink_cycles, 1, 8, 4),
       blink_interval_ms: this.validateSlicerValue(o.blink_interval_ms, 80, 600, 180),
       headup_cooldown_ms: this.validateSlicerValue(o.headup_cooldown_ms, 0, 30000, 4000),
-      prediction_alert_style: (['blink','pulse','solid'].includes(String(o.prediction_alert_style)) ? String(o.prediction_alert_style) : 'pulse'),
-
-    ,
+      prediction_alert_style: (['blink','pulse','solid'].includes(String(o.prediction_alert_style || 'pulse')) ? String(o.prediction_alert_style || 'pulse') : 'pulse'),
       tir_slots: this.validateSlicerValue(o.tir_slots, 8, 24, 16),
       tir_leadin_ms: this.validateSlicerValue(o.tir_leadin_ms, 0, 800, 220)
+
     };
   }
 
