@@ -624,7 +624,7 @@ if (settings.units === UNITS.MMOL) {
           } catch {}
           let tLine = '';
           try { const sum = await this.getRecentTreatments(s, 'day'); tLine = this.formatTreatmentsLine(sum, s); } catch {}
-          const line2 = this.composeTirLines(settings, tirLine, bar, tLine);
+          const line2 = this.composeTirLines(s, tirLine, bar, tLine);
           const out = minMaxLine ? `${baseLine}\n${line2}\n${minMaxLine}` : `${baseLine}\n${line2}`;
           this.showClamped(session, sessionId, out);
           setTimeout(() => this.hideDisplay(session, sessionId), s.display_duration_ms || 4000);
