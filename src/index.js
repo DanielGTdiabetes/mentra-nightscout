@@ -289,70 +289,20 @@ ${line2}`;
     const blocks = Math.max(0, Math.min(20, Math.round(tirPct / 5)));
     return '│'.repeat(blocks);
   }
-  /* ---------- Animations ---------- */
-  cancelAnim(sessionId) {
-    const t = this.animTimers.get(sessionId);
-    if (t) { clearTimeout(t); this.animTimers.delete(sessionId); }
-  }
-  cancelOutro(sessionId) {
-    const t = this.outroTimers.get(sessionId);
-    if (t) { clearTimeout(t); this.outroTimers.delete(sessionId); }
-  }
-
-  animateTirBarGrow(session, sessionId, headerTwoLines, tirLine, tLineText, tirPct, totalMs = 800) {
-    try {
-      if (!Number.isFinite(tirPct)) { this.showClamped(session, sessionId, `${headerTwoLines}\n${tirLine}${tLineText||''}`); return; }
-      const steps = Math.max(1, Math.round(Math.max(0, Math.min(20, Math.round(tirPct / 5)))));
-      const stepMs = Math.max(60, Math.round(totalMs / steps));
-      const sep = '   ·   ';
-      let k = 0;
-      const tick = () => {
-        const bar = k > 0 ? (' ' + '│'.repeat(k)) : '';
-        const treat = tLineText ? `${sep}${tLineText.replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '')}` : '';
-        const txt = `${headerTwoLines}\n${tirLine}${bar}${treat}`;
-        try { session.layouts.showTextWall(txt); } catch {}
-        k++;
-        if (k <= steps) {
-          const h = setTimeout(tick, stepMs);
-          this.cancelAnim(sessionId);
-          this.animTimers.set(sessionId, h);
-        } else {
-          this.cancelAnim(sessionId);
-        }
-      };
-      // first frame
-      try { session.layouts.showTextWall(`${headerTwoLines}\n${tirLine}${tLineText ? `${sep}${tLineText.replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '')}` : ''}`); } catch {}
-      const h = setTimeout(tick, stepMs);
-      this.cancelAnim(sessionId);
-      this.animTimers.set(sessionId, h);
-    } catch (_) {}
-  }
-
-  startDissolveOutro(session, sessionId, fullText, outMs = 600) {
-    try {
-      const frames = 4;
-      const step = Math.max(80, Math.floor(outMs / frames));
-      let f = 1;
-      const tick = () => {
-        const prob = f / frames;
-        const out = fullText.split('').map(c => {
-          if (c === '\n' || c === ' ') return c;
-          return (Math.random() < prob) ? (prob < 0.8 ? '·' : ' ') : c;
-        }).join('');
-        try { session.layouts.showTextWall(out); } catch {}
-        f++;
-        if (f <= frames) {
-          const h = setTimeout(tick, step);
-          this.cancelOutro(sessionId);
-          this.outroTimers.set(sessionId, h);
-        } else {
-          this.cancelOutro(sessionId);
-        }
-      };
-      const h = setTimeout(tick, step);
-      this.cancelOutro(sessionId);
-      this.outroTimers.set(sessionId, h);
-    } catch (_) {}
+  /* Build a single TIR line (label + bar + optional treatments) clamped to display width */
+  buildTirLine(settings, tirPct, tLine, maxWidth = 30) {
+    const label = (settings.language === 'es') ? 'TIR hoy:' : 'TIR:';
+    let tShort = '';
+    if (tLine && tLine.trim().length) {
+      const clean = tLine.replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '').trim();
+      if (clean) tShort = ` · ${clean}`;
+    }
+    const reserved = label.length + 1 + tShort.length;
+    const avail = Math.max(0, maxWidth - reserved);
+    const cap = Math.max(6, Math.min(18, avail));
+    const bars = Math.max(0, Math.min(cap, Math.round((Number(tirPct) || 0) * cap / 100)));
+    const bar = bars > 0 ? (' ' + '│'.repeat(bars)) : '';
+    return `${label}${bar}${tShort}`;
   }
 
   updateDailyTirState(sessionId, readingMgdl, readingTs, settings) {
@@ -451,37 +401,16 @@ ${line2}`;
     return today;
   }
   /* ---------- Prediction (fallback from entries) ---------- */
-  
   computeLinearPredictionFromToday(entries, horizonMin = 30) {
     try {
       if (!Array.isArray(entries) || entries.length < 2) return null;
+      // usar las últimas lecturas (hasta ~8)
       const pts = entries
         .slice(-8)
         .map(e => ({
           t: Number.isFinite(e.date) ? e.date : +new Date(e.dateString || e.date || 0),
           v: Number(e.mgdl != null ? e.mgdl : (e.sgv != null ? e.sgv : (e.glucose != null ? e.glucose : e.value)))
         }))
-        .filter(p => Number.isFinite(p.t) && Number.isFinite(p.v))
-        .sort((a,b) => a.t - b.t);
-      if (pts.length < 2) return null;
-      // Theil–Sen slope: median of pairwise slopes
-      const slopes = [];
-      for (let i = 0; i < pts.length; i++) {
-        for (let j = i + 1; j < pts.length; j++) {
-          const dt = pts[j].t - pts[i].t;
-          if (dt > 0) slopes.push((pts[j].v - pts[i].v) / dt);
-        }
-      }
-      if (!slopes.length) return null;
-      slopes.sort((a,b) => a - b);
-      const mid = Math.floor(slopes.length / 2);
-      const slope = slopes.length % 2 ? slopes[mid] : (slopes[mid-1] + slopes[mid]) / 2;
-      const last = pts[pts.length - 1].v;
-      const pred = last + slope * (horizonMin * 60 * 1000);
-      return Math.round(pred);
-    } catch { return null; }
-  }
-))
         .filter(p => Number.isFinite(p.t) && Number.isFinite(p.v))
         .sort((a,b) => a.t - b.t);
       if (pts.length < 2) return null;
@@ -631,12 +560,7 @@ ${line2}`;
       } else {
         this.showClamped(session, sessionId, formattedData);
       }
-      const totalMs = (settings.display_duration_ms || 5000);
-      try { setTimeout(async () => {
-        try { const txt = settings.enable_advanced_mode ? `${await this.formatForG1(data, settings)}
-${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '')}` : ''}` : await this.formatForG1(data, settings); this.startDissolveOutro(session, sessionId, txt, 650); } catch {}
-      }, Math.max(0, totalMs - 650)); } catch {}
-      const t = setTimeout(() => this.hideDisplay(session, sessionId), totalMs);
+      const t = setTimeout(() => this.hideDisplay(session, sessionId), settings.display_duration_ms || 5000);
       this.displayTimers.set(sessionId, t);
     } catch (error) {
       try {
@@ -644,13 +568,8 @@ ${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /
         if (cached) {
           const fallback = await this.formatForG1(cached, settings);
           this.showClamped(session, sessionId, fallback);
-          const totalMs = (settings.display_duration_ms || 5000);
-      try { setTimeout(async () => {
-        try { const txt = settings.enable_advanced_mode ? `${await this.formatForG1(data, settings)}
-${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '')}` : ''}` : await this.formatForG1(data, settings); this.startDissolveOutro(session, sessionId, txt, 650); } catch {}
-      }, Math.max(0, totalMs - 650)); } catch {}
-      const t = setTimeout(() => this.hideDisplay(session, sessionId), totalMs);
-      this.displayTimers.set(sessionId, t);
+          const t = setTimeout(() => this.hideDisplay(session, sessionId), settings.display_duration_ms || 5000);
+          this.displayTimers.set(sessionId, t);
           return;
         }
       } catch (_) {}
@@ -793,7 +712,6 @@ if (settings.units === UNITS.MMOL) {
       } else {
         this.showClamped(session, sessionId, await this.formatForG1(data, settings));
       }
-      try { setTimeout(() => this.startDissolveOutro(session, sessionId, txt, 650), Math.max(0, ms - 650)); } catch {}
       const timer = setTimeout(() => this.hideDisplay(session, sessionId), ms);
       this.displayTimers.set(sessionId, timer);
     } catch (error) {
@@ -803,9 +721,8 @@ if (settings.units === UNITS.MMOL) {
           const s = this.activeSessions.get(sessionId)?.settings || {};
           const txt = await this.formatForG1(cached, s);
           this.showClamped(session, sessionId, txt);
-          try { setTimeout(() => this.startDissolveOutro(session, sessionId, txt, 650), Math.max(0, ms - 650)); } catch {}
-      const timer = setTimeout(() => this.hideDisplay(session, sessionId), ms);
-      this.displayTimers.set(sessionId, timer);
+          const timer = setTimeout(() => this.hideDisplay(session, sessionId), ms);
+          this.displayTimers.set(sessionId, timer);
           return;
         }
       } catch (_) {}
