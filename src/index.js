@@ -266,6 +266,28 @@ class NightscoutMentraApp extends AppServer {
     const timeAgo = minutesAgo <= 1 ? (lang === 'es' ? 'ahora' : 'now') : (lang === 'es' ? `hace ${minutesAgo}m` : `${minutesAgo}m ago`);
     return `${display} ${settings.units || UNITS.MGDL} ${trend}\n${timeStr} (${timeAgo})`;
   }
+  // Augment the base header (two lines) with prediction at the end of line 2.
+  async formatForG1WithPrediction(data, settings) {
+    try {
+      const base = await this.formatForG1WithPrediction(data, settings);
+      // Try to build short prediction string; gracefully skip if unavailable
+      let horizonMin = Number(settings.prediction_horizon_min || settings.prediction_horizon_mins || 30);
+      if (!Number.isFinite(horizonMin) || horizonMin <= 0) horizonMin = 30;
+      const predShort = await this.buildPredictionShort(settings, horizonMin);
+      if (!predShort) return base;
+      const parts = base.split('\n');
+      if (parts.length === 0) return base;
+      const l1 = parts[0] || '';
+      const l2 = (parts.length > 1 ? parts[1] : '');
+      const sep = '   ·   ';
+      const rest = parts.slice(2);
+      const withPred = `${l1}\n${l2}${sep}${predShort}${rest.length ? `\n${rest.join('\n')}` : ''}`;
+      return withPred;
+    } catch (_) {
+      return await this.formatForG1WithPrediction(data, settings);
+    }
+  }
+
 
   /* ---------- día local + TIR + tratamientos ---------- */
   getLocalDayStr(ts, settings) {
@@ -501,7 +523,7 @@ class NightscoutMentraApp extends AppServer {
       const data = await this.getGlucoseData(settings);
       this.lastGoodEntry.set(sessionId, data);
       const tirRes = this.updateDailyTirState(sessionId, data.sgv, data.date, settings);
-      const formattedData = await this.formatForG1(data, settings);
+      const formattedData = await this.formatForG1WithPrediction(data, settings);
       if (settings.enable_advanced_mode) {
         const tirPct = tirRes.tirPct;
         const tirLine = tirPct === null
@@ -521,7 +543,7 @@ ${this.composeTirLines(settings, tirLine, bar, tLine)}`);
       try {
         const cached = this.lastGoodEntry.get(sessionId);
         if (cached) {
-          const fallback = await this.formatForG1(cached, settings);
+          const fallback = await this.formatForG1WithPrediction(cached, settings);
           this.showClamped(session, sessionId, fallback);
           const t = setTimeout(() => this.hideDisplay(session, sessionId), settings.display_duration_ms || 5000);
           this.displayTimers.set(sessionId, t);
@@ -598,7 +620,7 @@ if (settings.units === UNITS.MMOL) {
           const now = Date.now(); const last = this.headUpLastShown.get(sessionId) || 0;
           if (now - last < 10000) return; this.headUpLastShown.set(sessionId, now);
           const reading = await this.getGlucoseData(s);
-          const baseLine = await this.formatForG1(reading, s);
+          const baseLine = await this.formatForG1WithPrediction(reading, s);
           if (!s.enable_advanced_mode) {
             this.showClamped(session, sessionId, baseLine);
             setTimeout(() => this.hideDisplay(session, sessionId), s.display_duration_ms || 4000);
@@ -656,7 +678,7 @@ if (settings.units === UNITS.MMOL) {
       const data = await this.getGlucoseData(settings);
       const { tirPct } = this.updateDailyTirState(sessionId, data.sgv, data.date, settings);
       if (settings.enable_advanced_mode) {
-        const header = await this.formatForG1(data, settings);
+        const header = await this.formatForG1WithPrediction(data, settings);
         const tirLine = tirPct === null
           ? (settings.language === 'es' ? 'TIR hoy: n/d' : 'TIR: n/a')
           : (settings.language === 'es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
@@ -666,7 +688,7 @@ if (settings.units === UNITS.MMOL) {
         this.showClamped(session, sessionId, `${header}
 ${this.composeTirLines(settings, tirLine, bar, tLine)}`);
       } else {
-        this.showClamped(session, sessionId, await this.formatForG1(data, settings));
+        this.showClamped(session, sessionId, await this.formatForG1WithPrediction(data, settings));
       }
       const timer = setTimeout(() => this.hideDisplay(session, sessionId), ms);
       this.displayTimers.set(sessionId, timer);
@@ -675,7 +697,7 @@ ${this.composeTirLines(settings, tirLine, bar, tLine)}`);
         const cached = this.lastGoodEntry.get(sessionId);
         if (cached) {
           const s = this.activeSessions.get(sessionId)?.settings || {};
-          const txt = await this.formatForG1(cached, s);
+          const txt = await this.formatForG1WithPrediction(cached, s);
           this.showClamped(session, sessionId, txt);
           const timer = setTimeout(() => this.hideDisplay(session, sessionId), ms);
           this.displayTimers.set(sessionId, timer);
