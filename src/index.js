@@ -524,7 +524,11 @@ class NightscoutMentraApp extends AppServer {
           : (settings.language === 'es' ? `TIR hoy: ${tirPct}%` : `Today TIR: ${tirPct}%`);
         const bar = !this.toBool(settings.show_tir_bar) || tirPct === null ? '' : this.buildTirBar(tirPct);
         let tLine = '';
-        try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {}
+        try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } 
+        const sep = '   ·   ';
+        let predShort = '';
+        try { predShort = await this.buildPredictionShort(settings, 30); } catch {}
+catch {}
         this.showClamped(session, sessionId, `${formattedData}\n${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '')}` : ''}`);
       } else {
         this.showClamped(session, sessionId, formattedData);
@@ -673,7 +677,11 @@ class NightscoutMentraApp extends AppServer {
           : (settings.language === 'es' ? `TIR hoy: ${tirPct}%` : `Today TIR: ${tirPct}%`);
         const bar = !this.toBool(settings.show_tir_bar) || tirPct === null ? '' : this.buildTirBar(tirPct);
         let tLine = '';
-        try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {}
+        try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } 
+        const sep = '   ·   ';
+        let predShort = '';
+        try { predShort = await this.buildPredictionShort(settings, 30); } catch {}
+catch {}
         this.showClamped(session, sessionId, `${header}\n${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '')}` : ''}`);
       } else {
         this.showClamped(session, sessionId, await this.formatForG1(data, settings));
@@ -797,6 +805,112 @@ class NightscoutMentraApp extends AppServer {
     if (value > 250) return lang === 'es' ? 'Crítico Alto' : 'Critical High';
     if (value >= limits.high) return lang === 'es' ? 'Alto' : 'High';
     return lang === 'es' ? 'Normal' : 'Normal';
+  }
+
+  /* ---------- Prediction helpers (server + fallback) ---------- */
+  async fetchDeviceStatus(settings) {
+    try {
+      let u = settings.nightscoutUrl;
+      if (!u) throw new Error('URL missing');
+      if (!u.startsWith('http')) u = 'https://' + u;
+      u = u.replace(/\/+$/, '');
+      const endpoint = u + '/api/v1/devicestatus.json?count=1';
+      const attempts = this.buildAuthAttempts(settings.nightscoutUrl, settings.nightscoutToken);
+      const data = await this.getJsonWithAuthFallback(endpoint, attempts, 8000);
+      if (Array.isArray(data) && data.length) return data[0];
+      return (data && typeof data === 'object') ? data : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  pickPredictionFromDeviceStatus(devStat, horizonMin = 30) {
+    if (!devStat) return null;
+    const now = Date.now();
+    const targetTs = now + horizonMin * 60 * 1000;
+
+    const loopPred = devStat.loop && devStat.loop.predicted;
+    if (loopPred && Array.isArray(loopPred.values) && loopPred.values.length) {
+      const arr = loopPred.values;
+      if (typeof arr[0] === 'object') {
+        let best = null, bestDiff = Infinity;
+        for (const pt of arr) {
+          const ts = +new Date(pt.startDate || pt.date || pt.timestamp || 0);
+          const v  = Number(pt.value || pt.sgv || pt.mgdl || pt.glucose);
+          if (!Number.isFinite(ts) || !Number.isFinite(v)) continue;
+          const diff = Math.abs(ts - targetTs);
+          if (diff < bestDiff) { best = v; bestDiff = diff; }
+        }
+        if (Number.isFinite(best)) return Math.round(best);
+      } else {
+        const idx = Math.round(horizonMin / 5);
+        const v = arr[Math.min(idx, arr.length - 1)];
+        if (Number.isFinite(v)) return Math.round(v);
+      }
+    }
+
+    const sug = devStat.openaps && devStat.openaps.suggested;
+    if (sug && sug.predBGs) {
+      const seq = sug.predBGs.IOB || sug.predBGs.COB || null;
+      if (Array.isArray(seq) && seq.length) {
+        const idx = Math.round(horizonMin / 5);
+        const v = seq[Math.min(idx, seq.length - 1)];
+        if (Number.isFinite(v)) return Math.round(v);
+      }
+      const key = String(horizonMin) + 'm';
+      if (Number.isFinite(sug.predBGs[key])) return Math.round(sug.predBGs[key]);
+    }
+
+    if (devStat.predicted && Array.isArray(devStat.predicted.values)) {
+      const idx = Math.round(horizonMin / 5);
+      const v = devStat.predicted.values[Math.min(idx, devStat.predicted.values.length - 1)];
+      if (Number.isFinite(v)) return Math.round(v);
+    }
+
+    return null;
+  }
+
+  computeLinearPrediction(entries, horizonMin = 30) {
+    try {
+      if (!Array.isArray(entries) || entries.length < 2) return null;
+      const last = entries.slice(-6);
+      const pts = last.map(e => ({
+        t: Number(e.date || e.dateString || 0),
+        v: Number((e.sgv != null ? e.sgv : (e.mgdl != null ? e.mgdl : (e.glucose != null ? e.glucose : e.value))))
+      })).filter(e => Number.isFinite(e.t) && Number.isFinite(e.v)).sort((a,b) => a.t - b.t);
+      if (pts.length < 2) return null;
+      const dt = (pts[pts.length-1].t - pts[0].t);
+      if (dt <= 0) return null;
+      const dv = (pts[pts.length-1].v - pts[0].v);
+      const slope = dv / dt;
+      const pred = pts[pts.length-1].v + slope * (horizonMin * 60 * 1000);
+      return Math.round(pred);
+    } catch {
+      return null;
+    }
+  }
+
+  async buildPredictionShort(settings, horizonMin = 30) {
+    try {
+      let pred = null;
+      const dev = await this.fetchDeviceStatus(settings);
+      if (dev) pred = this.pickPredictionFromDeviceStatus(dev, horizonMin);
+      if (!Number.isFinite(pred)) {
+        try {
+          const todays = await this.getTodayEntries(settings);
+          pred = this.computeLinearPrediction(todays, horizonMin);
+        } catch (_) {}
+      }
+      if (!Number.isFinite(pred)) return '';
+
+      if (settings.units === UNITS.MMOL) {
+        const mmol = (pred / 18);
+        return '→ ' + mmol.toFixed(1) + ' ' + UNITS.MMOL + ' @' + horizonMin + 'm';
+      }
+      return '→ ' + Math.round(pred) + ' ' + UNITS.MGDL + ' @' + horizonMin + 'm';
+    } catch {
+      return '';
+    }
   }
 }
 
