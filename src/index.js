@@ -74,7 +74,13 @@ class NightscoutMentraApp extends AppServer {
   isValidHttpUrl(u) {
     try {
       const raw = String(u || '').trim();
-      const probe = raw.startsWith('http') ? raw : `https://${raw}
+      const probe = raw.startsWith('http') ? raw : `https://${raw}`;
+      const url = new URL(probe);
+      return (url.protocol === 'http:' || url.protocol === 'https:') && !!url.host;
+    } catch {
+      return false;
+    }
+  }
   sanitizeBaseUrl(u) {
     const raw = String(u || '').trim();
     const withProto = raw.startsWith('http') ? raw : `https://${raw}`;
