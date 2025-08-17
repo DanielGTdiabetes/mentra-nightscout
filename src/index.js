@@ -58,7 +58,7 @@ class NightscoutMentraApp extends AppServer {
   }
   normalizeMmol(x) {
     const v = this.parseSlicerValue(x, null);
-    return (v !== null && Number.isFinite(v)) ? (v > 30 ? v / 10 : v) : null;
+    return (v !== null && Number.isFinite(v)) ? (v >= 30 ? v / 10 : v) : null;
   }
 
   /* ---------- alertas ---------- */
@@ -307,7 +307,7 @@ class NightscoutMentraApp extends AppServer {
   }
 
   async formatForG1(data, settings) {
-    const display = this.convertToDisplay(data.sgv, settings.units || UNITS.MGDL);
+    const display = this.convertToDisplay(Number(data?.sgv||0), settings.units || UNITS.MGDL);
     const trend = this.getTrendArrow(data.direction);
     const langSettings = this.getLanguageSettings(settings);
     const tz = settings.timezone ? this.validateTimezone(settings.timezone) : langSettings.timezone;
@@ -346,7 +346,7 @@ class NightscoutMentraApp extends AppServer {
    * Returns like "145 mg/dL @30m" or "6.7 mmol/L @30m"
    */
   async buildPredictionShort(settings, horizonMin = 30) {
-    const unit = settings.units || UNITS.MGDL;
+    const unit = (settings.units === UNITS.MMOL || String(settings.units||'').toLowerCase().includes('mmol')) ? UNITS.MMOL : UNITS.MGDL;
     const fmt = (mgdl) => this.convertToDisplay(mgdl, unit) + ' ' + unit + ` @${horizonMin}m`;
 
     // Normalize base URL
@@ -525,7 +525,7 @@ async blinkPredictionIfOut(session, sessionId, settings, renderedText){
       try { session.logger?.info('PRED-BLINK', { mgdl: pred.mgdl, limits, triggered, style }); } catch(_){}
       if (!triggered) return;
 
-      const unit = settings.units || UNITS.MGDL;
+      const unit = (settings.units === UNITS.MMOL || String(settings.units||'').toLowerCase().includes('mmol')) ? UNITS.MMOL : UNITS.MGDL;
       const vDisp = this.convertToDisplay(pred.mgdl, unit);
       const lang = settings.language || 'en';
       const warn = lang === 'es'
