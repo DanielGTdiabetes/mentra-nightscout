@@ -841,10 +841,12 @@ if (settings.units === UNITS.MMOL) {
           let tLine = '';
           try { const sum = await this.getRecentTreatments(s, 'day'); tLine = this.formatTreatmentsLine(sum, s); } catch {}
           const line2 = this.composeTirLines(s, tirLine, bar, tLine);
-          const out = minMaxLine ? `${baseLine}\n${line2}\n${minMaxLine}` : `${baseLine}\n${line2}`;
-          this.showClamped(session, sessionId, out);
-          setTimeout(() => this.hideDisplay(session, sessionId), s.display_duration_ms || 4000);
-        } catch (e) {
+try { session.logger?.info('HeadUp -> animate TIR', { tirPct }); } catch(_) {}
+// Animate TIR on head-up HUD
+const __txtHUD = await this.animateTIRText(session, sessionId, s, baseLine, tirLine, tirPct, tLine, minMaxLine);
+await this.blinkPredictionIfOut(session, sessionId, s, __txtHUD);
+setTimeout(() => this.hideDisplay(session, sessionId), s.display_duration_ms || 4000);
+} catch (e) {
           this.showClamped(session, sessionId, 'Error');
           setTimeout(() => this.hideDisplay(session, sessionId), 2000);
         }
