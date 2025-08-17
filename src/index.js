@@ -42,9 +42,26 @@ class NightscoutMentraApp extends AppServer {
     this.dailyTirState = new Map();
     this.dayWatchTimers = new Map();
     this.lastGoodEntry = new Map();          // cache last valid entry
+    this.headUpPrimed = new Map();
+    this.headUpUnsub = new Map();
   }
 
   /* ---------- helpers ---------- */
+
+  async applyHeadUpEnabled(session, enabled, settings) {
+    const sid = session.id;
+    const off = this.headUpUnsub && this.headUpUnsub.get(sid);
+    if (off) { try { off(); } catch (_) {} this.headUpUnsub.delete(sid); }
+    if (!enabled) { this.headUpPrimed && this.headUpPrimed.set(sid, false); return; }
+    if (this.headUpPrimed && this.headUpPrimed.get(sid)) return;
+    // Warm-up preview to avoid needing two toggles the first time
+    this.headUpPrimed && this.headUpPrimed.set(sid, true);
+    try {
+      await new Promise(r => setTimeout(r, 300));
+      const sNow = settings || await this.getUserSettings(session);
+      this.showGlucoseTemporarily(session, sid, (sNow && sNow.display_duration_ms) || 4000, sNow).catch(() => {});
+    } catch (_) {}
+  }
   parseSlicerValue(val, fallback) {
     const n = (typeof val === 'object' && val !== null) ? parseFloat(val.value) : parseFloat(val);
     return Number.isFinite(n) ? n : fallback;
@@ -555,10 +572,6 @@ class NightscoutMentraApp extends AppServer {
             lines.push(`Advanced: ${settings.enable_advanced_mode ? 'ON' : 'OFF'}`);
             this.showClamped(session, sessionId, lines.join('\n'));
             setTimeout(() => this.hideDisplay(session, sessionId), 2200);
-          // Preview with current settings (advanced ON/OFF)
-          setTimeout(async () => {
-            try { await this.showGlucoseTemporarily(session, sessionId, settings.display_duration_ms || 4000, settings); } catch {}
-          }, 2300);
           } catch {}
         } catch (error) {
           session.logger?.error(error, 'Failed to process settings update');
