@@ -270,20 +270,17 @@ class NightscoutMentraApp extends AppServer {
   async formatForG1WithPrediction(data, settings) {
     try {
       const base = await this.formatForG1WithPrediction(data, settings);
-      // Try to build short prediction string; gracefully skip if unavailable
       let horizonMin = Number(settings.prediction_horizon_min || settings.prediction_horizon_mins || 30);
       if (!Number.isFinite(horizonMin) || horizonMin <= 0) horizonMin = 30;
       const predShort = await this.buildPredictionShort(settings, horizonMin);
       if (!predShort) return base;
       const parts = base.split('\n');
-      if (parts.length === 0) return base;
       const l1 = parts[0] || '';
       const l2 = (parts.length > 1 ? parts[1] : '');
       const sep = '   ·   ';
       const rest = parts.slice(2);
-      const withPred = `${l1}\n${l2}${sep}${predShort}${rest.length ? `\n${rest.join('\n')}` : ''}`;
-      return withPred;
-    } catch (_) {
+      return `${l1}\n${l2}${sep}${predShort}${rest.length ? `\n${rest.join('\n')}` : ''}`;
+    } catch (e) {
       return await this.formatForG1WithPrediction(data, settings);
     }
   }
