@@ -432,6 +432,8 @@ paintFrame(session, sessionId, token, text){
   }
 /* ---------- Animation & Prediction helpers ---------- */
 async __sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
+  __busyWait(ms){ const end = Date.now() + Math.max(0, Number(ms)||0); while (Date.now() < end) {} }
+
 __SPEED_MAP = { slow: 1.35, normal: 1.0, fast: 0.75 };
 __resolveMs(settings, base){ const mult = (this.__SPEED_MAP[(settings.animation_speed||'normal')] ?? 1.0); return Math.round(Math.max(60, Math.min(2000, base*mult))); }
 __clamp01(x){ return Math.max(0, Math.min(1, x)); }
@@ -507,7 +509,7 @@ __barStep(r){ const slots=20; const n = Math.round(this.__clamp01(r)*slots); ret
           lastKey = key;
         }
         if (t >= 1) break;
-        await this.__sleep(tick);
+        this.__busyWait(tick);
       }
       // Final settle frame (full bar)
       if (this.isCurrentToken(sessionId, token)){
@@ -587,7 +589,7 @@ try {
       // Animate over time with ease-in; only redraw when visible change
       let elapsed = 0;
       while (elapsed < leadInMs) {
-        await this.__sleep(30);
+        this.__busyWait(30);
         elapsed = Date.now() - startTs;
       }
 
@@ -611,7 +613,7 @@ try {
         // adapt tick roughly to total frames (aim 10-20 frames)
         const remaining = totalMs - t;
         const tick = Math.max(minTick, Math.min(maxTick, Math.round(remaining / Math.max(1, (10 - Math.min(sent, 9))))));
-        await this.__sleep(tick);
+        this.__busyWait(tick);
       }
 
       // Final settle (clean partials by forcing full state)
