@@ -510,7 +510,8 @@ class NightscoutMentraApp extends AppServer {
         const bar = !this.toBool(settings.show_tir_bar) || tirPct === null ? '' : this.buildTirBar(tirPct);
         let tLine = '';
         try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {}
-        this.showClamped(session, sessionId, `${formattedData}\n${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '')}` : ''}`);
+        this.showClamped(session, sessionId, `${formattedData}
+${this.composeTirLines(settings, tirLine, bar, tLine)}`);
       } else {
         this.showClamped(session, sessionId, formattedData);
       }
@@ -623,7 +624,7 @@ if (settings.units === UNITS.MMOL) {
           } catch {}
           let tLine = '';
           try { const sum = await this.getRecentTreatments(s, 'day'); tLine = this.formatTreatmentsLine(sum, s); } catch {}
-          const line2 = `${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '')}` : ''}`;
+          const line2 = this.composeTirLines(settings, tirLine, bar, tLine);
           const out = minMaxLine ? `${baseLine}\n${line2}\n${minMaxLine}` : `${baseLine}\n${line2}`;
           this.showClamped(session, sessionId, out);
           setTimeout(() => this.hideDisplay(session, sessionId), s.display_duration_ms || 4000);
@@ -662,7 +663,8 @@ if (settings.units === UNITS.MMOL) {
         const bar = !this.toBool(settings.show_tir_bar) || tirPct === null ? '' : this.buildTirBar(tirPct);
         let tLine = '';
         try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {}
-        this.showClamped(session, sessionId, `${header}\n${tirLine}${bar ? ' ' + bar : ''}${tLine ? ` · ${tLine.replace(/^CH\/Ins hoy: /, '').replace(/^Carbs\/Ins today: /, '')}` : ''}`);
+        this.showClamped(session, sessionId, `${header}
+${this.composeTirLines(settings, tirLine, bar, tLine)}`);
       } else {
         this.showClamped(session, sessionId, await this.formatForG1(data, settings));
       }
