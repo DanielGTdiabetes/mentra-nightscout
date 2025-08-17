@@ -875,7 +875,7 @@ computeLinearPrediction(entries, horizonMin = 30) {
 
       // usa las lecturas más recientes (hasta ~8)
       const pts = entries
-        .slice(0, 8)
+        .slice(-8)
         .map(e => {
           const t = Number.isFinite(e.date)
             ? e.date
@@ -916,8 +916,7 @@ computeLinearPrediction(entries, horizonMin = 30) {
           pred = this.computeLinearPrediction(todays, horizonMin);
         } catch (_) {}
       }
-      console.debug && console.debug('Prediction unavailable (no devicestatus/fallback).');
-      if (!Number.isFinite(pred)) return '';
+      if (!Number.isFinite(pred)) { console.debug && console.debug('Prediction unavailable (no devicestatus/fallback).'); return ''; }
 
       if (settings.units === UNITS.MMOL) {
         const mmol = (pred / 18);
