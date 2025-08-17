@@ -146,6 +146,7 @@ class NightscoutMentraApp extends AppServer {
       const blink_interval_ms = await session.settings.get('blink_interval_ms');
     const headup_cooldown_ms = await session.settings.get('headup_cooldown_ms');
     const blink_alert_style = await session.settings.get('prediction_alert_style');
+    const tir_anim_style = await session.settings.get('tir_anim_style');
 
 
       const showTirBar = (show_tir_bar === null && show_range_bar === null)
@@ -182,6 +183,7 @@ class NightscoutMentraApp extends AppServer {
         
         // Anim & Prediction controls
         animation_speed: (['slow','normal','fast'].includes(String(animation_speed || 'normal')) ? String(animation_speed || 'normal') : 'normal'),
+      tir_anim_style: (['fill','sweep','spinner','flip'].includes(String(tir_anim_style || 'sweep')) ? String(tir_anim_style || 'sweep') : 'sweep'),
         enable_animations: (enable_animations === undefined || enable_animations === null) ? true : this.toBool(enable_animations),
         tir_anim_ms: this.validateSlicerValue(tir_anim_ms, 200, 1200, 500),
         tir_fadeout_ms: this.validateSlicerValue(tir_fadeout_ms, 80, 600, 160),
@@ -265,6 +267,7 @@ class NightscoutMentraApp extends AppServer {
       
       // Anim & Prediction controls
       animation_speed: (['slow','normal','fast'].includes(String(o.animation_speed || 'normal')) ? String(o.animation_speed || 'normal') : 'normal'),
+      tir_anim_style: (['fill','sweep','spinner','flip'].includes(String(o.tir_anim_style)) ? String(o.tir_anim_style) : 'sweep'),
       enable_animations: (o.enable_animations === undefined || o.enable_animations === null) ? true : this.toBool(o.enable_animations),
       tir_anim_ms: this.validateSlicerValue(o.tir_anim_ms, 200, 1200, 500),
       tir_fadeout_ms: this.validateSlicerValue(o.tir_fadeout_ms, 80, 600, 160),
@@ -416,6 +419,7 @@ async animateTIRText(session, sessionId, settings, headerText, tirLine, tirPct, 
       const showBar = !!(settings && (settings.show_tir_bar || settings.show_tir_bar === undefined));
       const enableAnims = settings && settings.enable_animations !== false;
       const ratioTarget = Number.isFinite(tirPct) ? Math.max(0, Math.min(100, Number(tirPct))) / 100 : 0;
+      const style = String(settings.tir_anim_style || 'sweep'); // 'fill' | 'sweep' | 'spinner' | 'flip'
 
       // slots & timings
       const slots    = Math.max(8, Number(settings.tir_slots) || 16);
@@ -424,74 +428,145 @@ async animateTIRText(session, sessionId, settings, headerText, tirLine, tirPct, 
       const speedMult = (this.__SPEED_MAP[(settings.animation_speed || 'normal')] ?? 1.0);
       const animMs  = Math.round(baseDur * speedMult);
 
-      // Compose helper
-      function compose(countFilled, bustChar=''){
-        const filled = Math.max(0, Math.min(slots, countFilled|0));
-        const on  = '│'.repeat(filled);
-        const off = '·'.repeat(slots - filled);
+      // Compose helper: builds the bar with "filled" count (for fill/flip)
+      function composeFilled(filled, bustChar=''){
+        const f = Math.max(0, Math.min(slots, filled|0));
+        const fillChar = (style === 'flip') ? '█' : '│';
+        const on  = fillChar.repeat(f);
+        const off = '·'.repeat(slots - f);
         const bar = showBar ? ` [${on}${off}]` : '';
         const l2  = `${tirLine}${bar}`;
         const tl  = (tLine || '').replace(/\s+/g, ' ').trim();
-        const extras = extraLine ? `\n${extraLine}` : '';
-        return `${headerText}\n${l2}${tl ? `\n${tl}` : ''}${extras}${bustChar}`;
+        const extra = extraLine ? `\n${extraLine}` : '';
+        return `${headerText}\n${l2}${tl ? `\n${tl}` : ''}${extra}${bustChar}`;
       }
 
-      // If no animation or no bar, render final immediately
-      if (!enableAnims || !showBar || !Number.isFinite(tirPct)){
-        const targetFilled = Math.round(ratioTarget * slots);
-        const textFinal = compose(targetFilled);
+      // Compose helper for "sweep" (moving bright window)
+      function composeSweep(pos, win=3, bustChar=''){
+        const window = Math.max(1, Math.min(5, win));
+        const idx = Math.max(0, Math.min(slots-1, pos|0));
+        let arr = new Array(slots).fill('·');
+        for (let i=0;i<window;i++){
+          const j = idx + i;
+          if (j < slots) arr[j] = '█';
+        }
+        const bar = showBar ? ` [${arr.join('')}]` : '';
+        const l2  = `${tirLine}${bar}`;
+        const tl  = (tLine || '').replace(/\s+/g, ' ').trim();
+        const extra = extraLine ? `\n${extraLine}` : '';
+        return `${headerText}\n${l2}${tl ? `\n${tl}` : ''}${extra}${bustChar}`;
+      }
+
+      // Compose helper for "spinner"
+      const SPINS = ['|','/','-','\\'];
+      function composeSpinner(step, filledCount){
+        const f = Math.max(0, Math.min(slots, filledCount|0));
+        const on  = '█'.repeat(f);
+        const off = '·'.repeat(slots - f);
+        const spin = SPINS[step % SPINS.length];
+        const bar = showBar ? ` [${on}${off}] ${spin}` : '';
+        const l2  = `${tirLine}${bar}`;
+        const tl  = (tLine || '').replace(/\s+/g, ' ').trim();
+        const extra = extraLine ? `\n${extraLine}` : '';
+        return `${headerText}\n${l2}${tl ? `\n${tl}` : ''}${extra}`;
+      }
+
+      // Lead-in: display empty state briefly
+      this.showClamped(session, sessionId, composeFilled(0));
+      await this.__sleep(leadInMs);
+
+      // If animations off or bar hidden, show static
+      if (!enableAnims || !showBar){
+        const filled = Math.round(ratioTarget * slots);
+        const textFinal = composeFilled(filled);
         this.showClamped(session, sessionId, textFinal);
         return textFinal;
       }
 
-      // Lead-in: show empty bar briefly so the eye sees the start
-      let currentText = compose(0, '');
-      this.showClamped(session, sessionId, currentText);
-      await this.__sleep(leadInMs);
+      // Allocate durations with ease-in (more time at start)
+      const bust = ['\u2009', '\u200A', ''];
+      const minPer = 90, maxPer = 260;
 
-      // Build per-slot durations with ease-in (more time at the beginning)
+      if (style === 'sweep'){
+        const totalSteps = Math.max(4, slots + 2); // move window across whole bar
+        const per = Math.max(minPer, Math.min(maxPer, Math.round(animMs / totalSteps)));
+        let last = '';
+        for (let step = 0; step < totalSteps; step++){
+          const text = composeSweep(step, 3, bust[step % bust.length]);
+          if (text !== last) this.showClamped(session, sessionId, text);
+          last = text;
+          await this.__sleep(per);
+        }
+        // settle to final filled bar according to ratioTarget
+        const textFinal = composeFilled(Math.round(ratioTarget * slots));
+        this.showClamped(session, sessionId, textFinal);
+        return textFinal;
+      }
+
+      if (style === 'spinner'){
+        // Keep bar showing the final ratio while spinning a few cycles
+        const filled = Math.round(ratioTarget * slots);
+        const steps = Math.max(6, Math.min(24, Math.round(animMs / 120)));
+        for (let s=0; s<steps; s++){
+          this.showClamped(session, sessionId, composeSpinner(s, filled));
+          await this.__sleep(Math.max(minPer, Math.min(maxPer, Math.round(animMs / steps))));
+        }
+        const textFinal = composeSpinner(0, filled).replace(/[|\/\-\\]$/, ''); // remove spinner char
+        this.showClamped(session, sessionId, composeFilled(filled));
+        return composeFilled(filled);
+      }
+
+      if (style === 'flip'){
+        // Each slot flips through ░▒▓█ then locks
+        const targetFilled = Math.max(0, Math.min(slots, Math.round(ratioTarget * slots)));
+        if (targetFilled <= 0){
+          const textFinal = composeFilled(0);
+          this.showClamped(session, sessionId, textFinal);
+          return textFinal;
+        }
+        const phases = ['░','▒','▓','█'];
+        const per = Math.max(minPer, Math.min(maxPer, Math.round(animMs / (targetFilled * phases.length))));
+        let arr = new Array(slots).fill('·');
+        for (let i=0;i<targetFilled;i++){
+          for (let ph=0; ph<phases.length; ph++){
+            arr[i] = phases[ph];
+            const bar = showBar ? ` [${arr.join('')}]` : '';
+            const l2  = `${tirLine}${bar}`;
+            const tl  = (tLine || '').replace(/\s+/g, ' ').trim();
+            const extra = extraLine ? `\n${extraLine}` : '';
+            this.showClamped(session, sessionId, `${headerText}\n${l2}${tl ? `\n${tl}` : ''}${extra}${bust[(i+ph)%bust.length]}`);
+            await this.__sleep(per);
+          }
+        }
+        const textFinal = composeFilled(targetFilled);
+        this.showClamped(session, sessionId, textFinal);
+        return textFinal;
+      }
+
+      // Default: classic fill with ease-in
       const targetFilled = Math.max(0, Math.min(slots, Math.round(ratioTarget * slots)));
       if (targetFilled <= 0){
-        // nothing to fill
-        this.showClamped(session, sessionId, compose(0));
-        return compose(0);
+        const textFinal = composeFilled(0);
+        this.showClamped(session, sessionId, textFinal);
+        return textFinal;
       }
+      const weights = Array.from({length: targetFilled}, (_,i)=> (targetFilled - i)); // ease-in
+      const sum = weights.reduce((a,b)=>a+b,0);
+      const alloc = weights.map(w => {
+        const t = Math.round(animMs * (w/sum));
+        return Math.max(minPer, Math.min(maxPer, t));
+      });
 
-      // Weights sum approach
-      const w = [];
-      for (let i=1; i<=targetFilled; i++){
-        // Ease-in: weight higher at the beginning
-        const t = i / targetFilled;
-        const weight = Math.pow(1 - t, 1.2); // emphasis early
-        w.push(weight);
-      }
-      const sumW = w.reduce((a,b)=>a+b,0) || 1;
-      const minFrame = 90, maxFrame = 260;
-      // Convert weights to per-step ms while respecting min/max per-frame
-      let alloc = w.map(wi => Math.max(minFrame, Math.min(maxFrame, Math.round(animMs * wi / sumW))));
-      // Normalize total to be near animMs by adjusting a little if too long/short
-      const totalAlloc = alloc.reduce((a,b)=>a+b,0);
-      if (totalAlloc > animMs*1.5 || totalAlloc < animMs*0.5){
-        const scale = animMs / totalAlloc;
-        alloc = alloc.map(ms => Math.max(minFrame, Math.min(maxFrame, Math.round(ms*scale))));
-      }
-
-      // To avoid coalescing of frames, alternate an invisible bust char
-      const bust = ['\u2009', '\u200A', '']; // thin spaces and empty
-      let bustIdx = 0;
-
-      // Animate per slot
+      let last = '';
       for (let filled=1; filled<=targetFilled; filled++){
-        bustIdx = (bustIdx + 1) % bust.length;
-        currentText = compose(filled, bust[bustIdx]);
-        this.showClamped(session, sessionId, currentText);
+        const text = composeFilled(filled, bust[filled % bust.length]);
+        if (text !== last) this.showClamped(session, sessionId, text);
+        last = text;
         await this.__sleep(alloc[filled-1] || 120);
       }
-
-      // Final settle frame (without bust char)
-      currentText = compose(targetFilled, '');
-      this.showClamped(session, sessionId, currentText);
-      return currentText;
+      const textFinal = composeFilled(targetFilled, '');
+      this.showClamped(session, sessionId, textFinal);
+      return textFinal;
 
     } catch (e) {
       try { this.showClamped(session, sessionId, `${headerText}\n${tirLine}`); } catch(_){}
