@@ -103,13 +103,37 @@ class NightscoutMentraApp extends AppServer {
     return { low: Math.round(lowM * 18), high: Math.round(highM * 18) };
   }
 
-  getHysteresisMg(settings) { // mg/dL
-    const mg = this.validateSlicerValue(settings.alert_hysteresis_mg, 0, 50, NaN);
-    if (Number.isFinite(mg)) return mg;
-    const mmol = this.normalizeMmol(settings.alert_hysteresis_mmol);
-    if (Number.isFinite(mmol)) return Math.round(mmol * 18);
-    return 5; // por defecto ±5 mg/dL
+  getHysteresisMg(settings) { // Devuelve histeresis en mg/dL
+  // 1) Si viene en mg/dL, prioridad total
+  const mg = this.validateSlicerValue(settings.alert_hysteresis_mg, 0, 50, NaN);
+  if (Number.isFinite(mg)) return mg;
+
+  // 2) Intentar mmol (la consola puede no aceptar decimales)
+  const raw = this.parseSlicerValue(settings.alert_hysteresis_mmol, NaN);
+  if (Number.isFinite(raw)) {
+    let mmol = raw;
+
+    // Aceptamos dos notaciones:
+    //  - Decimal normal (ej.: 0.3) -> usar tal cual
+    //  - Entero "x10" (ej.: 3 -> 0.3)
+    if (Number.isInteger(raw)) {
+      // Casos pequeños típicos de histeresis (0.1–1.0 mmol) guardados como 1..10
+      if (raw <= 10 && raw >= 0) {
+        mmol = raw / 10;
+      }
+      // Por compatibilidad con el estilo de "x10" grande (39->3.9) si alguien lo usara aquí
+      else if (raw >= 30) {
+        mmol = raw / 10;
+      }
+      // Si meten un entero "raro" (11..29), lo tomamos como mmol ya en unidades reales
+    }
+
+    return Math.round(mmol * 18);
   }
+
+  // 3) Fallback seguro
+  return 5; // ±5 mg/dL por defecto
+}
 
   /* ---------- lectura de settings ---------- */
   async getUserSettings(session) {
