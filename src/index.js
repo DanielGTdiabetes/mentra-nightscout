@@ -1,9 +1,12 @@
+
+
 "use strict";
 /**
- * Nightscout MentraOS v2.10.0 (Corrected)
+ * Nightscout MentraOS v2.11.0 (Visual & Prediction Update)
  * HUD texto + TIR-bar ¦ CH/Ins día + Min/Max sólo gesto ¦ reset diario
  * ES/EN + mg/dL/mmol ¦ 5 líneas max ¦ cache last-good-entry
  * Settings en segundos/minutos + toggle barra TIR
+ * NUEVO: Alertas animadas y predicciones de umbral avanzadas.
  */
 
 require('dotenv').config();
@@ -41,7 +44,7 @@ class NightscoutMentraApp extends AppServer {
     this.headUpLastShown = new Map();
     this.dailyTirState = new Map();
     this.dayWatchTimers = new Map();
-    this.lastGoodEntry = new Map();          // cache last valid entry
+    this.lastGoodEntry = new Map();
   }
 
   /* ---------- helpers ---------- */
@@ -57,7 +60,7 @@ class NightscoutMentraApp extends AppServer {
     if (type === 'linear') return (t)=> t;
     return (t)=> this.__easeInOutCubic(t);
   }
-__speedMult(speed){ return speed==='slow' ? 1.35 : (speed==='fast' ? 0.75 : 1.0); }
+  __speedMult(speed){ return speed==='slow' ? 1.35 : (speed==='fast' ? 0.75 : 1.0); }
   __barFromRatio(ratio, slots){
     const n = Math.round(this.__clamp01(ratio) * slots);
     const filled = '¦'.repeat(n);
@@ -65,10 +68,6 @@ __speedMult(speed){ return speed==='slow' ? 1.35 : (speed==='fast' ? 0.75 : 1.0)
     return `[${filled}${empty}]`;
   }
 
-  /**
-   * Animate TIR bar from 0 ? tirPct.
-   * Cancels if a newer render starts (token check).
-   */
   
   async animateTIRFill(session, sessionId, s, headerText, tirPct, tLine='', extraLine=''){
     try {
@@ -330,17 +329,11 @@ __speedMult(speed){ return speed==='slow' ? 1.35 : (speed==='fast' ? 0.75 : 1.0)
   }
   
   getTrendArrow(dir) {
-    // CORREGIDO: Usar caracteres universales para máxima compatibilidad
     const map = {
-        DoubleUp: '↑↑',
-        SingleUp: '↑',
-        FortyFiveUp: '↗',
+        DoubleUp: '↑↑', SingleUp: '↑', FortyFiveUp: '↗',
         Flat: '→',
-        FortyFiveDown: '↘',
-        SingleDown: '↓',
-        DoubleDown: '↓↓',
-        NONE: '-',
-        'NOT COMPUTABLE': '?'
+        FortyFiveDown: '↘', SingleDown: '↓', DoubleDown: '↓↓',
+        NONE: '-', 'NOT COMPUTABLE': '?'
     };
     return map[dir] || '?';
   }
@@ -372,15 +365,14 @@ __speedMult(speed){ return speed==='slow' ? 1.35 : (speed==='fast' ? 0.75 : 1.0)
     return `${display} ${settings.units || UNITS.MGDL} ${trend}\n${timeStr} (${timeAgo})`;
   }
 
-  // CORREGIDO: Lógica de fallback simplificada y más limpia
+  // MODIFICADO: Esta función ahora llama al nuevo sistema de predicción avanzado.
   async formatForG1WithPrediction(data, settings) {
     try {
       const base = await this.formatForG1(data, settings);
-      let horizonMin = Number(settings.prediction_horizon_min || settings.prediction_horizon_mins || 30);
-      if (!Number.isFinite(horizonMin) || horizonMin <= 0) horizonMin = 30;
-
-      const predShort = await this.buildPredictionShort(settings, horizonMin);
-      if (!predShort) return base;
+      
+      // NUEVO: Llama a la lógica de predicción avanzada.
+      const predShort = await this.buildAdvancedPredictionShort(settings);
+      if (!predShort) return base; // Si no hay predicción, devuelve la base
 
       const parts = base.split('\n');
       const l1 = parts[0] || '';
@@ -394,61 +386,84 @@ __speedMult(speed){ return speed==='slow' ? 1.35 : (speed==='fast' ? 0.75 : 1.0)
     }
   }
 
-  /**
-   * Build a short prediction string using Nightscout devicestatus (predBGs) if available.
-   * Fallback: linear extrapolation from last two SGVs.
-   * Returns like "145 mg/dL @30m" or "6.7 mmol/L @30m"
-   */
-  async buildPredictionShort(settings, horizonMin = 30) {
-    const unit = settings.units || UNITS.MGDL;
-    const fmt = (mgdl) => this.convertToDisplay(mgdl, unit) + ` @${horizonMin}m`;
-
-    // Normalize base URL
+  // NUEVO: Lógica de predicción avanzada para umbrales.
+  async buildAdvancedPredictionShort(settings) {
+    const lowThreshold = 75;  // Umbral bajo a predecir
+    const highThreshold = 190; // Umbral alto a predecir
+    
     let base = (settings.nightscoutUrl || '').trim();
     if (!base) return null;
     if (!base.startsWith('http')) base = 'https://' + base;
     base = base.replace(/\/$/, '');
     const params = settings.nightscoutToken ? { token: settings.nightscoutToken } : {};
-    const headers = { 'User-Agent': 'MentraOS-Nightscout/2.10.0' };
+    const headers = { 'User-Agent': 'MentraOS-Nightscout/2.11.0' };
 
-    // 1) Try devicestatus for predBGs
+    // 1) Método Exacto: Intentar con predBGs de devicestatus
     try {
-      const { data } = await axios.get(`${base}/api/v1/devicestatus.json?count=5`, { params, timeout: 8000, headers });
-      const arr = Array.isArray(data) ? data : (data ? [data] : []);
-      for (const ds of arr) {
-        const predBGs = (ds && (ds.predBGs || ds?.openaps?.suggested?.predBGs || ds?.ar2?.predBGs)) || null;
-        if (!predBGs) continue;
+      const { data } = await axios.get(`${base}/api/v1/devicestatus.json?count=1`, { params, timeout: 8000, headers });
+      const ds = Array.isArray(data) ? data[0] : data;
+      const predBGs = ds && (ds.predBGs || ds?.openaps?.suggested?.predBGs || ds?.ar2?.predBGs);
+      if (predBGs) {
         const series = predBGs.IOB || predBGs.COB || predBGs.UAM || predBGs.ZT || (Array.isArray(predBGs) ? predBGs : null);
-        if (series && Array.isArray(series) && series.length) {
-          const idx = Math.max(0, Math.min(series.length - 1, Math.round(horizonMin / 5)));
-          const mgdl = Number(series[idx]);
-          if (Number.isFinite(mgdl)) return fmt(mgdl);
+        if (series && Array.isArray(series) && series.length > 1) {
+          const currentSgv = series[0];
+          
+          if (currentSgv > lowThreshold) { // Buscar predicción de bajada
+            for (let i = 1; i < series.length; i++) {
+              if (series[i] <= lowThreshold) {
+                return `↓${lowThreshold} @${i * 5}m`;
+              }
+            }
+          }
+          
+          if (currentSgv < highThreshold) { // Buscar predicción de subida
+            for (let i = 1; i < series.length; i++) {
+              if (series[i] >= highThreshold) {
+                return `↑${highThreshold} @${i * 5}m`;
+              }
+            }
+          }
         }
       }
     } catch (_) {}
 
-    // 2) Fallback: linear extrapolation from last entries
+    // 2) Método Fallback: Extrapolación lineal con las últimas lecturas
     try {
-      const { data } = await axios.get(`${base}/api/v1/entries.json?count=4`, { params, timeout: 8000, headers });
-      const arr = Array.isArray(data) ? data : (data ? [data] : []);
-      if (arr.length >= 2) {
-        const a = arr[0], b = arr[1];
-        const mgNow = Number(a.sgv ?? a.glucose);
-        const tNow = new Date(a.dateString || a.date || a.mills || a.sysTime).getTime();
-        const mgPrev = Number(b.sgv ?? b.glucose);
-        const tPrev = new Date(b.dateString || b.date || b.mills || b.sysTime).getTime();
-        if (Number.isFinite(mgNow) && Number.isFinite(mgPrev) && Number.isFinite(tNow) && Number.isFinite(tPrev) && tNow > tPrev) {
-          const ratePerMin = (mgNow - mgPrev) / ((tNow - tPrev) / 60000);
-          let mgPred = mgNow + ratePerMin * horizonMin;
-          mgPred = Math.max(40, Math.min(400, mgPred));
-          return fmt(mgPred);
+      const { data } = await axios.get(`${base}/api/v1/entries.json?count=2`, { params, timeout: 8000, headers });
+      if (data && data.length >= 2) {
+        const last = data[0];
+        const prev = data[1];
+        const mgNow = Number(last.sgv);
+        const tNow = new Date(last.date || last.dateString).getTime();
+        const mgPrev = Number(prev.sgv);
+        const tPrev = new Date(prev.date || prev.dateString).getTime();
+        
+        if (Number.isFinite(mgNow) && Number.isFinite(mgPrev) && tNow > tPrev) {
+          const deltaMinutes = (tNow - tPrev) / 60000;
+          if (deltaMinutes > 0) {
+            const ratePerMin = (mgNow - mgPrev) / deltaMinutes;
+
+            if (ratePerMin < -0.5) { // Si está bajando de forma significativa
+              const timeToLow = (lowThreshold - mgNow) / ratePerMin;
+              if (timeToLow > 0 && timeToLow < 90) { // Predecir solo hasta 90 min
+                return `↓${lowThreshold} @${Math.round(timeToLow)}m`;
+              }
+            }
+            
+            if (ratePerMin > 0.5) { // Si está subiendo de forma significativa
+              const timeToHigh = (highThreshold - mgNow) / ratePerMin;
+              if (timeToHigh > 0 && timeToHigh < 120) { // Predecir solo hasta 120 min
+                return `↑${highThreshold} @${Math.round(timeToHigh)}m`;
+              }
+            }
+          }
         }
       }
     } catch (_) {}
 
-    return null;
+    return null; // No se pudo generar una predicción de umbral
   }
-
+  
   /* ---------- día local + TIR + tratamientos ---------- */
   getLocalDayStr(ts, settings) {
     const langSettings = this.getLanguageSettings(settings);
@@ -460,16 +475,12 @@ __speedMult(speed){ return speed==='slow' ? 1.35 : (speed==='fast' ? 0.75 : 1.0)
     const blocks = Math.max(0, Math.min(20, Math.floor(tirPct / 5)));
     return '¦'.repeat(blocks);
   }
-  /* Compose second line: TIR label+bar and treatments.
-     Siempre baja los tratamientos a siguiente línea (sin punto delante). */
   composeTirLines(settings, tirLine, bar, tLine) {
     const labelBar = `${tirLine}${bar ? ' ' + bar : ''}`;
     try {
-      // ALWAYS move treatments to the next line (both languages / any unit)
       let clean = (tLine || '')
         .replace(/^CH\/Ins hoy: /, '')
         .replace(/^Carbs\/Ins today: /, '')
-        // drop any " · Last: ..." or " · Últ: ..." and all after
         .replace(/\s*[·•]\s*(Last|Últ):[\s\S]*$/i, '')
         .replace(/\s*Last:[\s\S]*$/i, '')
         .replace(/\s*Últ:[\s\S]*$/i, '')
@@ -744,20 +755,19 @@ __speedMult(speed){ return speed==='slow' ? 1.35 : (speed==='fast' ? 0.75 : 1.0)
           sd.settings = settings;
           this.activeSessions.set(sessionId, sd);
           try {
-            // Trigger immediate alert re-check with new limits
             try { const dNow = await this.getGlucoseData(settings); await this.checkAlerts(session, sessionId, dNow, settings);} catch(_){ }
 
             const savedMsg = (settings.language === 'es') ? 'Ajustes guardados' : 'Settings saved';
-const lowLbl = (settings.language === 'es') ? 'Bajo' : 'Low';
-const highLbl = (settings.language === 'es') ? 'Alto' : 'High';
-const lines = [savedMsg];
-if (settings.units === UNITS.MMOL) {
-  lines.push(`${lowLbl}: ${(+settings.low_alert_mmol).toFixed(1)} mmol/L`);
-  lines.push(`${highLbl}: ${(+settings.high_alert_mmol).toFixed(1)} mmol/L`);
-} else {
-  lines.push(`${lowLbl}: ${settings.low_alert_mg} mg/dL`);
-  lines.push(`${highLbl}: ${settings.high_alert_mg} mg/dL`);
-}
+            const lowLbl = (settings.language === 'es') ? 'Bajo' : 'Low';
+            const highLbl = (settings.language === 'es') ? 'Alto' : 'High';
+            const lines = [savedMsg];
+            if (settings.units === UNITS.MMOL) {
+              lines.push(`${lowLbl}: ${(+settings.low_alert_mmol).toFixed(1)} mmol/L`);
+              lines.push(`${highLbl}: ${(+settings.high_alert_mmol).toFixed(1)} mmol/L`);
+            } else {
+              lines.push(`${lowLbl}: ${settings.low_alert_mg} mg/dL`);
+              lines.push(`${highLbl}: ${settings.high_alert_mg} mg/dL`);
+            }
             lines.push(`Units: ${settings.units}`);
             lines.push(`HeadUp: ${settings.enable_head_up_display ? 'ON' : 'OFF'}`);
             lines.push(`Advanced: ${settings.enable_advanced_mode ? 'ON' : 'OFF'}`);
@@ -836,7 +846,7 @@ if (settings.units === UNITS.MMOL) {
       if (!sd) return;
       const settings = providedSettings || sd.settings || await this.getUserSettings(sd.session);
       const data = await this.getGlucoseData(settings);
-      this.lastGoodEntry.set(sessionId, data); // CORREGIDO: Actualizar caché aquí
+      this.lastGoodEntry.set(sessionId, data);
       const { tirPct } = this.updateDailyTirState(sessionId, data.sgv, data.date, settings);
       if (settings.enable_advanced_mode) { const header = await this.formatForG1WithPrediction(data, settings); const tirLine = tirPct === null ? (settings.language === 'es' ? 'TIR hoy: n/d' : 'TIR: n/a') : (settings.language === 'es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`); let tLine = ''; try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {} await this.animateTIRFill(session, sessionId, settings, header, tirPct, tLine); } else {
         this.showClamped(session, sessionId, await this.formatForG1WithPrediction(data, settings));
@@ -867,7 +877,7 @@ if (settings.units === UNITS.MMOL) {
         const sd = this.activeSessions.get(sessionId);
         const s = (sd && sd.settings) ? sd.settings : await this.getUserSettings(session);
         const d = await this.getGlucoseData(s);
-        this.lastGoodEntry.set(sessionId, d); // CORREGIDO: Actualizar caché aquí
+        this.lastGoodEntry.set(sessionId, d);
         this.updateDailyTirState(sessionId, d.sgv, d.date, s);
         if (s.alertsEnabled) await this.checkAlerts(session, sessionId, d, s);
       } catch (error) {
@@ -882,27 +892,65 @@ if (settings.units === UNITS.MMOL) {
     }
   }
 
+  // MODIFICADO: checkAlerts ahora llama a la nueva función de animación.
   async checkAlerts(session, sessionId, data, settings) {
     const limits = this.getAlertLimits(settings);
     const mgdl = data.sgv;
-    const display = this.convertToDisplay(mgdl, settings.units || UNITS.MGDL);
     const last = this.alertHistory.get(sessionId);
     const cooldown = settings.alert_cooldown_ms || 600000;
+    
     if (last && Date.now() - last < cooldown) return;
-    const msgs = {
-      en: { low: `[!] LOW GLUCOSE!\n${display} ${settings.units || UNITS.MGDL}`, high: `[!] HIGH GLUCOSE!\n${display} ${settings.units || UNITS.MGDL}` },
-      es: { low: `[!] ¡GLUCOSA BAJA!\n${display} ${settings.units || UNITS.MGDL}`, high: `[!] ¡GLUCOSA ALTA!\n${display} ${settings.units || UNITS.MGDL}` }
-    };
-    const lang = settings.language || 'en';
-    let msg = null;
-    if (mgdl <= limits.low) { msg = msgs[lang]?.low || msgs.en.low; this.alertHistory.set(sessionId, Date.now()); }
-    else if (mgdl >= limits.high) { msg = msgs[lang]?.high || msgs.en.high; this.alertHistory.set(sessionId, Date.now()); }
-    if (msg) {
-      this.showClamped(session, sessionId, msg);
-      const timer = setTimeout(() => this.hideDisplay(session, sessionId), settings.alert_duration_ms || 15000);
-      this.displayTimers.set(sessionId, timer);
-      session.logger?.warn('Alert sent', { type: mgdl <= limits.low ? 'low' : 'high', value: mgdl });
+
+    let alertType = null;
+    if (mgdl <= limits.low) alertType = 'low';
+    else if (mgdl >= limits.high) alertType = 'high';
+
+    if (alertType) {
+      this.alertHistory.set(sessionId, Date.now());
+      await this.triggerAnimatedAlert(session, sessionId, data, settings, alertType);
+      session.logger?.warn('Alert sent', { type: alertType, value: mgdl });
     }
+  }
+
+  // NUEVO: Función para mostrar una alerta animada (intermitente).
+  async triggerAnimatedAlert(session, sessionId, data, settings, type) {
+    const displayValue = this.convertToDisplay(data.sgv, settings.units || UNITS.MGDL);
+    const unit = settings.units || UNITS.MGDL;
+    const lang = settings.language || 'en';
+    
+    const msgs = {
+      en: { low: `LOW GLUCOSE!`, high: `HIGH GLUCOSE!` },
+      es: { low: `¡GLUCOSA BAJA!`, high: `¡GLUCOSA ALTA!` }
+    };
+    
+    const baseText = `${msgs[lang][type]}\n${displayValue} ${unit}`;
+    const alertDuration = settings.alert_duration_ms || 15000;
+    const blinkInterval = 600; // ms
+
+    if (this.displayTimers.has(sessionId)) {
+      clearTimeout(this.displayTimers.get(sessionId));
+    }
+
+    const startTime = Date.now();
+    let isVisible = true;
+
+    const blinker = setInterval(() => {
+      if (Date.now() - startTime > alertDuration) {
+        clearInterval(blinker);
+        this.hideDisplay(session, sessionId);
+        return;
+      }
+      
+      const symbol = isVisible ? '[!]' : '[ ]';
+      this.showClamped(session, sessionId, `${symbol} ${baseText}`);
+      isVisible = !isVisible;
+      
+    }, blinkInterval);
+
+    this.displayTimers.set(sessionId, setTimeout(() => {
+        clearInterval(blinker);
+        this.hideDisplay(session, sessionId);
+    }, alertDuration + 100));
   }
 
   alertLimitsChanged(oldSettings, newSettings) {
@@ -974,13 +1022,14 @@ server.start().catch(err => {
   console.error('? Error iniciando servidor:', err);
   process.exit(1);
 });
-console.log('?? Nightscout MentraOS v2.10.0 (Corrected) — HUD texto + TIR-bar ¦ CH/Ins día + Min/Max gesto + reset diario');
+console.log('?? Nightscout MentraOS v2.11.0 (Visual & Prediction Update) — HUD texto + TIR-bar ¦ CH/Ins día + Min/Max gesto + reset diario');
 
 const KEEP_ALIVE_URL = process.env.RENDER_URL || 'https://mentra-nightscout.onrender.com';
 server.app.get('/health', (_, res) => res.json({
   status: 'alive',
   timestamp: new Date().toISOString(),
-  version: '2.10.0',
+  version: '2.11.0',
   activeSessions: server.activeSessions.size
 }));
 setInterval(() => axios.get(`${KEEP_ALIVE_URL}/health`).catch(() => {}), 3 * 60 * 1000);
+
