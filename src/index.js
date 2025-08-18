@@ -92,16 +92,45 @@ class NightscoutMentraApp extends AppServer {
   }
 
   /* ---------- alertas / límites ---------- */
-  getAlertLimits(settings) { // devuelve mg/dL
-    const lowMg  = this.parseSlicerValue(settings.low_alert_mg, NaN);
-    const highMg = this.parseSlicerValue(settings.high_alert_mg, NaN);
-    if (Number.isFinite(lowMg) && Number.isFinite(highMg)) {
-      return { low: Math.round(lowMg), high: Math.round(highMg) };
+  // PRIORIDAD POR UNIDAD: si units=mmol/L usa primero low/high en mmol (x10), si no, usa mg/dL.
+// Siempre devuelve límites en mg/dL para el resto del código.
+getAlertLimits(settings) {
+  const units = String(settings.units || '').toLowerCase();
+
+  // Candidatos en mg/dL (tal cual)
+  const lowMgRaw  = this.parseSlicerValue(settings.low_alert_mg,  NaN);
+  const highMgRaw = this.parseSlicerValue(settings.high_alert_mg, NaN);
+  const lowMgOK   = Number.isFinite(lowMgRaw)  ? Math.round(lowMgRaw)  : NaN;
+  const highMgOK  = Number.isFinite(highMgRaw) ? Math.round(highMgRaw) : NaN;
+
+  // Candidatos en mmol (pueden venir como 39=>3.9). normalizeMmol ya maneja x10.
+  const lowMmol   = this.normalizeMmol(settings.low_alert_mmol);
+  const highMmol  = this.normalizeMmol(settings.high_alert_mmol);
+  const lowFromMmolMg  = Number.isFinite(lowMmol)  ? Math.round(lowMmol  * 18) : NaN;
+  const highFromMmolMg = Number.isFinite(highMmol) ? Math.round(highMmol * 18) : NaN;
+
+  if (units.includes('mmol')) {
+    // mmol/L tiene prioridad
+    if (Number.isFinite(lowFromMmolMg) && Number.isFinite(highFromMmolMg)) {
+      return { low: lowFromMmolMg, high: highFromMmolMg };
     }
-    const lowM = this.normalizeMmol(settings.low_alert_mmol) ?? 3.9;
-    const highM = this.normalizeMmol(settings.high_alert_mmol) ?? 13.9;
-    return { low: Math.round(lowM * 18), high: Math.round(highM * 18) };
+    if (Number.isFinite(lowMgOK) && Number.isFinite(highMgOK)) {
+      return { low: lowMgOK, high: highMgOK };
+    }
+    // Fallback por defecto típico mmol (3.9/13.9)
+    return { low: Math.round(3.9 * 18), high: Math.round(13.9 * 18) };
+  } else {
+    // mg/dL tiene prioridad (o unidad desconocida)
+    if (Number.isFinite(lowMgOK) && Number.isFinite(highMgOK)) {
+      return { low: lowMgOK, high: highMgOK };
+    }
+    if (Number.isFinite(lowFromMmolMg) && Number.isFinite(highFromMmolMg)) {
+      return { low: lowFromMmolMg, high: highFromMmolMg };
+    }
+    // Fallback por defecto típico mg/dL
+    return { low: 70, high: 250 };
   }
+}
 
   getHysteresisMg(settings) {
   // Lee candidatos
