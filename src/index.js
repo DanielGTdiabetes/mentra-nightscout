@@ -1,6 +1,6 @@
 "use strict";
 /**
- * Nightscout MentraOS v2.10.0
+ * Nightscout MentraOS v2.10.0 (Corrected)
  * HUD texto + TIR-bar ¦ CH/Ins día + Min/Max sólo gesto ¦ reset diario
  * ES/EN + mg/dL/mmol ¦ 5 líneas max ¦ cache last-good-entry
  * Settings en segundos/minutos + toggle barra TIR
@@ -328,10 +328,23 @@ __speedMult(speed){ return speed==='slow' ? 1.35 : (speed==='fast' ? 0.75 : 1.0)
   convertToDisplay(mgdlValue, targetUnit) {
     return targetUnit === UNITS.MMOL ? (mgdlValue / 18).toFixed(1) : Math.round(mgdlValue);
   }
+  
   getTrendArrow(dir) {
-    const map = { DoubleUp: '?', SingleUp: '?', FortyFiveUp: '?', Flat: '?', FortyFiveDown: '?', SingleDown: '?', DoubleDown: '?', NONE: '-', 'NOT COMPUTABLE': '?' };
+    // CORREGIDO: Usar caracteres universales para máxima compatibilidad
+    const map = {
+        DoubleUp: '↑↑',
+        SingleUp: '↑',
+        FortyFiveUp: '↗',
+        Flat: '→',
+        FortyFiveDown: '↘',
+        SingleDown: '↓',
+        DoubleDown: '↓↓',
+        NONE: '-',
+        'NOT COMPUTABLE': '?'
+    };
     return map[dir] || '?';
   }
+
   getLanguageSettings(settings) {
     const langMap = { es: { locale: 'es-ES', timezone: 'Europe/Madrid' }, en: { locale: 'en-US', timezone: 'America/New_York' } };
     return langMap[settings.language] || langMap.en;
@@ -359,10 +372,10 @@ __speedMult(speed){ return speed==='slow' ? 1.35 : (speed==='fast' ? 0.75 : 1.0)
     return `${display} ${settings.units || UNITS.MGDL} ${trend}\n${timeStr} (${timeAgo})`;
   }
 
-  // Añade la predicción al final de la línea 2 del header
+  // CORREGIDO: Lógica de fallback simplificada y más limpia
   async formatForG1WithPrediction(data, settings) {
     try {
-      const base = await this.formatForG1(data, settings);  // ? base sin predicción
+      const base = await this.formatForG1(data, settings);
       let horizonMin = Number(settings.prediction_horizon_min || settings.prediction_horizon_mins || 30);
       if (!Number.isFinite(horizonMin) || horizonMin <= 0) horizonMin = 30;
 
@@ -375,8 +388,9 @@ __speedMult(speed){ return speed==='slow' ? 1.35 : (speed==='fast' ? 0.75 : 1.0)
       const sep = ' · ';
       const rest = parts.slice(2);
       return `${l1}\n${l2}${sep}${predShort}${rest.length ? `\n${rest.join('\n')}` : ''}`;
-    } catch (_) {
-      return await this.formatForG1(data, settings);        // ? fallback sin recursión
+    } catch (error) {
+      console.error('Error in formatForG1WithPrediction, falling back:', error);
+      return await this.formatForG1(data, settings);
     }
   }
 
@@ -822,6 +836,7 @@ if (settings.units === UNITS.MMOL) {
       if (!sd) return;
       const settings = providedSettings || sd.settings || await this.getUserSettings(sd.session);
       const data = await this.getGlucoseData(settings);
+      this.lastGoodEntry.set(sessionId, data); // CORREGIDO: Actualizar caché aquí
       const { tirPct } = this.updateDailyTirState(sessionId, data.sgv, data.date, settings);
       if (settings.enable_advanced_mode) { const header = await this.formatForG1WithPrediction(data, settings); const tirLine = tirPct === null ? (settings.language === 'es' ? 'TIR hoy: n/d' : 'TIR: n/a') : (settings.language === 'es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`); let tLine = ''; try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {} await this.animateTIRFill(session, sessionId, settings, header, tirPct, tLine); } else {
         this.showClamped(session, sessionId, await this.formatForG1WithPrediction(data, settings));
@@ -852,6 +867,7 @@ if (settings.units === UNITS.MMOL) {
         const sd = this.activeSessions.get(sessionId);
         const s = (sd && sd.settings) ? sd.settings : await this.getUserSettings(session);
         const d = await this.getGlucoseData(s);
+        this.lastGoodEntry.set(sessionId, d); // CORREGIDO: Actualizar caché aquí
         this.updateDailyTirState(sessionId, d.sgv, d.date, s);
         if (s.alertsEnabled) await this.checkAlerts(session, sessionId, d, s);
       } catch (error) {
@@ -958,7 +974,7 @@ server.start().catch(err => {
   console.error('? Error iniciando servidor:', err);
   process.exit(1);
 });
-console.log('?? Nightscout MentraOS v2.10.0 — HUD texto + TIR-bar ¦ CH/Ins día + Min/Max gesto + reset diario');
+console.log('?? Nightscout MentraOS v2.10.0 (Corrected) — HUD texto + TIR-bar ¦ CH/Ins día + Min/Max gesto + reset diario');
 
 const KEEP_ALIVE_URL = process.env.RENDER_URL || 'https://mentra-nightscout.onrender.com';
 server.app.get('/health', (_, res) => res.json({
