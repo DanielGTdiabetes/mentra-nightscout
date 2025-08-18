@@ -173,7 +173,7 @@ __speedMult(speed){ return speed==='slow' ? 1.35 : (speed==='fast' ? 0.75 : 1.0)
         display_duration_ms, alert_duration_ms, alert_cooldown_ms,
         enable_advanced_mode, advanced_mode_enabled,
         tir_low_mg, tir_high_mg, tir_low_mmol, tir_high_mmol,
-        time_in_range_low_mg, time_in_range_high_mg, time_in_range_low_mmol, time_in_range_high_mmol, prediction_horizon_min, prediction_horizon_mins] = await Promise.all([
+        time_in_range_low_mg, time_in_range_high_mg, time_in_range_low_mmol, time_in_range_high_mmol, prediction_horizon_min, prediction_horizon_mins, prediction_mode] = await Promise.all([
         session.settings.get('nightscout_url'),
         session.settings.get('nightscout_token'),
         session.settings.get('update_interval'),
@@ -205,6 +205,8 @@ __speedMult(speed){ return speed==='slow' ? 1.35 : (speed==='fast' ? 0.75 : 1.0)
         session.settings.get('time_in_range_low_mmol'),
         session.settings.get('time_in_range_high_mmol'),
         session.settings.get('debug_force_alert'),
+      
+        session.settings.get('prediction_mode'),
       ]);
 
       const uiMin = parseInt(updateInterval, 10);
@@ -253,7 +255,9 @@ __speedMult(speed){ return speed==='slow' ? 1.35 : (speed==='fast' ? 0.75 : 1.0)
         time_in_range_low_mmol: this.normalizeMmol(time_in_range_low_mmol),
         time_in_range_high_mmol: this.normalizeMmol(time_in_range_high_mmol),
             prediction_horizon_min: [15,30,60].includes(Number(prediction_horizon_min || prediction_horizon_mins)) ? Number(prediction_horizon_min || prediction_horizon_mins) : 30,
-          debug_force_alert: (typeof debug_force_alert==='string'? debug_force_alert : null),
+          
+        prediction_mode: (String(prediction_mode || 'threshold').toLowerCase()==='always' ? 'always' : 'threshold'),
+debug_force_alert: (typeof debug_force_alert==='string'? debug_force_alert : null),
     };
     } catch (e) {
       console.error('Error leyendo settings:', e);
@@ -321,6 +325,7 @@ __speedMult(speed){ return speed==='slow' ? 1.35 : (speed==='fast' ? 0.75 : 1.0)
       time_in_range_low_mmol: this.normalizeMmol(o.time_in_range_low_mmol),
       time_in_range_high_mmol: this.normalizeMmol(o.time_in_range_high_mmol),
           prediction_horizon_min: [15,30,60].includes(Number(o.prediction_horizon_min || o.prediction_horizon_mins)) ? Number(o.prediction_horizon_min || o.prediction_horizon_mins) : 30,
+      prediction_mode: (String(o.prediction_mode || 'threshold').toLowerCase()==='always' ? 'always' : 'threshold'),
     };
   }
 
@@ -360,21 +365,43 @@ __speedMult(speed){ return speed==='slow' ? 1.35 : (speed==='fast' ? 0.75 : 1.0)
   }
 
   // Añade la predicción al final de la línea 2 del header
+  
   async formatForG1WithPrediction(data, settings) {
     try {
-      const base = await this.formatForG1(data, settings);  // ✅ base sin predicción
+      const base = await this.formatForG1(data, settings);  // base sin predicción
       let horizonMin = Number(settings.prediction_horizon_min || settings.prediction_horizon_mins || 30);
       if (!Number.isFinite(horizonMin) || horizonMin <= 0) horizonMin = 30;
 
-      const predShort = await this.buildPredictionShort(settings, horizonMin);
-      if (!predShort) return base;
+      const mode = (settings.prediction_mode || 'threshold');
+      let predText = null;
+      if (mode === 'threshold') {
+        const hit = await this.findThresholdCrossing(settings, horizonMin);
+        if (hit) {
+          const unit = settings.units || UNITS.MGDL;
+          const val = this.convertToDisplay(hit.mgdl, unit);
+          if ((settings.language || 'en') === 'es') {
+            predText = hit.type === 'low' ? `Baja ${val} @${hit.minutes}m` : `Alta ${val} @${hit.minutes}m`;
+          } else {
+            predText = hit.type === 'low' ? `Low ${val} @${hit.minutes}m` : `High ${val} @${hit.minutes}m`;
+          }
+        }
+      } else {
+        const predShort = await this.buildPredictionShort(settings, horizonMin);
+        predText = predShort || null;
+      }
 
+      if (!predText) return base;
       const parts = base.split('\n');
       const l1 = parts[0] || '';
       const l2 = (parts.length > 1 ? parts[1] : '');
-      const sep = ' · ';
       const rest = parts.slice(2);
-      return `${l1}\n${l2}${sep}${predShort}${rest.length ? `\n${rest.join('\n')}` : ''}`;
+      const sep = ' · ';
+      return `${l1}\n${l2}${sep}${predText}${rest.length ? `\n${rest.join('\n')}` : ''}`;
+    } catch (_) {
+      return await this.formatForG1(data, settings);
+    }
+  }
+\n${l2}${sep}${predShort}${rest.length ? `\n${rest.join('\n')}` : ''}`;
     } catch (_) {
       return await this.formatForG1(data, settings);        // ✅ fallback sin recursión
     }
@@ -394,7 +421,72 @@ __speedMult(speed){ return speed==='slow' ? 1.35 : (speed==='fast' ? 0.75 : 1.0)
     if (!base) return null;
     if (!base.startsWith('http')) base = 'https://' + base;
     base = base.replace(/\/$/, '');
-    const params = settings.nightscoutToken ? { token: settings.nightscoutToken } : {};
+    const params = settings.nightscoutToken ? { token: settings.nightscoutToken }
+
+  // New: find first threshold crossing within horizon; prefers devicestatus series; fallback to linear slope
+  async findThresholdCrossing(settings, horizonMin = 30) {
+    const limits = this.getAlertLimits(settings);
+    // Try devicestatus series first
+    try {
+      let base = (settings.nightscoutUrl || '').trim();
+      if (!base) throw new Error('no base');
+      if (!base.startsWith('http')) base = 'https://' + base;
+      base = base.replace(/\/$/, '');
+      const params = settings.nightscoutToken ? { token: settings.nightscoutToken } : {};
+      const headers = { 'User-Agent': 'MentraOS-Nightscout/2.10.0' };
+      const { data } = await axios.get(`${base}/api/v1/devicestatus.json?count=10`, { params, timeout: 8000, headers });
+      const arr = Array.isArray(data) ? data : (data ? [data] : []);
+      for (const ds of arr) {
+        const predBGs = (ds && (ds.predBGs || ds?.openaps?.suggested?.predBGs || ds?.ar2?.predBGs)) || null;
+        if (!predBGs) continue;
+        const series = predBGs.IOB || predBGs.COB || predBGs.UAM || predBGs.ZT || (Array.isArray(predBGs) ? predBGs : null);
+        if (series && Array.isArray(series) && series.length >= 2) {
+          const maxIdx = Math.min(series.length - 1, Math.round(horizonMin / 5));
+          let best = null;
+          for (let i = 1; i <= maxIdx; i++) {
+            const mg = Number(series[i]);
+            if (!Number.isFinite(mg)) continue;
+            if (mg <= limits.low) { best = { type: 'low', mgdl: mg, minutes: i*5 }; break; }
+            if (mg >= limits.high) { best = { type: 'high', mgdl: mg, minutes: i*5 }; break; }
+          }
+          if (best) return best;
+        }
+      }
+    } catch (_) { /* ignore */ }
+
+    // Fallback: linear projection from last two entries
+    try {
+      let base = (settings.nightscoutUrl || '').trim();
+      if (!base) throw new Error('no base');
+      if (!base.startsWith('http')) base = 'https://' + base;
+      base = base.replace(/\/$/, '');
+      const params = settings.nightscoutToken ? { token: settings.nightscoutToken } : {};
+      const headers = { 'User-Agent': 'MentraOS-Nightscout/2.10.0' };
+      const { data } = await axios.get(`${base}/api/v1/entries.json?count=4`, { params, timeout: 8000, headers });
+      const arr = Array.isArray(data) ? data : (data ? [data] : []);
+      if (arr.length >= 2) {
+        const a = arr[0], b = arr[1];
+        const mgNow = Number(a.sgv ?? a.glucose);
+        const tNow = new Date(a.dateString || a.date || a.mills || a.sysTime).getTime();
+        const mgPrev = Number(b.sgv ?? b.glucose);
+        const tPrev = new Date(b.dateString || b.date || b.mills || b.sysTime).getTime();
+        if (Number.isFinite(mgNow) && Number.isFinite(mgPrev) && Number.isFinite(tNow) && Number.isFinite(tPrev) && tNow > tPrev) {
+          const ratePerMin = (mgNow - mgPrev) / ((tNow - tPrev) / 60000);
+          if (ratePerMin < -0.01 && mgNow > limits.low) {
+            const mins = (mgNow - limits.low) / (-ratePerMin);
+            if (mins >= 0 && mins <= horizonMin) return { type: 'low', mgdl: limits.low, minutes: Math.round(mins) };
+          }
+          if (ratePerMin > 0.01 && mgNow < limits.high) {
+            const mins = (limits.high - mgNow) / (ratePerMin);
+            if (mins >= 0 && mins <= horizonMin) return { type: 'high', mgdl: limits.high, minutes: Math.round(mins) };
+          }
+        }
+      }
+    } catch (_) { /* ignore */ }
+
+    return null;
+  }
+ : {};
     const headers = { 'User-Agent': 'MentraOS-Nightscout/2.10.0' };
 
     // 1) Try devicestatus for predBGs
