@@ -103,36 +103,38 @@ class NightscoutMentraApp extends AppServer {
     return { low: Math.round(lowM * 18), high: Math.round(highM * 18) };
   }
 
-  getHysteresisMg(settings) { // Devuelve histeresis en mg/dL
-  // 1) Si viene en mg/dL, prioridad total
+  getHysteresisMg(settings) {
+  // Lee candidatos
   const mg = this.validateSlicerValue(settings.alert_hysteresis_mg, 0, 50, NaN);
-  if (Number.isFinite(mg)) return mg;
 
-  // 2) Intentar mmol (la consola puede no aceptar decimales)
+  // mmol puede venir sin decimales (x10) o con decimales según UI
   const raw = this.parseSlicerValue(settings.alert_hysteresis_mmol, NaN);
+  let mmol = NaN;
   if (Number.isFinite(raw)) {
-    let mmol = raw;
-
-    // Aceptamos dos notaciones:
-    //  - Decimal normal (ej.: 0.3) -> usar tal cual
-    //  - Entero "x10" (ej.: 3 -> 0.3)
     if (Number.isInteger(raw)) {
-      // Casos pequeños típicos de histeresis (0.1–1.0 mmol) guardados como 1..10
-      if (raw <= 10 && raw >= 0) {
-        mmol = raw / 10;
-      }
-      // Por compatibilidad con el estilo de "x10" grande (39->3.9) si alguien lo usara aquí
-      else if (raw >= 30) {
-        mmol = raw / 10;
-      }
-      // Si meten un entero "raro" (11..29), lo tomamos como mmol ya en unidades reales
+      // Consola sin decimales: 0..10 => 0.0..1.0  (p.ej. 3 => 0.3 mmol)
+      if (raw >= 0 && raw <= 10) mmol = raw / 10;
+      // Compatibilidad con “x10 grande” (39 => 3.9) si alguien lo usa aquí
+      else if (raw >= 30) mmol = raw / 10;
+      else mmol = raw; // enteros raros: tratamos como mmol real
+    } else {
+      mmol = raw; // ya decimal (si alguna UI lo permite)
     }
-
-    return Math.round(mmol * 18);
   }
+  const mmolAsMg = Number.isFinite(mmol) ? Math.round(mmol * 18) : NaN;
 
-  // 3) Fallback seguro
-  return 5; // ±5 mg/dL por defecto
+  const units = String(settings.units || '').toLowerCase();
+
+  // PRIORIDAD POR UNIDAD SELECCIONADA
+  if (units.includes('mmol')) {        // mmol/L => usa mmol primero
+    if (Number.isFinite(mmolAsMg)) return mmolAsMg;
+    if (Number.isFinite(mg))        return mg;
+    return 5; // fallback
+  } else {                            // mg/dL (o desconocida) => usa mg primero
+    if (Number.isFinite(mg))        return mg;
+    if (Number.isFinite(mmolAsMg))  return mmolAsMg;
+    return 5; // fallback
+  }
 }
 
   /* ---------- lectura de settings ---------- */
