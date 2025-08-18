@@ -45,6 +45,87 @@ class NightscoutMentraApp extends AppServer {
   }
 
   /* ---------- helpers ---------- */
+
+  __delay(ms) { return new Promise(res => setTimeout(res, ms)); }
+  __clamp01(x){ return x < 0 ? 0 : (x > 1 ? 1 : x); }
+  __speedMult(speed){ return speed==='slow' ? 1.35 : (speed==='fast' ? 0.75 : 1.0); }
+  __barFromRatio(ratio, slots){
+    const n = Math.round(this.__clamp01(ratio) * slots);
+    const filled = '│'.repeat(n);
+    const empty  = '·'.repeat(Math.max(0, slots - n));
+    return `[${filled}${empty}]`;
+  }
+
+  /**
+   * Animate TIR bar from 0 → tirPct.
+   * Cancels if a newer render starts (token check).
+   */
+  
+  async animateTIRFill(session, sessionId, s, headerText, tirPct, tLine='', extraLine=''){
+    try {
+      const showBar = !!s.show_tir_bar;
+      const anims   = s.enable_animations !== false;
+      if (!showBar || !anims || tirPct == null || !Number.isFinite(tirPct)){
+        const bar = showBar && tirPct != null ? ' ' + this.__barFromRatio(tirPct/100, Number(s.tir_slots)||16) : '';
+        const tirLine = tirPct == null ? (s.language==='es' ? 'TIR hoy: n/d' : 'TIR: n/a') : (s.language==='es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
+        const line2 = `${tirLine}${bar}` + (tLine ? `\n${tLine}` : '');
+        const out = extraLine ? `${headerText}\n${line2}\n${extraLine}` : `${headerText}\n${line2}`;
+        this.showClamped(session, sessionId, out);
+        return;
+      }
+      if (!this._renderToken) this._renderToken = new Map();
+      const token = (this._renderToken.get(sessionId) || 0) + 1;
+      this._renderToken.set(sessionId, token);
+
+      const slots   = Math.max(8, Number(s.tir_slots) || 16);
+      const leadIn  = Number(s.tir_leadin_ms) || 220;
+      const speedM  = this.__speedMult(String(s.animation_speed||'normal'));
+      const totalMs = Math.max(300, Math.min(2000, Math.round((Number(s.tir_anim_ms)||800) * speedM)));
+      const target  = Math.floor(this.__clamp01(tirPct/100) * slots);
+
+      const tirLine = (s.language==='es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
+      const base = (filled) => {
+        return `${headerText}\n${tirLine} ${this.__barFromRatio(filled/slots, slots)}`
+          + (tLine ? `\n${tLine}` : '')
+          + (extraLine ? `\n${extraLine}` : '');
+      };
+
+      this.showClamped(session, sessionId, base(0));
+      if (leadIn>0){
+        const t0 = Date.now();
+        while (Date.now()-t0 < leadIn){
+          if (this._renderToken.get(sessionId) !== token) return;
+          await this.__delay(30);
+        }
+      }
+
+      const tStart = Date.now();
+      let last = -1;
+      while (true){
+        if (this._renderToken.get(sessionId) !== token) return;
+        const t = (Date.now() - tStart) / totalMs;
+        const clamped = Math.max(0, Math.min(1, t));
+        const eased = clamped*clamped*clamped;
+        const filled = Math.min(target, Math.floor(eased * target));
+        if (filled !== last){
+          this.showClamped(session, sessionId, base(filled));
+          last = filled;
+        }
+        if (clamped >= 1) break;
+        await this.__delay(60);
+      }
+      this.showClamped(session, sessionId, base(target));
+    } catch (_) {
+      try {
+        const bar = this.__barFromRatio((tirPct||0)/100, Number(s.tir_slots)||16);
+        const tirLine = tirPct == null ? (s.language==='es' ? 'TIR hoy: n/d' : 'TIR: n/a') : (s.language==='es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
+        const line2 = `${tirLine} ${bar}` + (tLine ? `\n${tLine}` : '');
+        const out = extraLine ? `${headerText}\n${line2}\n${extraLine}` : `${headerText}\n${line2}`;
+        this.showClamped(session, sessionId, out);
+      } catch {}
+    }
+  }
+
   parseSlicerValue(val, fallback) {
     const n = (typeof val === 'object' && val !== null) ? parseFloat(val.value) : parseFloat(val);
     return Number.isFinite(n) ? n : fallback;
@@ -72,10 +153,8 @@ class NightscoutMentraApp extends AppServer {
   }
 
   /* ---------- lectura de settings ---------- */
-  async getUserSettings(session){
-    try{
-      const mgr = await this.waitForSettings(session, 2500);
-      const safe = async (k)=> await this.safeSettingGet(session, k);
+  async getUserSettings(session) {
+    try {
       const [
         url, token, updateInterval,
         lowMg, highMg, lowMmol, highMmol,
@@ -88,67 +167,75 @@ class NightscoutMentraApp extends AppServer {
         tir_low_mg, tir_high_mg, tir_low_mmol, tir_high_mmol,
         time_in_range_low_mg, time_in_range_high_mg, time_in_range_low_mmol, time_in_range_high_mmol,
       ] = await Promise.all([
-        safe('nightscout_url'),
-        safe('nightscout_token'),
-        safe('update_interval_sec'),
-        safe('low_alert_mg'),
-        safe('high_alert_mg'),
-        safe('low_alert_mmol'),
-        safe('high_alert_mmol'),
-        safe('alerts_enabled'),
-        safe('language'),
-        safe('timezone'),
-        safe('units'),
-        safe('enable_head_up_display'),
-        safe('display_duration_s'),
-        safe('alert_duration_s'),
-        safe('alert_cooldown_min'),
-        safe('show_tir_bar'),
-        safe('show_range_bar'),
-        safe('display_duration_ms'),
-        safe('alert_duration_ms'),
-        safe('alert_cooldown_ms'),
-        safe('enable_advanced_mode'),
-        safe('advanced_mode_enabled'),
-        safe('tir_low_mg'),
-        safe('tir_high_mg'),
-        safe('tir_low_mmol'),
-        safe('tir_high_mmol'),
-        safe('time_in_range_low_mg'),
-        safe('time_in_range_high_mg'),
-        safe('time_in_range_low_mmol'),
-        safe('time_in_range_high_mmol'),
+        session.settings.get('nightscout_url'),
+        session.settings.get('nightscout_token'),
+        session.settings.get('update_interval'),
+        session.settings.get('low_alert_mg'),
+        session.settings.get('high_alert_mg'),
+        session.settings.get('low_alert_mmol'),
+        session.settings.get('high_alert_mmol'),
+        session.settings.get('alerts_enabled'),
+        session.settings.get('language'),
+        session.settings.get('timezone'),
+        session.settings.get('units'),
+        session.settings.get('enable_head_up_display'),
+        session.settings.get('display_duration_s'),
+        session.settings.get('alert_duration_s'),
+        session.settings.get('alert_cooldown_min'),
+        session.settings.get('show_tir_bar'),
+        session.settings.get('show_range_bar'),
+        session.settings.get('display_duration_ms'),
+        session.settings.get('alert_duration_ms'),
+        session.settings.get('alert_cooldown_ms'),
+        session.settings.get('enable_advanced_mode'),
+        session.settings.get('advanced_mode_enabled'),
+        session.settings.get('tir_low_mg'),
+        session.settings.get('tir_high_mg'),
+        session.settings.get('tir_low_mmol'),
+        session.settings.get('tir_high_mmol'),
+        session.settings.get('time_in_range_low_mg'),
+        session.settings.get('time_in_range_high_mg'),
+        session.settings.get('time_in_range_low_mmol'),
+        session.settings.get('time_in_range_high_mmol'),
       ]);
 
-      const uiMin = parseInt(updateInterval ?? 60, 10);
-      const ui = Number.isFinite(uiMin) ? Math.max(20, Math.min(300, uiMin)) : 60;
-      const lang = (language === 'es' || language === 'en') ? language : 'en';
-      const unit = (String(units||'mg/dL').toLowerCase().includes('mmol')) ? 'mmol/L' : 'mg/dL';
+      const uiMin = parseInt(updateInterval, 10);
+      const ui = Number.isFinite(uiMin) ? uiMin : 5;
 
-      const displayMs = Number(display_duration_ms ?? (display_duration_s*1000)) || 5000;
-      const alertMs   = Number(alert_duration_ms ?? (alert_duration_s*1000)) || 15000;
-      const coolMs    = Number(alert_cooldown_ms ?? (alert_cooldown_min*60000)) || 600000;
+      const displayMs = Number.isFinite(this.parseSlicerValue(display_duration_s, NaN))
+        ? Math.min(15, Math.max(1, this.parseSlicerValue(display_duration_s))) * 1000
+        : this.validateSlicerValue(display_duration_ms, 1000, 15000, 5000);
 
-      const showTirBar = (show_tir_bar !== false); // default true
+      const alertMs = Number.isFinite(this.parseSlicerValue(alert_duration_s, NaN))
+        ? Math.min(60, Math.max(2, this.parseSlicerValue(alert_duration_s))) * 1000
+        : this.validateSlicerValue(alert_duration_ms, 2000, 60000, 15000);
+
+      const coolMs = Number.isFinite(this.parseSlicerValue(alert_cooldown_min, NaN))
+        ? Math.min(60, Math.max(1, this.parseSlicerValue(alert_cooldown_min))) * 60 * 1000
+        : this.validateSlicerValue(alert_cooldown_ms, 60000, 3600000, 600000);
+
+      const showTirBar = (show_tir_bar === null && show_range_bar === null)
+        ? true
+        : (this.toBool(show_tir_bar) || this.toBool(show_range_bar));
 
       return {
-        nightscoutUrl: url || '',
-        nightscoutToken: token || '',
-        update_interval_sec: ui,
-        low_alert_mg: Number(lowMg ?? 70),
-        high_alert_mg: Number(highMg ?? 180),
+        nightscoutUrl: String(url || '').trim() || '',
+        nightscoutToken: String(token || '').trim() || '',
+        updateInterval: ui,
+        low_alert_mg: this.validateSlicerValue(lowMg, 40, 90, 70),
+        high_alert_mg: this.validateSlicerValue(highMg, 180, 400, 250),
         low_alert_mmol: this.normalizeMmol(lowMmol) ?? 3.9,
         high_alert_mmol: this.normalizeMmol(highMmol) ?? 13.9,
-        alertsEnabled: !!alertsEnabled || alertsEnabled === undefined,
-        language: lang,
+        alertsEnabled: this.toBool(alertsEnabled),
+        language: language || 'en',
         timezone: timezone || null,
-        units: unit,
-        enable_head_up_display: enable_head_up_display !== false,
+        units: units || UNITS.MGDL,
+        enable_head_up_display: this.toBool(enable_head_up_display),
         display_duration_ms: displayMs,
         alert_duration_ms: alertMs,
         alert_cooldown_ms: coolMs,
         show_tir_bar: showTirBar,
-        enable_advanced_mode: !!(enable_advanced_mode || advanced_mode_enabled),
+        enable_advanced_mode: this.toBool(enable_advanced_mode) || this.toBool(advanced_mode_enabled),
         tir_low_mg: this.parseSlicerValue(tir_low_mg, null),
         tir_high_mg: this.parseSlicerValue(tir_high_mg, null),
         tir_low_mmol: this.normalizeMmol(tir_low_mmol),
@@ -158,29 +245,6 @@ class NightscoutMentraApp extends AppServer {
         time_in_range_low_mmol: this.normalizeMmol(time_in_range_low_mmol),
         time_in_range_high_mmol: this.normalizeMmol(time_in_range_high_mmol),
       };
-    }catch(e){
-      try{ console.error('getUserSettings failed, using defaults', e?.message || e); }catch(_){}
-      return {
-        nightscoutUrl: '',
-        nightscoutToken: '',
-        update_interval_sec: 60,
-        low_alert_mg: 70,
-        high_alert_mg: 180,
-        low_alert_mmol: 3.9,
-        high_alert_mmol: 13.9,
-        alertsEnabled: true,
-        language: 'en',
-        timezone: null,
-        units: 'mg/dL',
-        enable_head_up_display: true,
-        display_duration_ms: 5000,
-        alert_duration_ms: 15000,
-        alert_cooldown_ms: 600000,
-        show_tir_bar: true,
-        enable_advanced_mode: true
-      };
-    }
-  };
     } catch (e) {
       console.error('Error leyendo settings:', e);
       return {
@@ -277,7 +341,7 @@ class NightscoutMentraApp extends AppServer {
     const langSettings = this.getLanguageSettings(settings);
     const tz = settings.timezone ? this.validateTimezone(settings.timezone) : langSettings.timezone;
     const readingTime = new Date(data.date);
-    const timeStr = readingTime.toLocaleTimeString(langSettings.locale, { timeZone: tz, hour: '2-digit', minute: '2-digit' });
+    const timeStr = readingTime.toLocaleTimeString(langSettings.locale, { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false });
     const minutesAgo = Math.floor((Date.now() - data.date) / 60000);
     const lang = settings.language || 'en';
     const timeAgo = minutesAgo <= 1 ? (lang === 'es' ? 'ahora' : 'now') : (lang === 'es' ? `hace ${minutesAgo}m` : `${minutesAgo}m ago`);
@@ -297,7 +361,7 @@ class NightscoutMentraApp extends AppServer {
       const parts = base.split('\n');
       const l1 = parts[0] || '';
       const l2 = (parts.length > 1 ? parts[1] : '');
-      const sep = '   ·   ';
+      const sep = ' · ';
       const rest = parts.slice(2);
       return `${l1}\n${l2}${sep}${predShort}${rest.length ? `\n${rest.join('\n')}` : ''}`;
     } catch (_) {
@@ -312,7 +376,7 @@ class NightscoutMentraApp extends AppServer {
    */
   async buildPredictionShort(settings, horizonMin = 30) {
     const unit = settings.units || UNITS.MGDL;
-    const fmt = (mgdl) => this.convertToDisplay(mgdl, unit) + ' ' + unit + ` @${horizonMin}m`;
+    const fmt = (mgdl) => this.convertToDisplay(mgdl, unit) + ` @${horizonMin}m`;
 
     // Normalize base URL
     let base = (settings.nightscoutUrl || '').trim();
@@ -454,7 +518,7 @@ class NightscoutMentraApp extends AppServer {
     if (last && (Number.isFinite(last.carbs) || Number.isFinite(last.insulin))) {
       const langSettings = this.getLanguageSettings(settings);
       const tz = settings.timezone ? this.validateTimezone(settings.timezone) : langSettings.timezone;
-      const t = new Date(last.ts).toLocaleTimeString(langSettings.locale, { timeZone: tz, hour: '2-digit', minute: '2-digit' });
+      const t = new Date(last.ts).toLocaleTimeString(langSettings.locale, { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false });
       const parts = [];
       if (Number.isFinite(last.carbs)) parts.push(`${round1(last.carbs)}g`);
       if (Number.isFinite(last.insulin)) parts.push(`${round1(last.insulin)}U`);
@@ -528,21 +592,18 @@ class NightscoutMentraApp extends AppServer {
   }
 
   /* ---------- ciclo de vida ---------- */
-  async onSession(session, sessionId, userId){
+  async onSession(session, sessionId, userId) {
     console.log(`🚀 Nueva sesión: ${sessionId} para ${userId}`);
+    if (typeof session.updateSettingsForTesting !== 'function') {
+      session.updateSettingsForTesting = async () => { session.logger?.debug?.('Compat shim: updateSettingsForTesting noop'); };
+    }
     session.logger?.info('Session started', { userId, sessionId });
 
-    // Loading diferido para evitar flash si todo va rápido
-    try { this.showClamped(session, sessionId, ''); } catch(_) {}
     let settings = null;
     try {
-      // esperamos a que settings esté listo (mentraOS puede no enviar mentraosSettings en ACK al principio)
-      await this.waitForSettings(session, 2500);
       settings = await this.getUserSettings(session);
-      if (!settings.nightscoutUrl || !settings.nightscoutToken) {
-        const msg = { en: 'Please configure Nightscout
-URL and token in settings', es: 'Configura URL y token
-de Nightscout en ajustes' };
+      if (!settings.nightscoutUrl) {
+        const msg = { en: 'Please configure Nightscout\nURL and token in settings', es: 'Configura URL y token\nde Nightscout en ajustes' };
         this.showClamped(session, sessionId, msg[settings.language || 'en']);
         return;
       }
@@ -605,8 +666,7 @@ de Nightscout en ajustes' };
         const bar = !this.toBool(settings.show_tir_bar) || tirPct === null ? '' : this.buildTirBar(tirPct);
         let tLine = '';
         try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {}
-        this.showClamped(session, sessionId, `${formattedData}
-${this.composeTirLines(settings, tirLine, bar, tLine)}`);
+        await this.animateTIRFill(session, sessionId, settings, formattedData, tirPct, tLine);
       } else {
         this.showClamped(session, sessionId, formattedData);
       }
@@ -659,6 +719,9 @@ ${this.composeTirLines(settings, tirLine, bar, tLine)}`);
           sd.settings = settings;
           this.activeSessions.set(sessionId, sd);
           try {
+            // Trigger immediate alert re-check with new limits
+            try { const dNow = await this.getGlucoseData(settings); await this.checkAlerts(session, sessionId, dNow, settings);} catch(_){ }
+
             const savedMsg = (settings.language === 'es') ? 'Ajustes guardados' : 'Settings saved';
 const lowLbl = (settings.language === 'es') ? 'Bajo' : 'Low';
 const highLbl = (settings.language === 'es') ? 'Alto' : 'High';
@@ -720,11 +783,10 @@ if (settings.units === UNITS.MMOL) {
           let tLine = '';
           try { const sum = await this.getRecentTreatments(s, 'day'); tLine = this.formatTreatmentsLine(sum, s); } catch {}
           const line2 = this.composeTirLines(s, tirLine, bar, tLine);
-          const out = minMaxLine ? `${baseLine}\n${line2}\n${minMaxLine}` : `${baseLine}\n${line2}`;
-          this.showClamped(session, sessionId, out);
+          await this.animateTIRFill(session, sessionId, s, baseLine, tirPct, tLine, minMaxLine);
           setTimeout(() => this.hideDisplay(session, sessionId), s.display_duration_ms || 4000);
         } catch (e) {
-          this.showClamped(session, sessionId, 'Error');
+          this.showClamped(session, sessionId, (s.language==='es' ? 'Error al mostrar' : 'Display error'));
           setTimeout(() => this.hideDisplay(session, sessionId), 2000);
         }
       });
@@ -750,17 +812,7 @@ if (settings.units === UNITS.MMOL) {
       const settings = providedSettings || sd.settings || await this.getUserSettings(sd.session);
       const data = await this.getGlucoseData(settings);
       const { tirPct } = this.updateDailyTirState(sessionId, data.sgv, data.date, settings);
-      if (settings.enable_advanced_mode) {
-        const header = await this.formatForG1WithPrediction(data, settings);
-        const tirLine = tirPct === null
-          ? (settings.language === 'es' ? 'TIR hoy: n/d' : 'TIR: n/a')
-          : (settings.language === 'es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
-        const bar = !this.toBool(settings.show_tir_bar) || tirPct === null ? '' : this.buildTirBar(tirPct);
-        let tLine = '';
-        try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {}
-        this.showClamped(session, sessionId, `${header}
-${this.composeTirLines(settings, tirLine, bar, tLine)}`);
-      } else {
+      if (settings.enable_advanced_mode) { const header = await this.formatForG1WithPrediction(data, settings); const tirLine = tirPct === null ? (settings.language === 'es' ? 'TIR hoy: n/d' : 'TIR: n/a') : (settings.language === 'es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`); let tLine = ''; try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {} await this.animateTIRFill(session, sessionId, settings, header, tirPct, tLine); } else {
         this.showClamped(session, sessionId, await this.formatForG1WithPrediction(data, settings));
       }
       const timer = setTimeout(() => this.hideDisplay(session, sessionId), ms);
@@ -882,24 +934,6 @@ ${this.composeTirLines(settings, tirLine, bar, tLine)}`);
     if (value > 250) return lang === 'es' ? 'Crítico Alto' : 'Critical High';
     if (value >= limits.high) return lang === 'es' ? 'Alto' : 'High';
     return lang === 'es' ? 'Normal' : 'Normal';
-  }
-
-  // ---- Robust settings handling ----
-  async waitForSettings(session, timeoutMs = 2500){
-    const t0 = Date.now();
-    while (Date.now() - t0 < timeoutMs){
-      if (session && session.settings && typeof session.settings.get === 'function'){
-        return session.settings;
-      }
-      await new Promise(r=>setTimeout(r, 80));
-    }
-    return null;
-  }
-  async safeSettingGet(session, key){
-    try{
-      if (!session || !session.settings || typeof session.settings.get !== 'function') return null;
-      return await session.settings.get(key);
-    }catch(_){ return null; }
   }
 }
 
