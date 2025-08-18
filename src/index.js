@@ -1,10 +1,10 @@
 "use strict";
 /**
- * Nightscout MentraOS v2.12.0 (TIR invariant + Horizon-aware Prediction)
+ * Nightscout MentraOS v2.12.1 (TIR invariant + Horizon-aware Prediction + perf tweaks)
  * HUD texto + TIR-bar ¦ CH/Ins día + Min/Max sólo gesto ¦ reset diario
  * ES/EN + mg/dL/mmol ¦ 5 líneas max ¦ cache last-good-entry
  * Settings en segundos/minutos + toggle barra TIR
- * Mejora: TIR invariante a unidad + predicción usa límites reales y horizonte
+ * Mejora: cliente axios por sesión, debounce de settings, animación reforzada
  */
 
 require('dotenv').config();
@@ -27,7 +27,7 @@ const PORT = parseInt(process.env.PORT || '3000', 10);
 const MENTRAOS_API_KEY = process.env.MENTRAOS_API_KEY;
 
 if (!MENTRAOS_API_KEY) {
-  console.error('? MENTRAOS_API_KEY environment variable is required');
+  console.error('⛔ MENTRAOS_API_KEY environment variable is required');
   process.exit(1);
 }
 
@@ -43,17 +43,17 @@ class NightscoutMentraApp extends AppServer {
     this.dailyTirState = new Map();
     this.dayWatchTimers = new Map();
     this.lastGoodEntry = new Map();
-    this._renderToken = new Map(); // v2.12
-    this._lastShownText = new Map(); // v2.12 (desaturar render)
+    this._renderToken = new Map();
+    this._lastShownText = new Map();
+    this._http = new Map();             // NEW: cliente axios por sesión
+    this._settingsDebounce = new Map(); // NEW: debounce settings
+    this._sessionLocale = new Map();    // cache locale/tz por sesión
   }
 
   /* ---------- helpers ---------- */
   __delay(ms) { return new Promise(res => setTimeout(res, ms)); }
   __clamp01(x){ return x < 0 ? 0 : (x > 1 ? 1 : x); }
-
-  __easeInOutCubic(t){
-    return t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t + 2, 3)/2;
-  }
+  __easeInOutCubic(t){ return t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t + 2, 3)/2; }
   __getEasingFunction(type = 'cubic'){
     if (type === 'smooth') return (t)=> t*t*(3 - 2*t);
     if (type === 'linear') return (t)=> t;
@@ -65,6 +65,11 @@ class NightscoutMentraApp extends AppServer {
     const empty  = '·'.repeat(Math.max(0, slots - n));
     return `[${filled}${empty}]`;
   }
+  _scheduleHide(sessionId, ms){
+    if (this.displayTimers.has(sessionId)) clearTimeout(this.displayTimers.get(sessionId));
+    const t = setTimeout(() => this.hideDisplay(this.activeSessions.get(sessionId)?.session, sessionId), ms);
+    this.displayTimers.set(sessionId, t);
+  }
 
   parseSlicerValue(val, fallback) {
     const n = (typeof val === 'object' && val !== null) ? parseFloat(val.value) : parseFloat(val);
@@ -74,9 +79,7 @@ class NightscoutMentraApp extends AppServer {
     const v = this.parseSlicerValue(val, fallback);
     return Number.isFinite(v) ? Math.max(min, Math.min(max, v)) : fallback;
   }
-  toBool(x) {
-    return (x === true || x === 'true' || x === 1 || x === '1');
-  }
+  toBool(x) { return (x === true || x === 'true' || x === 1 || x === '1'); }
   normalizeMmol(x) {
     const v = this.parseSlicerValue(x, null);
     // UI mmol viene x10 (p.ej. 39 = 3.9)
@@ -84,7 +87,7 @@ class NightscoutMentraApp extends AppServer {
   }
 
   /* ---------- alertas / límites ---------- */
-  // v2.12: Hacemos el TIR invariante a unidad -> prioriza mg/dL; si faltan, usa mmol convertidos
+  // TIR invariante a unidad -> prioriza mg/dL; si faltan, usa mmol convertidos
   getAlertLimits(settings) {
     const lowMg  = this.parseSlicerValue(settings.low_alert_mg, NaN);
     const highMg = this.parseSlicerValue(settings.high_alert_mg, NaN);
@@ -99,104 +102,73 @@ class NightscoutMentraApp extends AppServer {
   /* ---------- lectura de settings ---------- */
   async getUserSettings(session) {
     try {
-      const [
-        url, token, updateInterval,
-        lowMg, highMg, lowMmol, highMmol,
-        alertsEnabled, language, timezone, units,
-        enable_head_up_display,
-        display_duration_s, alert_duration_s, alert_cooldown_min,
-        show_tir_bar, show_range_bar,
-        display_duration_ms, alert_duration_ms, alert_cooldown_ms,
-        enable_advanced_mode, advanced_mode_enabled,
-        // (legacy no usados pero no rompen)
-        tir_low_mg, tir_high_mg, tir_low_mmol, tir_high_mmol,
-        time_in_range_low_mg, time_in_range_high_mg, time_in_range_low_mmol, time_in_range_high_mmol,
-        prediction_horizon_min, prediction_horizon_mins,
-        debug_force_alert // v2.12: estaba sin desestructurar -> ReferenceError
-      ] = await Promise.all([
-        session.settings.get('nightscout_url'),
-        session.settings.get('nightscout_token'),
-        session.settings.get('update_interval'),
-        session.settings.get('low_alert_mg'),
-        session.settings.get('high_alert_mg'),
-        session.settings.get('low_alert_mmol'),
-        session.settings.get('high_alert_mmol'),
-        session.settings.get('alerts_enabled'),
-        session.settings.get('language'),
-        session.settings.get('timezone'),
-        session.settings.get('units'),
-        session.settings.get('enable_head_up_display'),
-        session.settings.get('display_duration_s'),
-        session.settings.get('alert_duration_s'),
-        session.settings.get('alert_cooldown_min'),
-        session.settings.get('show_tir_bar'),
-        session.settings.get('show_range_bar'),
-        session.settings.get('display_duration_ms'),
-        session.settings.get('alert_duration_ms'),
-        session.settings.get('alert_cooldown_ms'),
-        session.settings.get('enable_advanced_mode'),
-        session.settings.get('advanced_mode_enabled'),
-        session.settings.get('tir_low_mg'),
-        session.settings.get('tir_high_mg'),
-        session.settings.get('tir_low_mmol'),
-        session.settings.get('tir_high_mmol'),
-        session.settings.get('time_in_range_low_mg'),
-        session.settings.get('time_in_range_high_mg'),
-        session.settings.get('time_in_range_low_mmol'),
-        session.settings.get('time_in_range_high_mmol'),
-        session.settings.get('prediction_horizon_min'),
-        session.settings.get('prediction_horizon_mins'),
-        session.settings.get('debug_force_alert')
-      ]);
+      const keys = [
+        'nightscout_url','nightscout_token','update_interval',
+        'low_alert_mg','high_alert_mg','low_alert_mmol','high_alert_mmol',
+        'alerts_enabled','language','timezone','units',
+        'enable_head_up_display',
+        'display_duration_s','alert_duration_s','alert_cooldown_min',
+        'show_tir_bar','show_range_bar',
+        'display_duration_ms','alert_duration_ms','alert_cooldown_ms',
+        'enable_advanced_mode','advanced_mode_enabled',
+        // legacy (tolerados)
+        'tir_low_mg','tir_high_mg','tir_low_mmol','tir_high_mmol',
+        'time_in_range_low_mg','time_in_range_high_mg','time_in_range_low_mmol','time_in_range_high_mmol',
+        'prediction_horizon_min','prediction_horizon_mins',
+        'debug_force_alert'
+      ];
+      const vals = await Promise.all(keys.map(k => session.settings.get(k)));
+      const kv = Object.fromEntries(keys.map((k,i)=>[k,vals[i]]));
 
-      const uiMin = parseInt(updateInterval, 10);
+      const uiMin = parseInt(kv.update_interval, 10);
       const ui = Number.isFinite(uiMin) ? uiMin : 5;
 
-      const displayMs = Number.isFinite(this.parseSlicerValue(display_duration_s, NaN))
-        ? Math.min(15, Math.max(1, this.parseSlicerValue(display_duration_s))) * 1000
-        : this.validateSlicerValue(display_duration_ms, 1000, 15000, 5000);
+      const displayMs = Number.isFinite(this.parseSlicerValue(kv.display_duration_s, NaN))
+        ? Math.min(15, Math.max(1, this.parseSlicerValue(kv.display_duration_s))) * 1000
+        : this.validateSlicerValue(kv.display_duration_ms, 1000, 15000, 5000);
 
-      const alertMs = Number.isFinite(this.parseSlicerValue(alert_duration_s, NaN))
-        ? Math.min(60, Math.max(2, this.parseSlicerValue(alert_duration_s))) * 1000
-        : this.validateSlicerValue(alert_duration_ms, 2000, 60000, 15000);
+      const alertMs = Number.isFinite(this.parseSlicerValue(kv.alert_duration_s, NaN))
+        ? Math.min(60, Math.max(2, this.parseSlicerValue(kv.alert_duration_s))) * 1000
+        : this.validateSlicerValue(kv.alert_duration_ms, 2000, 60000, 15000);
 
-      const coolMs = Number.isFinite(this.parseSlicerValue(alert_cooldown_min, NaN))
-        ? Math.min(60, Math.max(1, this.parseSlicerValue(alert_cooldown_min))) * 60 * 1000
-        : this.validateSlicerValue(alert_cooldown_ms, 60000, 3600000, 600000);
+      const coolMs = Number.isFinite(this.parseSlicerValue(kv.alert_cooldown_min, NaN))
+        ? Math.min(60, Math.max(1, this.parseSlicerValue(kv.alert_cooldown_min))) * 60 * 1000
+        : this.validateSlicerValue(kv.alert_cooldown_ms, 60000, 3600000, 600000);
 
-      const showTirBar = (show_tir_bar === null && show_range_bar === null)
+      const showTirBar = (kv.show_tir_bar == null && kv.show_range_bar == null)
         ? true
-        : (this.toBool(show_tir_bar) || this.toBool(show_range_bar));
+        : (this.toBool(kv.show_tir_bar) || this.toBool(kv.show_range_bar));
 
       return {
-        nightscoutUrl: String(url || '').trim() || '',
-        nightscoutToken: String(token || '').trim() || '',
+        nightscoutUrl: String(kv.nightscout_url || '').trim() || '',
+        nightscoutToken: String(kv.nightscout_token || '').trim() || '',
         updateInterval: ui,
-        low_alert_mg: this.validateSlicerValue(lowMg, 50, 120, 70),
-        high_alert_mg: this.validateSlicerValue(highMg, 180, 400, 250),
-        low_alert_mmol: this.normalizeMmol(lowMmol) ?? 3.9,
-        high_alert_mmol: this.normalizeMmol(highMmol) ?? 13.9,
-        alertsEnabled: this.toBool(alertsEnabled),
-        language: language || 'en',
-        timezone: timezone || null,
-        units: units || UNITS.MGDL,
-        enable_head_up_display: this.toBool(enable_head_up_display),
+        low_alert_mg: this.validateSlicerValue(kv.low_alert_mg, 50, 120, 70),
+        high_alert_mg: this.validateSlicerValue(kv.high_alert_mg, 180, 400, 250),
+        low_alert_mmol: this.normalizeMmol(kv.low_alert_mmol) ?? 3.9,
+        high_alert_mmol: this.normalizeMmol(kv.high_alert_mmol) ?? 13.9,
+        alertsEnabled: this.toBool(kv.alerts_enabled),
+        language: kv.language || 'en',
+        timezone: kv.timezone || null,
+        units: kv.units || UNITS.MGDL,
+        enable_head_up_display: this.toBool(kv.enable_head_up_display),
         display_duration_ms: displayMs,
         alert_duration_ms: alertMs,
         alert_cooldown_ms: coolMs,
         show_tir_bar: showTirBar,
-        enable_advanced_mode: this.toBool(enable_advanced_mode) || this.toBool(advanced_mode_enabled),
-        // legacy (no usados por TIR/pred)
-        tir_low_mg: this.parseSlicerValue(tir_low_mg, null),
-        tir_high_mg: this.parseSlicerValue(tir_high_mg, null),
-        tir_low_mmol: this.normalizeMmol(tir_low_mmol),
-        tir_high_mmol: this.normalizeMmol(tir_high_mmol),
-        time_in_range_low_mg: this.parseSlicerValue(time_in_range_low_mg, null),
-        time_in_range_high_mg: this.parseSlicerValue(time_in_range_high_mg, null),
-        time_in_range_low_mmol: this.normalizeMmol(time_in_range_low_mmol),
-        time_in_range_high_mmol: this.normalizeMmol(time_in_range_high_mmol),
-        prediction_horizon_min: [15,30,60].includes(Number(prediction_horizon_min || prediction_horizon_mins)) ? Number(prediction_horizon_min || prediction_horizon_mins) : 30,
-        debug_force_alert: (typeof debug_force_alert === 'string' ? debug_force_alert : null),
+        enable_advanced_mode: this.toBool(kv.enable_advanced_mode) || this.toBool(kv.advanced_mode_enabled),
+        // legacy (no usados por TIR/pred, se toleran para compatibilidad)
+        tir_low_mg: this.parseSlicerValue(kv.tir_low_mg, null),
+        tir_high_mg: this.parseSlicerValue(kv.tir_high_mg, null),
+        tir_low_mmol: this.normalizeMmol(kv.tir_low_mmol),
+        tir_high_mmol: this.normalizeMmol(kv.tir_high_mmol),
+        time_in_range_low_mg: this.parseSlicerValue(kv.time_in_range_low_mg, null),
+        time_in_range_high_mg: this.parseSlicerValue(kv.time_in_range_high_mg, null),
+        time_in_range_low_mmol: this.normalizeMmol(kv.time_in_range_low_mmol),
+        time_in_range_high_mmol: this.normalizeMmol(kv.time_in_range_high_mmol),
+        prediction_horizon_min: [15,30,60].includes(Number(kv.prediction_horizon_min || kv.prediction_horizon_mins))
+          ? Number(kv.prediction_horizon_min || kv.prediction_horizon_mins) : 30,
+        debug_force_alert: (typeof kv.debug_force_alert === 'string' ? kv.debug_force_alert : null),
       };
     } catch (e) {
       console.error('Error leyendo settings:', e);
@@ -235,7 +207,7 @@ class NightscoutMentraApp extends AppServer {
       ? Math.min(60, Math.max(1, this.parseSlicerValue(o.alert_cooldown_min))) * 60 * 1000
       : this.validateSlicerValue(o.alert_cooldown_ms, 60000, 3600000, 600000);
 
-    const showTirBar = (o.show_tir_bar === null && o.show_range_bar === null)
+    const showTirBar = (o.show_tir_bar == null && o.show_range_bar == null)
       ? true
       : (this.toBool(o.show_tir_bar) || this.toBool(o.show_range_bar));
 
@@ -257,7 +229,7 @@ class NightscoutMentraApp extends AppServer {
       alert_cooldown_ms: coolMs,
       show_tir_bar: showTirBar,
       enable_advanced_mode: this.toBool(o.enable_advanced_mode) || this.toBool(o.advanced_mode_enabled),
-      // legacy (no usados)
+      // legacy tolerados
       tir_low_mg: this.parseSlicerValue(o.tir_low_mg, null),
       tir_high_mg: this.parseSlicerValue(o.tir_high_mg, null),
       tir_low_mmol: this.normalizeMmol(o.tir_low_mmol),
@@ -266,7 +238,8 @@ class NightscoutMentraApp extends AppServer {
       time_in_range_high_mg: this.parseSlicerValue(o.time_in_range_high_mg, null),
       time_in_range_low_mmol: this.normalizeMmol(o.time_in_range_low_mmol),
       time_in_range_high_mmol: this.normalizeMmol(o.time_in_range_high_mmol),
-      prediction_horizon_min: [15,30,60].includes(Number(o.prediction_horizon_min || o.prediction_horizon_mins)) ? Number(o.prediction_horizon_min || o.prediction_horizon_mins) : 30,
+      prediction_horizon_min: [15,30,60].includes(Number(o.prediction_horizon_min || o.prediction_horizon_mins))
+        ? Number(o.prediction_horizon_min || o.prediction_horizon_mins) : 30,
       debug_force_alert: (typeof o.debug_force_alert === 'string' ? o.debug_force_alert : null)
     };
   }
@@ -275,7 +248,6 @@ class NightscoutMentraApp extends AppServer {
   convertToDisplay(mgdlValue, targetUnit) {
     return targetUnit === UNITS.MMOL ? (mgdlValue / 18).toFixed(1) : Math.round(mgdlValue);
   }
-
   getTrendArrow(dir) {
     const map = {
       DoubleUp: '↑↑', SingleUp: '↑', FortyFiveUp: '↗',
@@ -285,39 +257,44 @@ class NightscoutMentraApp extends AppServer {
     };
     return map[dir] || '?';
   }
-
   getLanguageSettings(settings) {
     const langMap = { es: { locale: 'es-ES', timezone: 'Europe/Madrid' }, en: { locale: 'en-US', timezone: 'America/New_York' } };
     return langMap[settings.language] || langMap.en;
   }
   validateTimezone(tz) {
     const valid = [
-      'Europe/Madrid', 'Atlantic/Canary', 'Europe/London', 'Europe/Paris',
-      'Europe/Berlin', 'Europe/Rome', 'America/New_York', 'America/Chicago',
-      'America/Los_Angeles', 'America/Mexico_City', 'America/Argentina/Buenos_Aires',
-      'America/Sao_Paulo', 'Asia/Tokyo', 'Australia/Sydney', 'UTC',
+      'Europe/Madrid','Atlantic/Canary','Europe/London','Europe/Paris',
+      'Europe/Berlin','Europe/Rome','America/New_York','America/Chicago',
+      'America/Los_Angeles','America/Mexico_City','America/Argentina/Buenos_Aires',
+      'America/Sao_Paulo','Asia/Tokyo','Australia/Sydney','UTC',
     ];
     return valid.includes(tz) ? tz : 'UTC';
   }
-
-  async formatForG1(data, settings) {
-    const display = this.convertToDisplay(data.sgv, settings.units || UNITS.MGDL);
-    const trend = this.getTrendArrow(data.direction);
+  _getLocaleBundle(sessionId, settings){
+    const cached = this._sessionLocale.get(sessionId);
+    if (cached && cached.lang === settings.language && cached.tz === (settings.timezone||null)) return cached;
     const langSettings = this.getLanguageSettings(settings);
     const tz = settings.timezone ? this.validateTimezone(settings.timezone) : langSettings.timezone;
+    const b = { lang: settings.language||'en', locale: langSettings.locale, tz };
+    this._sessionLocale.set(sessionId, b);
+    return b;
+  }
+
+  async formatForG1(data, settings, sessionId) {
+    const display = this.convertToDisplay(data.sgv, settings.units || UNITS.MGDL);
+    const trend = this.getTrendArrow(data.direction);
+    const b = this._getLocaleBundle(sessionId || 'default', settings);
     const readingTime = new Date(data.date);
-    const timeStr = readingTime.toLocaleTimeString(langSettings.locale, { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false });
+    const timeStr = readingTime.toLocaleTimeString(b.locale, { timeZone: b.tz, hour: '2-digit', minute: '2-digit', hour12: false });
     const minutesAgo = Math.floor((Date.now() - data.date) / 60000);
-    const lang = settings.language || 'en';
-    const timeAgo = minutesAgo <= 1 ? (lang === 'es' ? 'ahora' : 'now') : (lang === 'es' ? `hace ${minutesAgo}m` : `${minutesAgo}m ago`);
+    const timeAgo = minutesAgo <= 1 ? (b.lang === 'es' ? 'ahora' : 'now') : (b.lang === 'es' ? `hace ${minutesAgo}m` : `${minutesAgo}m ago`);
     return `${display} ${settings.units || UNITS.MGDL} ${trend}\n${timeStr} (${timeAgo})`;
   }
 
-  // Incluye predicción de umbral usando límites reales y horizonte.
-  async formatForG1WithPrediction(data, settings) {
+  async formatForG1WithPrediction(data, settings, sessionId) {
     try {
-      const base = await this.formatForG1(data, settings);
-      const predShort = await this.buildAdvancedPredictionShort(settings);
+      const base = await this.formatForG1(data, settings, sessionId);
+      const predShort = await this.buildAdvancedPredictionShort(settings, sessionId);
       if (!predShort) return base;
       const parts = base.split('\n');
       const l1 = parts[0] || '';
@@ -327,49 +304,58 @@ class NightscoutMentraApp extends AppServer {
       return `${l1}\n${l2}${sep}${predShort}${rest.length ? `\n${rest.join('\n')}` : ''}`;
     } catch (error) {
       console.error('Error in formatForG1WithPrediction, falling back:', error);
-      return await this.formatForG1(data, settings);
+      return await this.formatForG1(data, settings, sessionId);
     }
   }
 
-  // v2.12: Predicción usa límites de alerta (reales) y horizon seleccionado
-  async buildAdvancedPredictionShort(settings) {
+  /* ---------- Cliente HTTP por sesión ---------- */
+  _ensureHttp(sessionId, settings){
+    let cli = this._http.get(sessionId);
+    const baseRaw = (settings.nightscoutUrl || '').trim();
+    if (!baseRaw) return null;
+    const base = baseRaw.startsWith('http') ? baseRaw : ('https://' + baseRaw);
+    const baseURL = base.replace(/\/$/, '');
+    if (!cli || cli.defaults.baseURL !== baseURL || cli.defaults.params?.token !== settings.nightscoutToken){
+      cli = axios.create({
+        baseURL,
+        headers: { 'User-Agent': 'MentraOS-Nightscout/2.12.1' },
+        timeout: 10000,
+        params: settings.nightscoutToken ? { token: settings.nightscoutToken } : {}
+      });
+      this._http.set(sessionId, cli);
+    }
+    return cli;
+  }
+
+  // v2.12: Predicción usa límites reales y horizonte; v2.12.1 usa cliente por sesión
+  async buildAdvancedPredictionShort(settings, sessionId='default') {
     const { low: lowThreshold, high: highThreshold } = this.getAlertLimits(settings); // mg/dL
     const horizon = Number(settings.prediction_horizon_min || 30);
     const maxSteps = Math.max(3, Math.min(12, Math.round(horizon / 5))); // 15..60 → 3..12 pasos
     const isMmol = String(settings.units || '').toLowerCase().includes('mmol');
     const toDisp = (mgdl) => isMmol ? (mgdl/18).toFixed(1) : String(Math.round(mgdl));
+    const http = this._ensureHttp(sessionId, settings);
+    if (!http) return null;
 
-    let base = (settings.nightscoutUrl || '').trim();
-    if (!base) return null;
-    if (!base.startsWith('http')) base = 'https://' + base;
-    base = base.replace(/\/$/, '');
-    const params = settings.nightscoutToken ? { token: settings.nightscoutToken } : {};
-    const headers = { 'User-Agent': 'MentraOS-Nightscout/2.12.0' };
-
-    // 1) Método Exacto: predBGs de devicestatus (capado por horizon)
+    // 1) Método exacto devicestatus
     try {
-      const { data } = await axios.get(`${base}/api/v1/devicestatus.json?count=1`, { params, timeout: 8000, headers });
+      const { data } = await http.get(`/api/v1/devicestatus.json?count=1`);
       const ds = Array.isArray(data) ? data[0] : data;
       const predBGs = ds && (ds.predBGs || ds?.openaps?.suggested?.predBGs || ds?.ar2?.predBGs);
       if (predBGs) {
-        // Elige serie disponible
         let series = predBGs.IOB || predBGs.COB || predBGs.UAM || predBGs.ZT || (Array.isArray(predBGs) ? predBGs : null);
         if (Array.isArray(series) && series.length > 1) {
-          series = series.slice(0, maxSteps + 1); // actual + horizon pasos
+          series = series.slice(0, maxSteps + 1);
           const currentSgv = Number(series[0]);
           if (Number.isFinite(currentSgv)) {
-            if (currentSgv > lowThreshold) { // Buscar bajada
+            if (currentSgv > lowThreshold) {
               for (let i = 1; i < series.length; i++) {
-                if (Number(series[i]) <= lowThreshold) {
-                  return `↓${toDisp(lowThreshold)} @${i * 5}m`;
-                }
+                if (Number(series[i]) <= lowThreshold) return `↓${toDisp(lowThreshold)} @${i*5}m`;
               }
             }
-            if (currentSgv < highThreshold) { // Buscar subida
+            if (currentSgv < highThreshold) {
               for (let i = 1; i < series.length; i++) {
-                if (Number(series[i]) >= highThreshold) {
-                  return `↑${toDisp(highThreshold)} @${i * 5}m`;
-                }
+                if (Number(series[i]) >= highThreshold) return `↑${toDisp(highThreshold)} @${i*5}m`;
               }
             }
           }
@@ -377,12 +363,11 @@ class NightscoutMentraApp extends AppServer {
       }
     } catch (_) {}
 
-    // 2) Fallback: Extrapolación lineal con últimas lecturas (capada por horizon)
+    // 2) Fallback lineal
     try {
-      const { data } = await axios.get(`${base}/api/v1/entries.json?count=2`, { params, timeout: 8000, headers });
+      const { data } = await http.get(`/api/v1/entries.json?count=2`);
       if (data && data.length >= 2) {
-        const last = data[0];
-        const prev = data[1];
+        const last = data[0], prev = data[1];
         const mgNow = Number(last.sgv ?? last.glucose);
         const tNow = new Date(last.date || last.dateString).getTime();
         const mgPrev = Number(prev.sgv ?? prev.glucose);
@@ -395,15 +380,11 @@ class NightscoutMentraApp extends AppServer {
 
             if (ratePerMin < -0.4) {
               const timeToLow = (lowThreshold - mgNow) / ratePerMin;
-              if (timeToLow > 0 && timeToLow <= horizon) {
-                return `↓${toDisp(lowThreshold)} @${Math.round(timeToLow)}m`;
-              }
+              if (timeToLow > 0 && timeToLow <= horizon) return `↓${toDisp(lowThreshold)} @${Math.round(timeToLow)}m`;
             }
             if (ratePerMin > 0.4) {
               const timeToHigh = (highThreshold - mgNow) / ratePerMin;
-              if (timeToHigh > 0 && timeToHigh <= horizon) {
-                return `↑${toDisp(highThreshold)} @${Math.round(timeToHigh)}m`;
-              }
+              if (timeToHigh > 0 && timeToHigh <= horizon) return `↑${toDisp(highThreshold)} @${Math.round(timeToHigh)}m`;
             }
           }
         }
@@ -414,10 +395,9 @@ class NightscoutMentraApp extends AppServer {
   }
 
   /* ---------- día local + TIR + tratamientos ---------- */
-  getLocalDayStr(ts, settings) {
-    const langSettings = this.getLanguageSettings(settings);
-    const tz = settings.timezone ? this.validateTimezone(settings.timezone) : langSettings.timezone;
-    return new Date(ts).toLocaleDateString(langSettings.locale, { timeZone: tz });
+  getLocalDayStr(ts, settings, sessionId='default') {
+    const b = this._getLocaleBundle(sessionId, settings);
+    return new Date(ts).toLocaleDateString(b.locale, { timeZone: b.tz });
   }
   buildTirBar(tirPct) {
     if (tirPct === null || !Number.isFinite(tirPct)) return '';
@@ -442,7 +422,7 @@ class NightscoutMentraApp extends AppServer {
 
   updateDailyTirState(sessionId, readingMgdl, readingTs, settings) {
     const range = this.getAlertLimits(settings);
-    const dayStr = this.getLocalDayStr(readingTs, settings);
+    const dayStr = this.getLocalDayStr(readingTs, settings, sessionId);
     let st = this.dailyTirState.get(sessionId);
     if (!st || st.dayStr !== dayStr) st = { dayStr, total: 0, inRange: 0 };
     if (Number.isFinite(readingMgdl)) {
@@ -453,20 +433,14 @@ class NightscoutMentraApp extends AppServer {
     return { tirPct: st.total > 0 ? Math.round((st.inRange / st.total) * 100) : null, total: st.total };
   }
 
-  async getRecentTreatments(settings, hours = 4) {
+  async getRecentTreatments(settings, hours = 'day', sessionId='default') {
     try {
-      const base = (settings.nightscoutUrl || '').trim();
-      if (!base) return null;
-      let u = base.startsWith('http') ? base : 'https://' + base;
-      u = u.replace(/\/$/, '');
-      const endpoint = `${u}/api/v1/treatments.json?count=1000`;
-      const params = settings.nightscoutToken ? { token: settings.nightscoutToken } : {};
-      const { data } = await axios.get(endpoint, { params, timeout: 10000, headers: { 'User-Agent': 'MentraOS-Nightscout/2.12.0' } });
+      const http = this._ensureHttp(sessionId, settings);
+      if (!http) return null;
+      const { data } = await http.get(`/api/v1/treatments.json?count=1000`);
       const arr = Array.isArray(data) ? data : (data ? [data] : []);
-      const langSettings = this.getLanguageSettings(settings);
-      const tz = settings.timezone ? this.validateTimezone(settings.timezone) : langSettings.timezone;
-      const locale = langSettings.locale;
-      const todayStr = new Date().toLocaleDateString(locale, { timeZone: tz });
+      const b = this._getLocaleBundle(sessionId, settings);
+      const todayStr = new Date().toLocaleDateString(b.locale, { timeZone: b.tz });
       const events = arr.map(t => {
         const dateStr = t.created_at || t.timestamp || t.dateString || t.date || null;
         let ts = null;
@@ -476,7 +450,7 @@ class NightscoutMentraApp extends AppServer {
       }).filter(e => e.ts && (Number.isFinite(e.carbs) || Number.isFinite(e.insulin)));
       let windowed, label;
       if (hours === 'day') {
-        windowed = events.filter(e => new Date(e.ts).toLocaleDateString(locale, { timeZone: tz }) === todayStr);
+        windowed = events.filter(e => new Date(e.ts).toLocaleDateString(b.locale, { timeZone: b.tz }) === todayStr);
         label = settings.language === 'es' ? 'hoy' : 'today';
       } else {
         const since = Date.now() - Math.max(1, hours) * 60 * 60 * 1000;
@@ -484,7 +458,7 @@ class NightscoutMentraApp extends AppServer {
         label = `${hours}h`;
       }
       if (!windowed.length) return { label, totalCarbs: 0, totalInsulin: 0, last: null };
-      let totalCarbs = 0, totalInsulin = 0; let last = null;
+      let totalCarbs = 0, totalInsulin = 0, last = null;
       for (const e of windowed) {
         if (Number.isFinite(e.carbs)) totalCarbs += e.carbs;
         if (Number.isFinite(e.insulin)) totalInsulin += e.insulin;
@@ -493,7 +467,7 @@ class NightscoutMentraApp extends AppServer {
       return { label, totalCarbs, totalInsulin, last };
     } catch (_) { return null; }
   }
-  formatTreatmentsLine(summary, settings) {
+  formatTreatmentsLine(summary, settings, sessionId='default') {
     if (!summary) return '';
     const { label, totalCarbs, totalInsulin, last } = summary;
     const lang = settings.language || 'en';
@@ -501,9 +475,8 @@ class NightscoutMentraApp extends AppServer {
     const c = round1(totalCarbs), i = round1(totalInsulin);
     let lastStr = '';
     if (last && (Number.isFinite(last.carbs) || Number.isFinite(last.insulin))) {
-      const langSettings = this.getLanguageSettings(settings);
-      const tz = settings.timezone ? this.validateTimezone(settings.timezone) : langSettings.timezone;
-      const t = new Date(last.ts).toLocaleTimeString(langSettings.locale, { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false });
+      const b = this._getLocaleBundle(sessionId, settings);
+      const t = new Date(last.ts).toLocaleTimeString(b.locale, { timeZone: b.tz, hour: '2-digit', minute: '2-digit', hour12: false });
       const parts = [];
       if (Number.isFinite(last.carbs)) parts.push(`${round1(last.carbs)}g`);
       if (Number.isFinite(last.insulin)) parts.push(`${round1(last.insulin)}U`);
@@ -515,42 +488,34 @@ class NightscoutMentraApp extends AppServer {
   }
 
   /* ---------- obtención de datos ---------- */
-  async getTodayEntries(settings) {
-    const u0 = settings.nightscoutUrl;
-    if (!u0) throw new Error('URL no configurada');
-    let u = u0.startsWith('http') ? u0 : 'https://' + u0;
-    u = u.replace(/\/$/, '');
-    const endpoint = `${u}/api/v1/entries/sgv.json?count=400`;
-    const params = settings.nightscoutToken ? { token: settings.nightscoutToken } : {};
-    const { data } = await axios.get(endpoint, { params, timeout: 10000, headers: { 'User-Agent': 'MentraOS-Nightscout/2.12.0' } });
+  async getTodayEntries(settings, sessionId='default') {
+    const http = this._ensureHttp(sessionId, settings);
+    if (!http) throw new Error('URL no configurada');
+    const { data } = await http.get(`/api/v1/entries/sgv.json?count=400`);
     const arr = Array.isArray(data) ? data : (data ? [data] : []);
-    const langSettings = this.getLanguageSettings(settings);
-    const tz = settings.timezone ? this.validateTimezone(settings.timezone) : langSettings.timezone;
-    const locale = langSettings.locale;
-    const todayStr = new Date().toLocaleDateString(locale, { timeZone: tz });
+    const b = this._getLocaleBundle(sessionId, settings);
+    const todayStr = new Date().toLocaleDateString(b.locale, { timeZone: b.tz });
     const today = arr
       .map(r => ({ mgdl: Number(r.sgv ?? r.glucose), date: typeof r.date === 'string' ? new Date(r.date).getTime() : r.date }))
       .filter(r => Number.isFinite(r.mgdl) && r.date)
-      .filter(r => new Date(r.date).toLocaleDateString(locale, { timeZone: tz }) === todayStr)
+      .filter(r => new Date(r.date).toLocaleDateString(b.locale, { timeZone: b.tz }) === todayStr)
       .sort((a, b) => a.date - b.date);
     return today;
   }
 
-  async getGlucoseData(settings) {
-    let u = settings.nightscoutUrl;
-    if (!u) throw new Error('URL no configurada');
-    if (!u.startsWith('http')) u = 'https://' + u;
-    u = u.replace(/\/$/, '');
+  async getGlucoseData(settings, sessionId='default') {
+    const http = this._ensureHttp(sessionId, settings);
+    if (!http) throw new Error('URL no configurada');
+
     const endpoints = [
-      `${u}/api/v1/entries/sgv.json?count=1`,
-      `${u}/api/v1/entries.json?count=1`,
-      `${u}/api/v1/entries/current.json`
+      `/api/v1/entries/sgv.json?count=1`,
+      `/api/v1/entries.json?count=1`,
+      `/api/v1/entries/current.json`
     ];
     let lastError;
     for (const endpoint of endpoints) {
       try {
-        const params = settings.nightscoutToken ? { token: settings.nightscoutToken } : {};
-        const { data } = await axios.get(endpoint, { params, timeout: 10000, headers: { 'User-Agent': 'MentraOS-Nightscout/2.12.0' } });
+        const { data } = await http.get(endpoint);
         const reading = Array.isArray(data) ? data[0] : data;
         if (!reading) throw new Error('Empty response');
         const glucose = Number(reading.sgv ?? reading.glucose);
@@ -570,7 +535,6 @@ class NightscoutMentraApp extends AppServer {
       while (lines.length && lines[0].trim() === '') lines.shift();
       while (lines.length && lines[lines.length - 1].trim() === '') lines.pop();
       const out = lines.slice(0, maxLines).join('\n');
-      // v2.12: evita renders idénticos seguidos
       const last = this._lastShownText.get(sessionId);
       if (last === out) return;
       this._lastShownText.set(sessionId, out);
@@ -583,7 +547,7 @@ class NightscoutMentraApp extends AppServer {
 
   /* ---------- ciclo de vida ---------- */
   async onSession(session, sessionId, userId) {
-    console.log(`?? Nueva sesión: ${sessionId} para ${userId}`);
+    console.log(`✅ Nueva sesión: ${sessionId} para ${userId}`);
     if (typeof session.updateSettingsForTesting !== 'function') {
       session.updateSettingsForTesting = async () => { session.logger?.debug?.('Compat shim: updateSettingsForTesting noop'); };
     }
@@ -603,8 +567,8 @@ class NightscoutMentraApp extends AppServer {
 
       // Semilla TIR
       try {
-        const entries = await this.getTodayEntries(settings);
-        const dayStr = this.getLocalDayStr(Date.now(), settings);
+        const entries = await this.getTodayEntries(settings, sessionId);
+        const dayStr = this.getLocalDayStr(Date.now(), settings, sessionId);
         const range = this.getAlertLimits(settings);
         let total = 0, inRange = 0;
         for (const e of entries) {
@@ -624,7 +588,7 @@ class NightscoutMentraApp extends AppServer {
         if (!sd) return;
         const s = sd.settings;
         const st = this.dailyTirState.get(sessionId);
-        const currentDay = this.getLocalDayStr(Date.now(), s);
+        const currentDay = this.getLocalDayStr(Date.now(), s, sessionId);
         if (!st || st.dayStr !== currentDay) {
           this.dailyTirState.set(sessionId, { dayStr: currentDay, total: 0, inRange: 0 });
         }
@@ -644,10 +608,10 @@ class NightscoutMentraApp extends AppServer {
 
   async showInitialAndHide(session, sessionId, settings) {
     try {
-      const data = await this.getGlucoseData(settings);
+      const data = await this.getGlucoseData(settings, sessionId);
       this.lastGoodEntry.set(sessionId, data);
       const tirRes = this.updateDailyTirState(sessionId, data.sgv, data.date, settings);
-      const formattedData = await this.formatForG1WithPrediction(data, settings);
+      const formattedData = await this.formatForG1WithPrediction(data, settings, sessionId);
       if (settings.enable_advanced_mode) {
         const tirPct = tirRes.tirPct;
         const tirLine = tirPct === null
@@ -655,23 +619,19 @@ class NightscoutMentraApp extends AppServer {
           : (settings.language === 'es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
         const bar = !this.toBool(settings.show_tir_bar) || tirPct === null ? '' : this.buildTirBar(tirPct);
         let tLine = '';
-        try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {}
+        try { const sum = await this.getRecentTreatments(settings, 'day', sessionId); tLine = this.formatTreatmentsLine(sum, settings, sessionId); } catch {}
         await this.animateTIRFill(session, sessionId, settings, formattedData, tirPct, tLine);
       } else {
         this.showClamped(session, sessionId, formattedData);
       }
-      if (this.displayTimers.has(sessionId)) clearTimeout(this.displayTimers.get(sessionId));
-      const t = setTimeout(() => this.hideDisplay(session, sessionId), settings.display_duration_ms || 5000);
-      this.displayTimers.set(sessionId, t);
+      this._scheduleHide(sessionId, settings.display_duration_ms || 5000);
     } catch (error) {
       try {
         const cached = this.lastGoodEntry.get(sessionId);
         if (cached) {
-          const fallback = await this.formatForG1WithPrediction(cached, settings);
+          const fallback = await this.formatForG1WithPrediction(cached, settings, sessionId);
           this.showClamped(session, sessionId, fallback);
-          if (this.displayTimers.has(sessionId)) clearTimeout(this.displayTimers.get(sessionId));
-          const t = setTimeout(() => this.hideDisplay(session, sessionId), settings.display_duration_ms || 5000);
-          this.displayTimers.set(sessionId, t);
+          this._scheduleHide(sessionId, settings.display_duration_ms || 5000);
           return;
         }
       } catch (_) {}
@@ -682,16 +642,14 @@ class NightscoutMentraApp extends AppServer {
         ? { en: 'Cannot connect to Nightscout\nCheck URL and token', es: 'No se puede conectar\nRevisa URL y token' }
         : { en: 'Error loading glucose data\nCheck your settings', es: 'Error cargando datos\nRevisa tu configuración' };
       this.showClamped(session, sessionId, errorMsg[lang]);
-      if (this.displayTimers.has(sessionId)) clearTimeout(this.displayTimers.get(sessionId));
-      const t = setTimeout(() => this.hideDisplay(session, sessionId), 5000);
-      this.displayTimers.set(sessionId, t);
+      this._scheduleHide(sessionId, 5000);
     }
   }
 
   async animateTIRFill(session, sessionId, s, headerText, tirPct, tLine='', extraLine='') {
     try {
       const showBar = !!s.show_tir_bar;
-      const anims   = s.enable_animations !== false;
+      const anims   = s.enable_animations !== false; // por defecto ON aunque no exista setting
       if (!showBar || !anims || tirPct == null || !Number.isFinite(tirPct)){
         const bar = showBar && tirPct != null ? ' ' + this.__barFromRatio(tirPct/100, 20) : '';
         const tirLine = tirPct == null ? (s.language==='es' ? 'TIR hoy: n/d' : 'TIR: n/a') : (s.language==='es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
@@ -706,8 +664,8 @@ class NightscoutMentraApp extends AppServer {
       this._renderToken.set(sessionId, token);
 
       const slots = 20;
-      const leadIn = 250;
-      const totalMs = 900;
+      const leadIn = 220;    // ligerísimo 'delay' para evitar parpadeo al abrir
+      const totalMs = 920;   // duración total de la animación
       const target  = Math.floor(this.__clamp01(tirPct/100) * slots);
 
       const tirLine = (s.language==='es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
@@ -761,7 +719,8 @@ class NightscoutMentraApp extends AppServer {
         await this.showGlucoseTemporarily(session, sessionId, s.display_duration_ms || 4000, s);
       });
 
-      const settingsHandler = async (settingsData) => {
+      // NEW: debounce settings (algunas versiones envían múltiples updates seguidos)
+      const runSettingsHandler = async (settingsData) => {
         session.logger?.info('Settings update received', { settingsCount: settingsData?.length });
         try {
           const settings = this.parseSettingsFromArray(settingsData || []);
@@ -778,18 +737,20 @@ class NightscoutMentraApp extends AppServer {
           sd.settings = settings;
           this.activeSessions.set(sessionId, sd);
 
-          try { // feedback rápido de guardado
-            try { const dNow = await this.getGlucoseData(settings); await this.checkAlerts(session, sessionId, dNow, settings);} catch(_){ }
+          // feedback rápido de guardado
+          try {
+            try {
+              const dNow = await this.getGlucoseData(settings, sessionId);
+              await this.checkAlerts(session, sessionId, dNow, settings);
+            } catch(_){}
+            const b = this._getLocaleBundle(sessionId, settings);
             const lines = [];
             lines.push(settings.language === 'es' ? 'Ajustes guardados' : 'Settings saved');
             lines.push(`Units: ${settings.units}`);
-            if (settings.units === UNITS.MMOL) {
-              lines.push(`Low: ${(+settings.low_alert_mmol).toFixed(1)} mmol/L`);
-              lines.push(`High: ${(+settings.high_alert_mmol).toFixed(1)} mmol/L`);
-            } else {
-              lines.push(`Low: ${settings.low_alert_mg} mg/dL`);
-              lines.push(`High: ${settings.high_alert_mg} mg/dL`);
-            }
+            const limits = this.getAlertLimits(settings);
+            lines.push(settings.language === 'es'
+              ? `TIR: ${limits.low}-${limits.high} mg/dL`
+              : `TIR: ${limits.low}-${limits.high} mg/dL`);
             lines.push(`HeadUp: ${settings.enable_head_up_display ? 'ON' : 'OFF'}`);
             lines.push(`Advanced: ${settings.enable_advanced_mode ? 'ON' : 'OFF'}`);
             this.showClamped(session, sessionId, lines.join('\n'));
@@ -798,6 +759,12 @@ class NightscoutMentraApp extends AppServer {
         } catch (error) {
           session.logger?.error(error, 'Failed to process settings update');
         }
+      };
+
+      const settingsHandler = (settingsData) => {
+        if (this._settingsDebounce.has(sessionId)) clearTimeout(this._settingsDebounce.get(sessionId));
+        const t = setTimeout(() => runSettingsHandler(settingsData), 120);
+        this._settingsDebounce.set(sessionId, t);
       };
 
       session.events?.onAppSettingsUpdate?.(settingsHandler);
@@ -811,21 +778,17 @@ class NightscoutMentraApp extends AppServer {
           const s = sd?.settings; if (!s) return; if (!s.enable_head_up_display) return;
           const now = Date.now(); const last = this.headUpLastShown.get(sessionId) || 0;
           if (now - last < 10000) return; this.headUpLastShown.set(sessionId, now);
-          const reading = await this.getGlucoseData(s);
-          const baseLine = await this.formatForG1WithPrediction(reading, s);
+          const reading = await this.getGlucoseData(s, sessionId);
+          const baseLine = await this.formatForG1WithPrediction(reading, s, sessionId);
           if (!s.enable_advanced_mode) {
             this.showClamped(session, sessionId, baseLine);
-            setTimeout(() => this.hideDisplay(session, sessionId), s.display_duration_ms || 4000);
+            this._scheduleHide(sessionId, s.display_duration_ms || 4000);
             return;
           }
           const { tirPct } = this.updateDailyTirState(sessionId, reading.sgv, reading.date, s);
-          const tirLine = tirPct === null
-            ? (s.language === 'es' ? 'TIR hoy: n/d' : 'TIR: n/a')
-            : (s.language === 'es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
-          const bar = !this.toBool(s.show_tir_bar) || tirPct === null ? '' : this.buildTirBar(tirPct);
           let minMaxLine = '';
           try {
-            const entries = await this.getTodayEntries(s);
+            const entries = await this.getTodayEntries(s, sessionId);
             const vals = entries.map(e => e.mgdl).filter(Number.isFinite);
             if (vals.length) {
               const min = Math.min(...vals), max = Math.max(...vals);
@@ -837,12 +800,12 @@ class NightscoutMentraApp extends AppServer {
             }
           } catch {}
           let tLine = '';
-          try { const sum = await this.getRecentTreatments(s, 'day'); tLine = this.formatTreatmentsLine(sum, s); } catch {}
+          try { const sum = await this.getRecentTreatments(s, 'day', sessionId); tLine = this.formatTreatmentsLine(sum, s, sessionId); } catch {}
           await this.animateTIRFill(session, sessionId, s, baseLine, tirPct, tLine, minMaxLine);
-          setTimeout(() => this.hideDisplay(session, sessionId), s.display_duration_ms || 4000);
+          this._scheduleHide(sessionId, s.display_duration_ms || 4000);
         } catch (e) {
-          this.showClamped(session, sessionId, (s.language==='es' ? 'Error al mostrar' : 'Display error'));
-          setTimeout(() => this.hideDisplay(session, sessionId), 2000);
+          this.showClamped(session, sessionId, (this._getLocaleBundle(sessionId, {language:'es'}).lang==='es' ? 'Error al mostrar' : 'Display error'));
+          this._scheduleHide(sessionId, 2000);
         }
       });
 
@@ -850,12 +813,14 @@ class NightscoutMentraApp extends AppServer {
         const t = this.displayTimers.get(sessionId); if (t) clearTimeout(t); this.displayTimers.delete(sessionId);
         const sd = this.activeSessions.get(sessionId); if (sd?.updateInterval) clearInterval(sd.updateInterval);
         const dw = this.dayWatchTimers.get(sessionId); if (dw) clearInterval(dw); this.dayWatchTimers.delete(sessionId);
+        this._http.delete(sessionId);
+        this._sessionLocale.delete(sessionId);
         this.activeSessions.delete(sessionId); this.alertHistory.delete(sessionId);
         this.headUpLastShown.delete(sessionId); this.dailyTirState.delete(sessionId); this.lastGoodEntry.delete(sessionId);
         session.logger?.info('Session disconnected');
       });
     } catch (error) {
-      console.error('? Error setting up event handlers:', error);
+      console.error('⚠️ Error setting up event handlers:', error);
       session.logger?.error(error, 'Failed to setup event handlers');
     }
   }
@@ -865,30 +830,26 @@ class NightscoutMentraApp extends AppServer {
       const sd = this.activeSessions.get(sessionId);
       if (!sd) return;
       const settings = providedSettings || sd.settings || await this.getUserSettings(sd.session);
-      const data = await this.getGlucoseData(settings);
+      const data = await this.getGlucoseData(settings, sessionId);
       this.lastGoodEntry.set(sessionId, data);
       const { tirPct } = this.updateDailyTirState(sessionId, data.sgv, data.date, settings);
       if (settings.enable_advanced_mode) {
-        const header = await this.formatForG1WithPrediction(data, settings);
+        const header = await this.formatForG1WithPrediction(data, settings, sessionId);
         let tLine = '';
-        try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {}
+        try { const sum = await this.getRecentTreatments(settings, 'day', sessionId); tLine = this.formatTreatmentsLine(sum, settings, sessionId); } catch {}
         await this.animateTIRFill(session, sessionId, settings, header, tirPct, tLine);
       } else {
-        this.showClamped(session, sessionId, await this.formatForG1WithPrediction(data, settings));
+        this.showClamped(session, sessionId, await this.formatForG1WithPrediction(data, settings, sessionId));
       }
-      if (this.displayTimers.has(sessionId)) clearTimeout(this.displayTimers.get(sessionId));
-      const timer = setTimeout(() => this.hideDisplay(session, sessionId), ms);
-      this.displayTimers.set(sessionId, timer);
+      this._scheduleHide(sessionId, ms);
     } catch (error) {
       try {
         const cached = this.lastGoodEntry.get(sessionId);
         if (cached) {
           const s = this.activeSessions.get(sessionId)?.settings || {};
-          const txt = await this.formatForG1WithPrediction(cached, s);
+          const txt = await this.formatForG1WithPrediction(cached, s, sessionId);
           this.showClamped(session, sessionId, txt);
-          if (this.displayTimers.has(sessionId)) clearTimeout(this.displayTimers.get(sessionId));
-          const timer = setTimeout(() => this.hideDisplay(session, sessionId), ms);
-          this.displayTimers.set(sessionId, timer);
+          this._scheduleHide(sessionId, ms);
           return;
         }
       } catch (_) {}
@@ -903,7 +864,7 @@ class NightscoutMentraApp extends AppServer {
       try {
         const sd = this.activeSessions.get(sessionId);
         const s = (sd && sd.settings) ? sd.settings : await this.getUserSettings(session);
-        const d = await this.getGlucoseData(s);
+        const d = await this.getGlucoseData(s, sessionId);
         this.lastGoodEntry.set(sessionId, d);
         this.updateDailyTirState(sessionId, d.sgv, d.date, s);
         if (s.alertsEnabled) await this.checkAlerts(session, sessionId, d, s);
@@ -924,14 +885,12 @@ class NightscoutMentraApp extends AppServer {
     const mgdl = data.sgv;
     const last = this.alertHistory.get(sessionId);
     const cooldown = settings.alert_cooldown_ms || 600000;
-
     if (last && Date.now() - last < cooldown) return;
 
     let alertType = null;
     if (mgdl <= limits.low) alertType = 'low';
     else if (mgdl >= limits.high) alertType = 'high';
 
-    // v2.12: inyección de alertas para test, si está definido debug_force_alert (low/high)
     const dbg = (settings.debug_force_alert || '').toLowerCase();
     if (!alertType && (dbg === 'low' || dbg === 'high')) alertType = dbg;
 
@@ -946,23 +905,18 @@ class NightscoutMentraApp extends AppServer {
     const displayValue = this.convertToDisplay(data.sgv, settings.units || UNITS.MGDL);
     const unit = settings.units || UNITS.MGDL;
     const lang = settings.language || 'en';
-
     const msgs = {
       en: { low: `LOW GLUCOSE!`, high: `HIGH GLUCOSE!` },
       es: { low: `¡GLUCOSA BAJA!`, high: `¡GLUCOSA ALTA!` }
     };
-
     const baseText = `${msgs[lang][type]}\n${displayValue} ${unit}`;
     const alertDuration = settings.alert_duration_ms || 15000;
     const blinkInterval = 600;
 
-    if (this.displayTimers.has(sessionId)) {
-      clearTimeout(this.displayTimers.get(sessionId));
-    }
+    if (this.displayTimers.has(sessionId)) clearTimeout(this.displayTimers.get(sessionId));
 
     const startTime = Date.now();
     let isVisible = true;
-
     const blinker = setInterval(() => {
       if (Date.now() - startTime > alertDuration) {
         clearInterval(blinker);
@@ -1046,16 +1000,16 @@ const server = new NightscoutMentraApp({
   port: PORT,
 });
 server.start().catch(err => {
-  console.error('? Error iniciando servidor:', err);
+  console.error('⛔ Error iniciando servidor:', err);
   process.exit(1);
 });
-console.log('?? Nightscout MentraOS v2.12.0 — TIR invariant + Horizon-aware Prediction');
+console.log('🚀 Nightscout MentraOS v2.12.1 — TIR invariant + perf/UX tweaks');
 
 const KEEP_ALIVE_URL = process.env.RENDER_URL || 'https://mentra-nightscout.onrender.com';
 server.app.get('/health', (_, res) => res.json({
   status: 'alive',
   timestamp: new Date().toISOString(),
-  version: '2.12.0',
+  version: '2.12.1',
   activeSessions: server.activeSessions.size
 }));
 setInterval(() => axios.get(`${KEEP_ALIVE_URL}/health`).catch(() => {}), 3 * 60 * 1000);
