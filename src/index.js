@@ -72,8 +72,10 @@ class NightscoutMentraApp extends AppServer {
   }
 
   /* ---------- lectura de settings ---------- */
-  async getUserSettings(session) {
-    try {
+  async getUserSettings(session){
+    try{
+      const mgr = await this.waitForSettings(session, 2500);
+      const safe = async (k)=> await this.safeSettingGet(session, k);
       const [
         url, token, updateInterval,
         lowMg, highMg, lowMmol, highMmol,
@@ -86,75 +88,67 @@ class NightscoutMentraApp extends AppServer {
         tir_low_mg, tir_high_mg, tir_low_mmol, tir_high_mmol,
         time_in_range_low_mg, time_in_range_high_mg, time_in_range_low_mmol, time_in_range_high_mmol,
       ] = await Promise.all([
-        session.settings.get('nightscout_url'),
-        session.settings.get('nightscout_token'),
-        session.settings.get('update_interval'),
-        session.settings.get('low_alert_mg'),
-        session.settings.get('high_alert_mg'),
-        session.settings.get('low_alert_mmol'),
-        session.settings.get('high_alert_mmol'),
-        session.settings.get('alerts_enabled'),
-        session.settings.get('language'),
-        session.settings.get('timezone'),
-        session.settings.get('units'),
-        session.settings.get('enable_head_up_display'),
-        session.settings.get('display_duration_s'),
-        session.settings.get('alert_duration_s'),
-        session.settings.get('alert_cooldown_min'),
-        session.settings.get('show_tir_bar'),
-        session.settings.get('show_range_bar'),
-        session.settings.get('display_duration_ms'),
-        session.settings.get('alert_duration_ms'),
-        session.settings.get('alert_cooldown_ms'),
-        session.settings.get('enable_advanced_mode'),
-        session.settings.get('advanced_mode_enabled'),
-        session.settings.get('tir_low_mg'),
-        session.settings.get('tir_high_mg'),
-        session.settings.get('tir_low_mmol'),
-        session.settings.get('tir_high_mmol'),
-        session.settings.get('time_in_range_low_mg'),
-        session.settings.get('time_in_range_high_mg'),
-        session.settings.get('time_in_range_low_mmol'),
-        session.settings.get('time_in_range_high_mmol'),
+        safe('nightscout_url'),
+        safe('nightscout_token'),
+        safe('update_interval_sec'),
+        safe('low_alert_mg'),
+        safe('high_alert_mg'),
+        safe('low_alert_mmol'),
+        safe('high_alert_mmol'),
+        safe('alerts_enabled'),
+        safe('language'),
+        safe('timezone'),
+        safe('units'),
+        safe('enable_head_up_display'),
+        safe('display_duration_s'),
+        safe('alert_duration_s'),
+        safe('alert_cooldown_min'),
+        safe('show_tir_bar'),
+        safe('show_range_bar'),
+        safe('display_duration_ms'),
+        safe('alert_duration_ms'),
+        safe('alert_cooldown_ms'),
+        safe('enable_advanced_mode'),
+        safe('advanced_mode_enabled'),
+        safe('tir_low_mg'),
+        safe('tir_high_mg'),
+        safe('tir_low_mmol'),
+        safe('tir_high_mmol'),
+        safe('time_in_range_low_mg'),
+        safe('time_in_range_high_mg'),
+        safe('time_in_range_low_mmol'),
+        safe('time_in_range_high_mmol'),
       ]);
 
-      const uiMin = parseInt(updateInterval, 10);
-      const ui = Number.isFinite(uiMin) ? uiMin : 5;
+      const uiMin = parseInt(updateInterval ?? 60, 10);
+      const ui = Number.isFinite(uiMin) ? Math.max(20, Math.min(300, uiMin)) : 60;
+      const lang = (language === 'es' || language === 'en') ? language : 'en';
+      const unit = (String(units||'mg/dL').toLowerCase().includes('mmol')) ? 'mmol/L' : 'mg/dL';
 
-      const displayMs = Number.isFinite(this.parseSlicerValue(display_duration_s, NaN))
-        ? Math.min(15, Math.max(1, this.parseSlicerValue(display_duration_s))) * 1000
-        : this.validateSlicerValue(display_duration_ms, 1000, 15000, 5000);
+      const displayMs = Number(display_duration_ms ?? (display_duration_s*1000)) || 5000;
+      const alertMs   = Number(alert_duration_ms ?? (alert_duration_s*1000)) || 15000;
+      const coolMs    = Number(alert_cooldown_ms ?? (alert_cooldown_min*60000)) || 600000;
 
-      const alertMs = Number.isFinite(this.parseSlicerValue(alert_duration_s, NaN))
-        ? Math.min(60, Math.max(2, this.parseSlicerValue(alert_duration_s))) * 1000
-        : this.validateSlicerValue(alert_duration_ms, 2000, 60000, 15000);
-
-      const coolMs = Number.isFinite(this.parseSlicerValue(alert_cooldown_min, NaN))
-        ? Math.min(60, Math.max(1, this.parseSlicerValue(alert_cooldown_min))) * 60 * 1000
-        : this.validateSlicerValue(alert_cooldown_ms, 60000, 3600000, 600000);
-
-      const showTirBar = (show_tir_bar === null && show_range_bar === null)
-        ? true
-        : (this.toBool(show_tir_bar) || this.toBool(show_range_bar));
+      const showTirBar = (show_tir_bar !== false); // default true
 
       return {
-        nightscoutUrl: String(url || '').trim() || '',
-        nightscoutToken: String(token || '').trim() || '',
-        updateInterval: ui,
-        low_alert_mg: this.validateSlicerValue(lowMg, 40, 90, 70),
-        high_alert_mg: this.validateSlicerValue(highMg, 180, 400, 250),
+        nightscoutUrl: url || '',
+        nightscoutToken: token || '',
+        update_interval_sec: ui,
+        low_alert_mg: Number(lowMg ?? 70),
+        high_alert_mg: Number(highMg ?? 180),
         low_alert_mmol: this.normalizeMmol(lowMmol) ?? 3.9,
         high_alert_mmol: this.normalizeMmol(highMmol) ?? 13.9,
-        alertsEnabled: this.toBool(alertsEnabled),
-        language: language || 'en',
+        alertsEnabled: !!alertsEnabled || alertsEnabled === undefined,
+        language: lang,
         timezone: timezone || null,
-        units: units || UNITS.MGDL,
-        enable_head_up_display: this.toBool(enable_head_up_display),
+        units: unit,
+        enable_head_up_display: enable_head_up_display !== false,
         display_duration_ms: displayMs,
         alert_duration_ms: alertMs,
         alert_cooldown_ms: coolMs,
         show_tir_bar: showTirBar,
-        enable_advanced_mode: this.toBool(enable_advanced_mode) || this.toBool(advanced_mode_enabled),
+        enable_advanced_mode: !!(enable_advanced_mode || advanced_mode_enabled),
         tir_low_mg: this.parseSlicerValue(tir_low_mg, null),
         tir_high_mg: this.parseSlicerValue(tir_high_mg, null),
         tir_low_mmol: this.normalizeMmol(tir_low_mmol),
@@ -164,6 +158,29 @@ class NightscoutMentraApp extends AppServer {
         time_in_range_low_mmol: this.normalizeMmol(time_in_range_low_mmol),
         time_in_range_high_mmol: this.normalizeMmol(time_in_range_high_mmol),
       };
+    }catch(e){
+      try{ console.error('getUserSettings failed, using defaults', e?.message || e); }catch(_){}
+      return {
+        nightscoutUrl: '',
+        nightscoutToken: '',
+        update_interval_sec: 60,
+        low_alert_mg: 70,
+        high_alert_mg: 180,
+        low_alert_mmol: 3.9,
+        high_alert_mmol: 13.9,
+        alertsEnabled: true,
+        language: 'en',
+        timezone: null,
+        units: 'mg/dL',
+        enable_head_up_display: true,
+        display_duration_ms: 5000,
+        alert_duration_ms: 15000,
+        alert_cooldown_ms: 600000,
+        show_tir_bar: true,
+        enable_advanced_mode: true
+      };
+    }
+  };
     } catch (e) {
       console.error('Error leyendo settings:', e);
       return {
@@ -373,40 +390,6 @@ class NightscoutMentraApp extends AppServer {
       return clean ? `${labelBar}\n${clean}` : labelBar;
     } catch { return labelBar; }
   }
-  async animateTIRBarOnce(session, sessionId, settings, header, tirLine, targetPct, tLine=''){
-    try{
-      if (!this.toBool(settings.show_tir_bar)) {
-        this.showClamped(session, sessionId, `${header}\n${this.composeTirLines(settings, tirLine, '', tLine)}`);
-        return;
-      }
-      const totalMs = Math.max(300, Math.min(2000, Number(settings.tir_anim_ms||800)));
-      const speed = String(settings.animation_speed||'normal');
-      const mult = speed==='slow'?1.2:(speed==='fast'?0.8:1.0);
-      const dur = Math.round(totalMs*mult);
-      const steps = 18; // suave pero seguro
-      let lastBlocks = -1;
-      const t0 = Date.now();
-      while (true){
-        const t = (Date.now()-t0)/dur;
-        const clamped = Math.max(0, Math.min(1, t));
-        const eased = clamped*clamped*clamped; // ease-in
-        const pct = targetPct*eased;
-        const bar = this.buildTirBar(pct);
-        // evita refrescos redundantes
-        const blocks = bar.length;
-        if (blocks !== lastBlocks){
-          const line2 = this.composeTirLines(settings, tirLine, bar, tLine);
-          this.showClamped(session, sessionId, `${header}\n${line2}`);
-          lastBlocks = blocks;
-        }
-        if (clamped >= 1) break;
-        await new Promise(r=>setTimeout(r, 60));
-      }
-    }catch(e){
-      try{ this.showClamped(session, sessionId, `${header}\n${this.composeTirLines(settings, tirLine, this.buildTirBar(targetPct), tLine)}`);}catch(_){}
-    }
-  }
-
 
   updateDailyTirState(sessionId, readingMgdl, readingTs, settings) {
     const range = this.getAlertLimits(settings);
@@ -545,18 +528,21 @@ class NightscoutMentraApp extends AppServer {
   }
 
   /* ---------- ciclo de vida ---------- */
-  async onSession(session, sessionId, userId) {
+  async onSession(session, sessionId, userId){
     console.log(`🚀 Nueva sesión: ${sessionId} para ${userId}`);
-    if (typeof session.updateSettingsForTesting !== 'function') {
-      session.updateSettingsForTesting = async () => { session.logger?.debug?.('Compat shim: updateSettingsForTesting noop'); };
-    }
     session.logger?.info('Session started', { userId, sessionId });
 
+    // Loading diferido para evitar flash si todo va rápido
+    try { this.showClamped(session, sessionId, ''); } catch(_) {}
     let settings = null;
     try {
+      // esperamos a que settings esté listo (mentraOS puede no enviar mentraosSettings en ACK al principio)
+      await this.waitForSettings(session, 2500);
       settings = await this.getUserSettings(session);
       if (!settings.nightscoutUrl || !settings.nightscoutToken) {
-        const msg = { en: 'Please configure Nightscout\nURL and token in settings', es: 'Configura URL y token\nde Nightscout en ajustes' };
+        const msg = { en: 'Please configure Nightscout
+URL and token in settings', es: 'Configura URL y token
+de Nightscout en ajustes' };
         this.showClamped(session, sessionId, msg[settings.language || 'en']);
         return;
       }
@@ -896,6 +882,24 @@ ${this.composeTirLines(settings, tirLine, bar, tLine)}`);
     if (value > 250) return lang === 'es' ? 'Crítico Alto' : 'Critical High';
     if (value >= limits.high) return lang === 'es' ? 'Alto' : 'High';
     return lang === 'es' ? 'Normal' : 'Normal';
+  }
+
+  // ---- Robust settings handling ----
+  async waitForSettings(session, timeoutMs = 2500){
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeoutMs){
+      if (session && session.settings && typeof session.settings.get === 'function'){
+        return session.settings;
+      }
+      await new Promise(r=>setTimeout(r, 80));
+    }
+    return null;
+  }
+  async safeSettingGet(session, key){
+    try{
+      if (!session || !session.settings || typeof session.settings.get !== 'function') return null;
+      return await session.settings.get(key);
+    }catch(_){ return null; }
   }
 }
 
