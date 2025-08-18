@@ -852,7 +852,11 @@ getAlertLimits(settings) {
 
             const line1 = isEs ? 'Ajustes guardados' : 'Settings saved';
             const line2 = `Units: ${settings.units} · HeadUp: ${settings.enable_head_up_display ? 'ON' : 'OFF'}`;
-            const line3 = (isEs ? 'TIR' : 'TIR') + `: ${limits.low}-${limits.high} mg/dL`;
+            const unitIsMmol = String(settings.units||'').toLowerCase().includes('mmol');
+            const limitsEcho = unitIsMmol
+              ? `${(limits.low/18).toFixed(1)}-${(limits.high/18).toFixed(1)} mmol/L`
+              : `${limits.low}-${limits.high} mg/dL`;
+            const line3 = `${isEs ? 'TIR hoy' : 'TIR'}: ${limitsEcho}`;
             const line4 = `${isEs ? 'Avanzado' : 'Advanced'}: ${settings.enable_advanced_mode ? 'ON' : 'OFF'}`;
             const line5 = (isEs ? 'Alarmas' : 'Alerts') + `: ${settings.alertsEnabled ? 'ON' : 'OFF'} · Hyst: ±${hystMg} mg/dL (±${hystMmol} mmol/L) · ${stateStr}`;
 
