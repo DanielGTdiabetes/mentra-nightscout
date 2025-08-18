@@ -70,7 +70,7 @@ __speedMult(speed){ return speed==='slow' ? 1.35 : (speed==='fast' ? 0.75 : 1.0)
    * Cancels if a newer render starts (token check).
    */
   
-  async animateTIRFill(session, sessionId, s, headerText, tirPct, tLine = \'\', extraLine = \'\', restart = false) {
+  async animateTIRFill(session, sessionId, s, headerText, tirPct, tLine = '', extraLine = '', restart = false) {
     try {
       const showBar = !!s.show_tir_bar;
       const anims   = s.enable_animations !== false;
