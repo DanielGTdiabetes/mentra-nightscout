@@ -626,9 +626,9 @@ class NightscoutMentraApp extends AppServer {
   }
 
   /* ---------- ciclo de vida ---------- */
-  async onSession(session, sessionId, userId) {
-    try {
-      const s = await this.getUserSettings(session);
+  \1
+      this.setupEventHandlers(session, sessionId, userId);
+      if (typeof this.bindSettingsReaction === 'function') this.bindSettingsReaction(session, sessionId);
       if (!s.nightscoutUrl) {
         this.showClamped(session, sessionId, s.language==='es' ? 'Configura URL y token\nde Nightscout en ajustes' : 'Set Nightscout URL + token\nin settings');
         return;
@@ -759,6 +759,21 @@ class NightscoutMentraApp extends AppServer {
   }
 }
 
+
+
+  // React to live settings changes if SDK exposes it
+  bindSettingsReaction(session, sessionId) {
+    try {
+      const cb = async () => {
+        try {
+          await this.showGlucoseQuick(session, sessionId);
+        } catch {}
+      };
+      if (session.settings && typeof session.settings.onChange === 'function') {
+        session.settings.onChange(cb);
+      }
+    } catch {}
+  }
 
 /* ---------- bootstrap ---------- */
 const app = new NightscoutMentraApp({
