@@ -48,7 +48,16 @@ class NightscoutMentraApp extends AppServer {
 
   __delay(ms) { return new Promise(res => setTimeout(res, ms)); }
   __clamp01(x){ return x < 0 ? 0 : (x > 1 ? 1 : x); }
-  __speedMult(speed){ return speed==='slow' ? 1.35 : (speed==='fast' ? 0.75 : 1.0); }
+  
+  __easeInOutCubic(t){
+    return t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t + 2, 3)/2;
+  }
+  __getEasingFunction(type = 'cubic'){
+    if (type === 'smooth') return (t)=> t*t*(3 - 2*t);
+    if (type === 'linear') return (t)=> t;
+    return (t)=> this.__easeInOutCubic(t);
+  }
+__speedMult(speed){ return speed==='slow' ? 1.35 : (speed==='fast' ? 0.75 : 1.0); }
   __barFromRatio(ratio, slots){
     const n = Math.round(this.__clamp01(ratio) * slots);
     const filled = '│'.repeat(n);
@@ -104,7 +113,8 @@ class NightscoutMentraApp extends AppServer {
         if (this._renderToken.get(sessionId) !== token) return;
         const t = (Date.now() - tStart) / totalMs;
         const clamped = Math.max(0, Math.min(1, t));
-        const eased = clamped*clamped*clamped;
+        const ease = this.__getEasingFunction(String(s.animation_type||'cubic'));
+        const eased = ease(clamped);
         const filled = Math.min(target, Math.floor(eased * target));
         if (filled !== last){
           this.showClamped(session, sessionId, base(filled));
