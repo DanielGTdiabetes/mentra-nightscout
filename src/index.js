@@ -759,6 +759,7 @@ class NightscoutMentraApp extends AppServer {
   }
 }
 
+
 /* ---------- bootstrap ---------- */
 const app = new NightscoutMentraApp({
   apiKey: MENTRAOS_API_KEY,
@@ -766,7 +767,25 @@ const app = new NightscoutMentraApp({
   port: PORT
 });
 
-app.listen().then(() => {
-  console.log(`MentraOS app listening on :${PORT}`);
-});
+const startApp = async () => {
+  try {
+    if (typeof app.listen === 'function') {
+      await app.listen();
+    } else if (typeof app.start === 'function') {
+      await app.start();
+    } else if (typeof app.run === 'function') {
+      await app.run();
+    } else if (typeof app.init === 'function') {
+      // Algunos SDKs separan init() y el server real lo inicia la plataforma
+      await app.init();
+    } else {
+      console.log('SDK lifecycle handled externally (no listen/start/run/init exposed).');
+    }
+    console.log(`MentraOS app ready on :${PORT}`);
+  } catch (err) {
+    console.error('Fatal boot error:', err);
+    process.exit(1);
+  }
+};
 
+startApp();
