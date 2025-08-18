@@ -1,10 +1,14 @@
 "use strict";
 /**
- * Nightscout MentraOS v2.12.1 (TIR invariant + Horizon-aware Prediction + perf tweaks)
+ * Nightscout MentraOS v2.13.0 (Hysteresis + Basic Pred Thresholds + UX echo)
  * HUD texto + TIR-bar ¦ CH/Ins día + Min/Max sólo gesto ¦ reset diario
  * ES/EN + mg/dL/mmol ¦ 5 líneas max ¦ cache last-good-entry
  * Settings en segundos/minutos + toggle barra TIR
  * Mejora: cliente axios por sesión, debounce de settings, animación reforzada
+ * NUEVO:
+ *  - Histeresis de alarmas (alert_hysteresis_mg / alert_hysteresis_mmol)
+ *  - En no avanzado, predicción sólo si cruza ≤60 o ≥180 mg/dL (fijos)
+ *  - “Eco” al guardar ajustes incluye estado de alarmas + histeresis (ES/EN)
  */
 
 require('dotenv').config();
@@ -38,6 +42,7 @@ class NightscoutMentraApp extends AppServer {
     super(opts);
     this.activeSessions = new Map();
     this.alertHistory = new Map();
+    this.alertLatch = new Map();       // NEW: latching con histeresis ('low' | 'high' | null)
     this.displayTimers = new Map();
     this.headUpLastShown = new Map();
     this.dailyTirState = new Map();
@@ -45,8 +50,8 @@ class NightscoutMentraApp extends AppServer {
     this.lastGoodEntry = new Map();
     this._renderToken = new Map();
     this._lastShownText = new Map();
-    this._http = new Map();             // NEW: cliente axios por sesión
-    this._settingsDebounce = new Map(); // NEW: debounce settings
+    this._http = new Map();             // cliente axios por sesión
+    this._settingsDebounce = new Map(); // debounce settings
     this._sessionLocale = new Map();    // cache locale/tz por sesión
   }
 
@@ -99,6 +104,14 @@ class NightscoutMentraApp extends AppServer {
     return { low: Math.round(lowM * 18), high: Math.round(highM * 18) };
   }
 
+  getHysteresisMg(settings) { // NEW: histeresis en mg/dL
+    const mg = this.validateSlicerValue(settings.alert_hysteresis_mg, 0, 50, NaN);
+    if (Number.isFinite(mg)) return mg;
+    const mmol = this.normalizeMmol(settings.alert_hysteresis_mmol);
+    if (Number.isFinite(mmol)) return Math.round(mmol * 18);
+    return 5; // por defecto ±5 mg/dL
+  }
+
   /* ---------- lectura de settings ---------- */
   async getUserSettings(session) {
     try {
@@ -111,6 +124,8 @@ class NightscoutMentraApp extends AppServer {
         'show_tir_bar','show_range_bar',
         'display_duration_ms','alert_duration_ms','alert_cooldown_ms',
         'enable_advanced_mode','advanced_mode_enabled',
+        // NUEVO:
+        'alert_hysteresis_mg','alert_hysteresis_mmol',
         // legacy (tolerados)
         'tir_low_mg','tir_high_mg','tir_low_mmol','tir_high_mmol',
         'time_in_range_low_mg','time_in_range_high_mg','time_in_range_low_mmol','time_in_range_high_mmol',
@@ -157,6 +172,9 @@ class NightscoutMentraApp extends AppServer {
         alert_cooldown_ms: coolMs,
         show_tir_bar: showTirBar,
         enable_advanced_mode: this.toBool(kv.enable_advanced_mode) || this.toBool(kv.advanced_mode_enabled),
+        // NEW: histeresis (defaults: 5 mg/dL ≈ 0.3 mmol/L)
+        alert_hysteresis_mg: this.validateSlicerValue(kv.alert_hysteresis_mg, 0, 50, 5),
+        alert_hysteresis_mmol: this.normalizeMmol(kv.alert_hysteresis_mmol) ?? 0.3,
         // legacy (no usados por TIR/pred, se toleran para compatibilidad)
         tir_low_mg: this.parseSlicerValue(kv.tir_low_mg, null),
         tir_high_mg: this.parseSlicerValue(kv.tir_high_mg, null),
@@ -182,6 +200,7 @@ class NightscoutMentraApp extends AppServer {
         display_duration_ms: 5000, alert_duration_ms: 15000, alert_cooldown_ms: 600000,
         show_tir_bar: true,
         enable_advanced_mode: false,
+        alert_hysteresis_mg: 5, alert_hysteresis_mmol: 0.3,
         prediction_horizon_min: 30,
         debug_force_alert: null
       };
@@ -229,6 +248,9 @@ class NightscoutMentraApp extends AppServer {
       alert_cooldown_ms: coolMs,
       show_tir_bar: showTirBar,
       enable_advanced_mode: this.toBool(o.enable_advanced_mode) || this.toBool(o.advanced_mode_enabled),
+      // NEW: histeresis
+      alert_hysteresis_mg: this.validateSlicerValue(o.alert_hysteresis_mg, 0, 50, 5),
+      alert_hysteresis_mmol: this.normalizeMmol(o.alert_hysteresis_mmol) ?? 0.3,
       // legacy tolerados
       tir_low_mg: this.parseSlicerValue(o.tir_low_mg, null),
       tir_high_mg: this.parseSlicerValue(o.tir_high_mg, null),
@@ -294,7 +316,10 @@ class NightscoutMentraApp extends AppServer {
   async formatForG1WithPrediction(data, settings, sessionId) {
     try {
       const base = await this.formatForG1(data, settings, sessionId);
-      const predShort = await this.buildAdvancedPredictionShort(settings, sessionId);
+      // En modo NO avanzado, usar umbrales fijos 60/180 mg/dL
+      const predShort = settings.enable_advanced_mode
+        ? await this.buildPredictionShort(settings, sessionId, null, null)
+        : await this.buildPredictionShort(settings, sessionId, 60, 180);
       if (!predShort) return base;
       const parts = base.split('\n');
       const l1 = parts[0] || '';
@@ -318,7 +343,7 @@ class NightscoutMentraApp extends AppServer {
     if (!cli || cli.defaults.baseURL !== baseURL || cli.defaults.params?.token !== settings.nightscoutToken){
       cli = axios.create({
         baseURL,
-        headers: { 'User-Agent': 'MentraOS-Nightscout/2.12.1' },
+        headers: { 'User-Agent': 'MentraOS-Nightscout/2.13.0' },
         timeout: 10000,
         params: settings.nightscoutToken ? { token: settings.nightscoutToken } : {}
       });
@@ -327,9 +352,16 @@ class NightscoutMentraApp extends AppServer {
     return cli;
   }
 
-  // v2.12: Predicción usa límites reales y horizonte; v2.12.1 usa cliente por sesión
-  async buildAdvancedPredictionShort(settings, sessionId='default') {
-    const { low: lowThreshold, high: highThreshold } = this.getAlertLimits(settings); // mg/dL
+  /**
+   * Predicción breve hasta cruzar límites.
+   * - Si lowOverrideMg/highOverrideMg son números, se usan (p. ej. 60/180 para no avanzado).
+   * - Si son null, usa límites de alerta configurados.
+   * Devuelve null si no se prevé cruce dentro del horizonte.
+   */
+  async buildPredictionShort(settings, sessionId='default', lowOverrideMg=null, highOverrideMg=null) {
+    const lim = this.getAlertLimits(settings);
+    const lowThreshold = Number.isFinite(lowOverrideMg) ? lowOverrideMg : lim.low;
+    const highThreshold = Number.isFinite(highOverrideMg) ? highOverrideMg : lim.high;
     const horizon = Number(settings.prediction_horizon_min || 30);
     const maxSteps = Math.max(3, Math.min(12, Math.round(horizon / 5))); // 15..60 → 3..12 pasos
     const isMmol = String(settings.units || '').toLowerCase().includes('mmol');
@@ -622,6 +654,7 @@ class NightscoutMentraApp extends AppServer {
         try { const sum = await this.getRecentTreatments(settings, 'day', sessionId); tLine = this.formatTreatmentsLine(sum, settings, sessionId); } catch {}
         await this.animateTIRFill(session, sessionId, settings, formattedData, tirPct, tLine);
       } else {
+        // No avanzado: mostramos base + pred sólo si hay cruce previsto (60/180)
         this.showClamped(session, sessionId, formattedData);
       }
       this._scheduleHide(sessionId, settings.display_duration_ms || 5000);
@@ -664,8 +697,8 @@ class NightscoutMentraApp extends AppServer {
       this._renderToken.set(sessionId, token);
 
       const slots = 20;
-      const leadIn = 220;    // ligerísimo 'delay' para evitar parpadeo al abrir
-      const totalMs = 920;   // duración total de la animación
+      const leadIn = 220;
+      const totalMs = 920;
       const target  = Math.floor(this.__clamp01(tirPct/100) * slots);
 
       const tirLine = (s.language==='es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
@@ -732,28 +765,33 @@ class NightscoutMentraApp extends AppServer {
             if (sd.updateInterval) { clearInterval(sd.updateInterval); sd.updateInterval = null; }
             await this.startNormalOperation(session, sessionId, userId, settings);
           }
-          if (this.alertLimitsChanged(old, settings)) this.alertHistory.delete(sessionId);
+          if (this.alertLimitsChanged(old, settings)) {
+            this.alertHistory.delete(sessionId);
+            this.alertLatch.delete(sessionId); // reinicia latch al cambiar límites
+          }
 
           sd.settings = settings;
           this.activeSessions.set(sessionId, sd);
 
-          // feedback rápido de guardado
+          // feedback rápido de guardado (ECO con alarmas + histeresis)
           try {
             try {
               const dNow = await this.getGlucoseData(settings, sessionId);
               await this.checkAlerts(session, sessionId, dNow, settings);
             } catch(_){}
-            const b = this._getLocaleBundle(sessionId, settings);
-            const lines = [];
-            lines.push(settings.language === 'es' ? 'Ajustes guardados' : 'Settings saved');
-            lines.push(`Units: ${settings.units}`);
+
+            const isEs = (settings.language || 'en') === 'es';
             const limits = this.getAlertLimits(settings);
-            lines.push(settings.language === 'es'
-              ? `TIR: ${limits.low}-${limits.high} mg/dL`
-              : `TIR: ${limits.low}-${limits.high} mg/dL`);
-            lines.push(`HeadUp: ${settings.enable_head_up_display ? 'ON' : 'OFF'}`);
-            lines.push(`Advanced: ${settings.enable_advanced_mode ? 'ON' : 'OFF'}`);
-            this.showClamped(session, sessionId, lines.join('\n'));
+            const hystMg = this.getHysteresisMg(settings);
+            const hystMmol = (hystMg / 18).toFixed(1);
+
+            const line1 = isEs ? 'Ajustes guardados' : 'Settings saved';
+            const line2 = `Units: ${settings.units} · HeadUp: ${settings.enable_head_up_display ? 'ON' : 'OFF'}`;
+            const line3 = (isEs ? 'TIR' : 'TIR') + `: ${limits.low}-${limits.high} mg/dL`;
+            const line4 = `${isEs ? 'Advanced' : 'Advanced'}: ${settings.enable_advanced_mode ? 'ON' : 'OFF'}`;
+            const line5 = (isEs ? 'Alarmas' : 'Alerts') + `: ${settings.alertsEnabled ? 'ON' : 'OFF'} · Hyst: ±${hystMg} mg/dL (±${hystMmol} mmol/L)`;
+
+            this.showClamped(session, sessionId, [line1,line2,line3,line4,line5].join('\n'));
             setTimeout(() => this.hideDisplay(session, sessionId), 2200);
           } catch {}
         } catch (error) {
@@ -816,6 +854,7 @@ class NightscoutMentraApp extends AppServer {
         this._http.delete(sessionId);
         this._sessionLocale.delete(sessionId);
         this.activeSessions.delete(sessionId); this.alertHistory.delete(sessionId);
+        this.alertLatch.delete(sessionId);
         this.headUpLastShown.delete(sessionId); this.dailyTirState.delete(sessionId); this.lastGoodEntry.delete(sessionId);
         session.logger?.info('Session disconnected');
       });
@@ -883,19 +922,37 @@ class NightscoutMentraApp extends AppServer {
   async checkAlerts(session, sessionId, data, settings) {
     const limits = this.getAlertLimits(settings);
     const mgdl = data.sgv;
-    const last = this.alertHistory.get(sessionId);
     const cooldown = settings.alert_cooldown_ms || 600000;
-    if (last && Date.now() - last < cooldown) return;
+    const lastAlertTs = this.alertHistory.get(sessionId);
+    const latch = this.alertLatch.get(sessionId) || null;
+    const h = this.getHysteresisMg(settings);
 
-    let alertType = null;
-    if (mgdl <= limits.low) alertType = 'low';
-    else if (mgdl >= limits.high) alertType = 'high';
+    // Rearme por histeresis (salida de estado de alerta)
+    if (latch === 'low' && mgdl >= (limits.low + h)) {
+      this.alertLatch.set(sessionId, null);
+    } else if (latch === 'high' && mgdl <= (limits.high - h)) {
+      this.alertLatch.set(sessionId, null);
+    }
 
+    // Si sigue latcheado, no relanzar
+    if (this.alertLatch.get(sessionId)) return;
+
+    // Cooldown general
+    if (lastAlertTs && Date.now() - lastAlertTs < cooldown) return;
+
+    // Forzado debug
     const dbg = (settings.debug_force_alert || '').toLowerCase();
-    if (!alertType && (dbg === 'low' || dbg === 'high')) alertType = dbg;
+    let alertType = null;
+
+    if (mgdl <= limits.low || dbg === 'low') {
+      alertType = 'low';
+    } else if (mgdl >= limits.high || dbg === 'high') {
+      alertType = 'high';
+    }
 
     if (alertType) {
       this.alertHistory.set(sessionId, Date.now());
+      this.alertLatch.set(sessionId, alertType); // activa latch
       await this.triggerAnimatedAlert(session, sessionId, data, settings, alertType);
       session.logger?.warn('Alert sent', { type: alertType, value: mgdl });
     }
@@ -941,7 +998,9 @@ class NightscoutMentraApp extends AppServer {
       oldSettings.high_alert_mg !== newSettings.high_alert_mg ||
       oldSettings.low_alert_mmol !== newSettings.low_alert_mmol ||
       oldSettings.high_alert_mmol !== newSettings.high_alert_mmol ||
-      oldSettings.units !== newSettings.units
+      oldSettings.units !== newSettings.units ||
+      oldSettings.alert_hysteresis_mg !== newSettings.alert_hysteresis_mg ||
+      oldSettings.alert_hysteresis_mmol !== newSettings.alert_hysteresis_mmol
     );
   }
 
@@ -1003,13 +1062,13 @@ server.start().catch(err => {
   console.error('⛔ Error iniciando servidor:', err);
   process.exit(1);
 });
-console.log('🚀 Nightscout MentraOS v2.12.1 — TIR invariant + perf/UX tweaks');
+console.log('🚀 Nightscout MentraOS v2.13.0 — Hysteresis + Basic Pred Thresholds + UX echo');
 
 const KEEP_ALIVE_URL = process.env.RENDER_URL || 'https://mentra-nightscout.onrender.com';
 server.app.get('/health', (_, res) => res.json({
   status: 'alive',
   timestamp: new Date().toISOString(),
-  version: '2.12.1',
+  version: '2.13.0',
   activeSessions: server.activeSessions.size
 }));
 setInterval(() => axios.get(`${KEEP_ALIVE_URL}/health`).catch(() => {}), 3 * 60 * 1000);
