@@ -66,7 +66,7 @@ class NightscoutMentraApp extends AppServer {
       const showBar = !!s.show_tir_bar;
       const anims   = s.enable_animations !== false;
       if (!showBar || !anims || tirPct == null || !Number.isFinite(tirPct)){
-        const bar = showBar && tirPct != null ? ' ' + this.__barFromRatio(tirPct/100, Number(s.tir_slots)||16) : '';
+        const bar = showBar && tirPct != null ? ' ' + this.__barFromRatio(tirPct/100, 20) : '';
         const tirLine = tirPct == null ? (s.language==='es' ? 'TIR hoy: n/d' : 'TIR: n/a') : (s.language==='es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
         const line2 = `${tirLine}${bar}` + (tLine ? `\n${tLine}` : '');
         const out = extraLine ? `${headerText}\n${line2}\n${extraLine}` : `${headerText}\n${line2}`;
@@ -77,10 +77,9 @@ class NightscoutMentraApp extends AppServer {
       const token = (this._renderToken.get(sessionId) || 0) + 1;
       this._renderToken.set(sessionId, token);
 
-      const slots   = Math.max(8, Number(s.tir_slots) || 16);
-      const leadIn  = Number(s.tir_leadin_ms) || 220;
-      const speedM  = this.__speedMult(String(s.animation_speed||'normal'));
-      const totalMs = Math.max(300, Math.min(2000, Math.round((Number(s.tir_anim_ms)||800) * speedM)));
+      const slots = 20;
+      const leadIn = 250;
+      const totalMs = 900;
       const target  = Math.floor(this.__clamp01(tirPct/100) * slots);
 
       const tirLine = (s.language==='es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
@@ -112,12 +111,12 @@ class NightscoutMentraApp extends AppServer {
           last = filled;
         }
         if (clamped >= 1) break;
-        await this.__delay(60);
+        await this.__delay(33);
       }
       this.showClamped(session, sessionId, base(target));
     } catch (_) {
       try {
-        const bar = this.__barFromRatio((tirPct||0)/100, Number(s.tir_slots)||16);
+        const bar = this.__barFromRatio((tirPct||0)/100, 20);
         const tirLine = tirPct == null ? (s.language==='es' ? 'TIR hoy: n/d' : 'TIR: n/a') : (s.language==='es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
         const line2 = `${tirLine} ${bar}` + (tLine ? `\n${tLine}` : '');
         const out = extraLine ? `${headerText}\n${line2}\n${extraLine}` : `${headerText}\n${line2}`;
@@ -195,6 +194,7 @@ class NightscoutMentraApp extends AppServer {
         session.settings.get('time_in_range_high_mg'),
         session.settings.get('time_in_range_low_mmol'),
         session.settings.get('time_in_range_high_mmol'),
+        session.settings.get('debug_force_alert'),
       ]);
 
       const uiMin = parseInt(updateInterval, 10);
@@ -243,6 +243,7 @@ class NightscoutMentraApp extends AppServer {
         time_in_range_low_mmol: this.normalizeMmol(time_in_range_low_mmol),
         time_in_range_high_mmol: this.normalizeMmol(time_in_range_high_mmol),
             prediction_horizon_min: [15,30,60].includes(Number(prediction_horizon_min || prediction_horizon_mins)) ? Number(prediction_horizon_min || prediction_horizon_mins) : 30,
+          debug_force_alert: (typeof debug_force_alert==='string'? debug_force_alert : null),
     };
     } catch (e) {
       console.error('Error leyendo settings:', e);
@@ -863,8 +864,8 @@ if (settings.units === UNITS.MMOL) {
     const cooldown = settings.alert_cooldown_ms || 600000;
     if (last && Date.now() - last < cooldown) return;
     const msgs = {
-      en: { low: `🚨 LOW GLUCOSE!\n${display} ${settings.units || UNITS.MGDL}`, high: `🚨 HIGH GLUCOSE!\n${display} ${settings.units || UNITS.MGDL}` },
-      es: { low: `🚨 ¡GLUCOSA BAJA!\n${display} ${settings.units || UNITS.MGDL}`, high: `🚨 ¡GLUCOSA ALTA!\n${display} ${settings.units || UNITS.MGDL}` }
+      en: { low: `[!] LOW GLUCOSE!\n${display} ${settings.units || UNITS.MGDL}`, high: `[!] HIGH GLUCOSE!\n${display} ${settings.units || UNITS.MGDL}` },
+      es: { low: `[!] ¡GLUCOSA BAJA!\n${display} ${settings.units || UNITS.MGDL}`, high: `[!] ¡GLUCOSA ALTA!\n${display} ${settings.units || UNITS.MGDL}` }
     };
     const lang = settings.language || 'en';
     let msg = null;
