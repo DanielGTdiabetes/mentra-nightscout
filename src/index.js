@@ -354,54 +354,6 @@ class NightscoutMentraApp extends AppServer {
     const blocks = Math.max(0, Math.min(20, Math.floor(tirPct / 5)));
     return '│'.repeat(blocks);
   }
-  async animateTIRBar(session, sessionId, settings, headerText, tirLine, tirPct, tLine='', extraLine='') {
-    try {
-      const maxBlocks = 20; // 5% per block
-      const targetBlocks = Math.max(0, Math.min(maxBlocks, Math.floor((Number(tirPct)||0) / 5)));
-      const leadIn = 220;
-      const baseMs = 800;
-      const speed = (settings.animation_speed || 'normal');
-      const mult = (speed==='slow'?1.2:(speed==='fast'?0.8:1.0));
-      const duration = Math.max(200, Math.min(2000, Math.round(baseMs*mult)));
-      const compose = (filled) => {
-        const bar = (settings.show_tir_bar===false || tirPct===null) ? '' : (' ' + '│'.repeat(filled));
-        const line2 = `${tirLine}${bar}`;
-        const l3 = tLine ? `\n${tLine}` : '';
-        const l4 = extraLine ? `\n${extraLine}` : '';
-        return `${headerText}\n${line2}${l3}${l4}`;
-      };
-      if (settings.show_tir_bar===false || tirPct===null) {
-        this.showClamped(session, sessionId, compose(0));
-        return;
-      }
-      // lead-in
-      if (leadIn>0) {
-        this.showClamped(session, sessionId, compose(0));
-        const t0 = Date.now(); while (Date.now()-t0 < leadIn) { await new Promise(r=>setTimeout(r,30)); }
-      }
-      const tStart = Date.now();
-      let last = -1;
-      while (true) {
-        const t = (Date.now() - tStart) / duration;
-        const clamped = Math.max(0, Math.min(1, t));
-        const eased = clamped*clamped*clamped; // ease-in
-        const filled = Math.min(targetBlocks, Math.floor(eased * targetBlocks));
-        if (filled !== last) { this.showClamped(session, sessionId, compose(filled)); last = filled; }
-        if (clamped>=1) break;
-        await new Promise(r=>setTimeout(r,60));
-      }
-      this.showClamped(session, sessionId, compose(targetBlocks));
-    } catch (e) {
-      try {
-        const bar = this.buildTirBar(tirPct);
-        const line2 = `${tirLine}${bar ? ' ' + bar : ''}`;
-        const l3 = tLine ? `\n${tLine}` : '';
-        const l4 = extraLine ? `\n${extraLine}` : '';
-        this.showClamped(session, sessionId, `${headerText}\n${line2}${l3}${l4}`);
-      } catch (_){}
-    }
-  }
-
   /* Compose second line: TIR label+bar and treatments.
      Siempre baja los tratamientos a siguiente línea (sin punto delante). */
   composeTirLines(settings, tirLine, bar, tLine) {
@@ -421,6 +373,40 @@ class NightscoutMentraApp extends AppServer {
       return clean ? `${labelBar}\n${clean}` : labelBar;
     } catch { return labelBar; }
   }
+  async animateTIRBarOnce(session, sessionId, settings, header, tirLine, targetPct, tLine=''){
+    try{
+      if (!this.toBool(settings.show_tir_bar)) {
+        this.showClamped(session, sessionId, `${header}\n${this.composeTirLines(settings, tirLine, '', tLine)}`);
+        return;
+      }
+      const totalMs = Math.max(300, Math.min(2000, Number(settings.tir_anim_ms||800)));
+      const speed = String(settings.animation_speed||'normal');
+      const mult = speed==='slow'?1.2:(speed==='fast'?0.8:1.0);
+      const dur = Math.round(totalMs*mult);
+      const steps = 18; // suave pero seguro
+      let lastBlocks = -1;
+      const t0 = Date.now();
+      while (true){
+        const t = (Date.now()-t0)/dur;
+        const clamped = Math.max(0, Math.min(1, t));
+        const eased = clamped*clamped*clamped; // ease-in
+        const pct = targetPct*eased;
+        const bar = this.buildTirBar(pct);
+        // evita refrescos redundantes
+        const blocks = bar.length;
+        if (blocks !== lastBlocks){
+          const line2 = this.composeTirLines(settings, tirLine, bar, tLine);
+          this.showClamped(session, sessionId, `${header}\n${line2}`);
+          lastBlocks = blocks;
+        }
+        if (clamped >= 1) break;
+        await new Promise(r=>setTimeout(r, 60));
+      }
+    }catch(e){
+      try{ this.showClamped(session, sessionId, `${header}\n${this.composeTirLines(settings, tirLine, this.buildTirBar(targetPct), tLine)}`);}catch(_){}
+    }
+  }
+
 
   updateDailyTirState(sessionId, readingMgdl, readingTs, settings) {
     const range = this.getAlertLimits(settings);
@@ -633,7 +619,8 @@ class NightscoutMentraApp extends AppServer {
         const bar = !this.toBool(settings.show_tir_bar) || tirPct === null ? '' : this.buildTirBar(tirPct);
         let tLine = '';
         try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {}
-        await this.animateTIRBar(session, sessionId, settings, formattedData, tirLine, tirRes.tirPct, tLine);
+        this.showClamped(session, sessionId, `${formattedData}
+${this.composeTirLines(settings, tirLine, bar, tLine)}`);
       } else {
         this.showClamped(session, sessionId, formattedData);
       }
@@ -748,7 +735,7 @@ if (settings.units === UNITS.MMOL) {
           try { const sum = await this.getRecentTreatments(s, 'day'); tLine = this.formatTreatmentsLine(sum, s); } catch {}
           const line2 = this.composeTirLines(s, tirLine, bar, tLine);
           const out = minMaxLine ? `${baseLine}\n${line2}\n${minMaxLine}` : `${baseLine}\n${line2}`;
-          await this.animateTIRBar(session, sessionId, s, baseLine, tirLine, tirPct, tLine, minMaxLine);
+          this.showClamped(session, sessionId, out);
           setTimeout(() => this.hideDisplay(session, sessionId), s.display_duration_ms || 4000);
         } catch (e) {
           this.showClamped(session, sessionId, 'Error');
