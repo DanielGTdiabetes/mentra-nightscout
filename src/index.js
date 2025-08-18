@@ -1,23 +1,34 @@
 "use strict";
 /**
- * Nightscout MentraOS v2.12.1 (TIR invariant + Horizon-aware Prediction + perf tweaks)
- * HUD texto + TIR-bar ¦ CH/Ins día + Min/Max sólo gesto ¦ reset diario
- * ES/EN + mg/dL/mmol ¦ 5 líneas max ¦ cache last-good-entry
- * Settings en segundos/minutos + toggle barra TIR
- * Mejora: cliente axios por sesión, debounce de settings, animación reforzada
+ * Nightscout MentraOS v2.13.3
+ * - Modo NO avanzado: aviso persistente de predicción (LOW/HIGH) mientras exista
+ * - Campanita 🔔 en cabecera si las alarmas están activas (oculta si no)
+ * - Sparkline ASCII opcional (sin BMP)
+ * - Predicción horizon-aware (devicestatus → fallback lineal filtrado)
+ * - Animación TIR refinada (modo avanzado)
+ * - Histeresis de alertas para reducir ruido
+ * - Cliente HTTP por sesión + debounce de ajustes/gestos
+ * - [FIX] "Últ:" muestra los valores reales del último evento (no los totales)
+ * - [ADD] debug_force_alert (low/high) como en la base
+ * - [ADD] Reset TIR con vigilancia de cambio de día (timer 60s)
+ *
+ * No exige cambios en la consola Mentra. Nuevas claves opcionales (si existen):
+ *  - enable_ascii_sparkline (boolean)
+ *  - sparkline_minutes (number, por defecto 30)
+ *  - animation_type ('linear' | 'smooth' | 'cubic')
+ *  - enable_animations (boolean)
+ *  - alert_hysteresis_mg (number, por defecto 5)
+ *  - debug_force_alert ('low' | 'high')
  */
 
 require('dotenv').config();
 const { AppServer } = require('@mentra/sdk');
 const axios = require('axios');
 
-/* ---------- SHIM: compatibilidad SDK ---------- */
+// SHIM compatibilidad SDK (tests)
 if (typeof Object.prototype.updateSettingsForTesting !== 'function') {
   Object.defineProperty(Object.prototype, 'updateSettingsForTesting', {
-    value: async () => {},
-    writable: true,
-    configurable: true,
-    enumerable: false
+    value: async () => {}, writable: true, configurable: true, enumerable: false
   });
 }
 
@@ -25,991 +36,492 @@ if (typeof Object.prototype.updateSettingsForTesting !== 'function') {
 const PACKAGE_NAME = process.env.PACKAGE_NAME || 'com.tucompania.nightscout-glucose';
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const MENTRAOS_API_KEY = process.env.MENTRAOS_API_KEY;
-
-if (!MENTRAOS_API_KEY) {
-  console.error('⛔ MENTRAOS_API_KEY environment variable is required');
-  process.exit(1);
-}
+if (!MENTRAOS_API_KEY) { console.error('⛔ MENTRAOS_API_KEY is required'); process.exit(1); }
 
 const UNITS = { MGDL: 'mg/dL', MMOL: 'mmol/L' };
 
 class NightscoutMentraApp extends AppServer {
-  constructor(opts) {
+  constructor(opts){
     super(opts);
-    this.activeSessions = new Map();
-    this.alertHistory = new Map();
-    this.displayTimers = new Map();
-    this.headUpLastShown = new Map();
-    this.dailyTirState = new Map();
-    this.dayWatchTimers = new Map();
-    this.lastGoodEntry = new Map();
+    this.active = new Map();           // sessionId -> { session, userId, settings, iv, dayIv }
+    this.lastGoodEntry = new Map();    // sessionId -> { sgv, date, direction }
+    this.dailyTir = new Map();         // sessionId -> { dayStr, total, inRange }
+    this.alertState = new Map();       // sessionId -> { lastAt, lastType }
+    this._http = new Map();            // sessionId -> axios instance
     this._renderToken = new Map();
-    this._lastShownText = new Map();
-    this._http = new Map();             // NEW: cliente axios por sesión
-    this._settingsDebounce = new Map(); // NEW: debounce settings
-    this._sessionLocale = new Map();    // cache locale/tz por sesión
+    this._lastShown = new Map();
+    this._hideTimers = new Map();
+    this._debounce = new Map();
+    this._locale = new Map();
+    this._lastHeadUpAt = new Map();
+    this._stickyPred = new Map();      // sessionId -> { text, type } (modo NO avanzado)
   }
 
-  /* ---------- helpers ---------- */
-  __delay(ms) { return new Promise(res => setTimeout(res, ms)); }
-  __clamp01(x){ return x < 0 ? 0 : (x > 1 ? 1 : x); }
-  __easeInOutCubic(t){ return t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t + 2, 3)/2; }
-  __getEasingFunction(type = 'cubic'){
-    if (type === 'smooth') return (t)=> t*t*(3 - 2*t);
-    if (type === 'linear') return (t)=> t;
-    return (t)=> this.__easeInOutCubic(t);
+  /* ===== Utils ===== */
+  _delay(ms){ return new Promise(r=>setTimeout(r,ms)); }
+  _clamp01(x){ return x<0?0:x>1?1:x; }
+  _ease(type='cubic'){
+    if (type==='linear') return t=>t;
+    if (type==='smooth') return t=> t*t*(3-2*t);
+    return t=> t<0.5 ? 4*t*t*t : 1 - Math.pow(-2*t+2,3)/2;
   }
-  __barFromRatio(ratio, slots){
-    const n = Math.round(this.__clamp01(ratio) * slots);
-    const filled = '¦'.repeat(n);
-    const empty  = '·'.repeat(Math.max(0, slots - n));
-    return `[${filled}${empty}]`;
-  }
-  _scheduleHide(sessionId, ms){
-    if (this.displayTimers.has(sessionId)) clearTimeout(this.displayTimers.get(sessionId));
-    const t = setTimeout(() => this.hideDisplay(this.activeSessions.get(sessionId)?.session, sessionId), ms);
-    this.displayTimers.set(sessionId, t);
-  }
+  _bar(ratio, slots=20){ const n = Math.round(this._clamp01(ratio)*slots); return `[${'¦'.repeat(n)}${'·'.repeat(slots-n)}]`; }
+  _scheduleHide(sessionId, ms, session){ if (this._hideTimers.has(sessionId)) clearTimeout(this._hideTimers.get(sessionId)); const t=setTimeout(()=>this.hideDisplay(session,sessionId),ms); this._hideTimers.set(sessionId,t); }
+  _toBool(x){ return x===true || x==='true' || x===1 || x==='1'; }
+  _parseVal(val, fb){ const n=(typeof val==='object'&&val!==null)? parseFloat(val.value): parseFloat(val); return Number.isFinite(n)? n: fb; }
+  _parseInt(val, fb){ const n=(typeof val==='object'&&val!==null)? parseInt(val.value,10): parseInt(val,10); return Number.isFinite(n)? n: fb; }
+  _normMmol(x){ const v=this._parseVal(x,null); return (v!==null && Number.isFinite(v))? (v>=30? v/10: v): null; } // UI mmol x10
 
-  parseSlicerValue(val, fallback) {
-    const n = (typeof val === 'object' && val !== null) ? parseFloat(val.value) : parseFloat(val);
-    return Number.isFinite(n) ? n : fallback;
-  }
-  validateSlicerValue(val, min, max, fallback) {
-    const v = this.parseSlicerValue(val, fallback);
-    return Number.isFinite(v) ? Math.max(min, Math.min(max, v)) : fallback;
-  }
-  toBool(x) { return (x === true || x === 'true' || x === 1 || x === '1'); }
-  normalizeMmol(x) {
-    const v = this.parseSlicerValue(x, null);
-    // UI mmol viene x10 (p.ej. 39 = 3.9)
-    return (v !== null && Number.isFinite(v)) ? (v >= 30 ? v / 10 : v) : null;
-  }
-
-  /* ---------- alertas / límites ---------- */
-  // TIR invariante a unidad -> prioriza mg/dL; si faltan, usa mmol convertidos
-  getAlertLimits(settings) {
-    const lowMg  = this.parseSlicerValue(settings.low_alert_mg, NaN);
-    const highMg = this.parseSlicerValue(settings.high_alert_mg, NaN);
-    if (Number.isFinite(lowMg) && Number.isFinite(highMg)) {
-      return { low: Math.round(lowMg), high: Math.round(highMg) };
-    }
-    const lowM = this.normalizeMmol(settings.low_alert_mmol) ?? 3.9;
-    const highM = this.normalizeMmol(settings.high_alert_mmol) ?? 13.9;
-    return { low: Math.round(lowM * 18), high: Math.round(highM * 18) };
-  }
-
-  /* ---------- lectura de settings ---------- */
-  async getUserSettings(session) {
-    try {
-      const keys = [
-        'nightscout_url','nightscout_token','update_interval',
-        'low_alert_mg','high_alert_mg','low_alert_mmol','high_alert_mmol',
-        'alerts_enabled','language','timezone','units',
-        'enable_head_up_display',
-        'display_duration_s','alert_duration_s','alert_cooldown_min',
-        'show_tir_bar','show_range_bar',
-        'display_duration_ms','alert_duration_ms','alert_cooldown_ms',
-        'enable_advanced_mode','advanced_mode_enabled',
-        // legacy (tolerados)
-        'tir_low_mg','tir_high_mg','tir_low_mmol','tir_high_mmol',
-        'time_in_range_low_mg','time_in_range_high_mg','time_in_range_low_mmol','time_in_range_high_mmol',
-        'prediction_horizon_min','prediction_horizon_mins',
-        'debug_force_alert'
-      ];
-      const vals = await Promise.all(keys.map(k => session.settings.get(k)));
-      const kv = Object.fromEntries(keys.map((k,i)=>[k,vals[i]]));
-
-      const uiMin = parseInt(kv.update_interval, 10);
-      const ui = Number.isFinite(uiMin) ? uiMin : 5;
-
-      const displayMs = Number.isFinite(this.parseSlicerValue(kv.display_duration_s, NaN))
-        ? Math.min(15, Math.max(1, this.parseSlicerValue(kv.display_duration_s))) * 1000
-        : this.validateSlicerValue(kv.display_duration_ms, 1000, 15000, 5000);
-
-      const alertMs = Number.isFinite(this.parseSlicerValue(kv.alert_duration_s, NaN))
-        ? Math.min(60, Math.max(2, this.parseSlicerValue(kv.alert_duration_s))) * 1000
-        : this.validateSlicerValue(kv.alert_duration_ms, 2000, 60000, 15000);
-
-      const coolMs = Number.isFinite(this.parseSlicerValue(kv.alert_cooldown_min, NaN))
-        ? Math.min(60, Math.max(1, this.parseSlicerValue(kv.alert_cooldown_min))) * 60 * 1000
-        : this.validateSlicerValue(kv.alert_cooldown_ms, 60000, 3600000, 600000);
-
-      const showTirBar = (kv.show_tir_bar == null && kv.show_range_bar == null)
-        ? true
-        : (this.toBool(kv.show_tir_bar) || this.toBool(kv.show_range_bar));
-
-      return {
-        nightscoutUrl: String(kv.nightscout_url || '').trim() || '',
-        nightscoutToken: String(kv.nightscout_token || '').trim() || '',
-        updateInterval: ui,
-        low_alert_mg: this.validateSlicerValue(kv.low_alert_mg, 50, 120, 70),
-        high_alert_mg: this.validateSlicerValue(kv.high_alert_mg, 180, 400, 250),
-        low_alert_mmol: this.normalizeMmol(kv.low_alert_mmol) ?? 3.9,
-        high_alert_mmol: this.normalizeMmol(kv.high_alert_mmol) ?? 13.9,
-        alertsEnabled: this.toBool(kv.alerts_enabled),
-        language: kv.language || 'en',
-        timezone: kv.timezone || null,
-        units: kv.units || UNITS.MGDL,
-        enable_head_up_display: this.toBool(kv.enable_head_up_display),
-        display_duration_ms: displayMs,
-        alert_duration_ms: alertMs,
-        alert_cooldown_ms: coolMs,
-        show_tir_bar: showTirBar,
-        enable_advanced_mode: this.toBool(kv.enable_advanced_mode) || this.toBool(kv.advanced_mode_enabled),
-        // legacy (no usados por TIR/pred, se toleran para compatibilidad)
-        tir_low_mg: this.parseSlicerValue(kv.tir_low_mg, null),
-        tir_high_mg: this.parseSlicerValue(kv.tir_high_mg, null),
-        tir_low_mmol: this.normalizeMmol(kv.tir_low_mmol),
-        tir_high_mmol: this.normalizeMmol(kv.tir_high_mmol),
-        time_in_range_low_mg: this.parseSlicerValue(kv.time_in_range_low_mg, null),
-        time_in_range_high_mg: this.parseSlicerValue(kv.time_in_range_high_mg, null),
-        time_in_range_low_mmol: this.normalizeMmol(kv.time_in_range_low_mmol),
-        time_in_range_high_mmol: this.normalizeMmol(kv.time_in_range_high_mmol),
-        prediction_horizon_min: [15,30,60].includes(Number(kv.prediction_horizon_min || kv.prediction_horizon_mins))
-          ? Number(kv.prediction_horizon_min || kv.prediction_horizon_mins) : 30,
-        debug_force_alert: (typeof kv.debug_force_alert === 'string' ? kv.debug_force_alert : null),
-      };
-    } catch (e) {
-      console.error('Error leyendo settings:', e);
-      return {
-        nightscoutUrl: '', nightscoutToken: '',
-        updateInterval: 5,
-        low_alert_mg: 70, high_alert_mg: 250,
-        low_alert_mmol: 3.9, high_alert_mmol: 13.9,
-        alertsEnabled: true, language: 'en', timezone: null, units: UNITS.MGDL,
-        enable_head_up_display: false,
-        display_duration_ms: 5000, alert_duration_ms: 15000, alert_cooldown_ms: 600000,
-        show_tir_bar: true,
-        enable_advanced_mode: false,
-        prediction_horizon_min: 30,
-        debug_force_alert: null
-      };
-    }
-  }
-
-  parseSettingsFromArray(arr) {
-    const o = {};
-    (arr || []).forEach(s => (o[s.key] = s.value));
-    const units = o.units || UNITS.MGDL;
-    const uiMin = parseInt(o.update_interval, 10);
-    const ui = Number.isFinite(uiMin) ? uiMin : 5;
-
-    const displayMs = Number.isFinite(this.parseSlicerValue(o.display_duration_s, NaN))
-      ? Math.min(15, Math.max(1, this.parseSlicerValue(o.display_duration_s))) * 1000
-      : this.validateSlicerValue(o.display_duration_ms, 1000, 15000, 5000);
-
-    const alertMs = Number.isFinite(this.parseSlicerValue(o.alert_duration_s, NaN))
-      ? Math.min(60, Math.max(2, this.parseSlicerValue(o.alert_duration_s))) * 1000
-      : this.validateSlicerValue(o.alert_duration_ms, 2000, 60000, 15000);
-
-    const coolMs = Number.isFinite(this.parseSlicerValue(o.alert_cooldown_min, NaN))
-      ? Math.min(60, Math.max(1, this.parseSlicerValue(o.alert_cooldown_min))) * 60 * 1000
-      : this.validateSlicerValue(o.alert_cooldown_ms, 60000, 3600000, 600000);
-
-    const showTirBar = (o.show_tir_bar == null && o.show_range_bar == null)
-      ? true
-      : (this.toBool(o.show_tir_bar) || this.toBool(o.show_range_bar));
-
-    return {
-      nightscoutUrl: String(o.nightscout_url || '').trim() || '',
-      nightscoutToken: String(o.nightscout_token || '').trim() || '',
-      updateInterval: ui,
-      low_alert_mg: this.validateSlicerValue(o.low_alert_mg, 50, 120, 70),
-      high_alert_mg: this.validateSlicerValue(o.high_alert_mg, 180, 400, 250),
-      low_alert_mmol: this.normalizeMmol(o.low_alert_mmol) ?? 3.9,
-      high_alert_mmol: this.normalizeMmol(o.high_alert_mmol) ?? 13.9,
-      alertsEnabled: this.toBool(o.alerts_enabled),
-      language: o.language || 'en',
-      timezone: o.timezone || null,
-      units,
-      enable_head_up_display: this.toBool(o.enable_head_up_display),
-      display_duration_ms: displayMs,
-      alert_duration_ms: alertMs,
-      alert_cooldown_ms: coolMs,
-      show_tir_bar: showTirBar,
-      enable_advanced_mode: this.toBool(o.enable_advanced_mode) || this.toBool(o.advanced_mode_enabled),
-      // legacy tolerados
-      tir_low_mg: this.parseSlicerValue(o.tir_low_mg, null),
-      tir_high_mg: this.parseSlicerValue(o.tir_high_mg, null),
-      tir_low_mmol: this.normalizeMmol(o.tir_low_mmol),
-      tir_high_mmol: this.normalizeMmol(o.tir_high_mmol),
-      time_in_range_low_mg: this.parseSlicerValue(o.time_in_range_low_mg, null),
-      time_in_range_high_mg: this.parseSlicerValue(o.time_in_range_high_mg, null),
-      time_in_range_low_mmol: this.normalizeMmol(o.time_in_range_low_mmol),
-      time_in_range_high_mmol: this.normalizeMmol(o.time_in_range_high_mmol),
-      prediction_horizon_min: [15,30,60].includes(Number(o.prediction_horizon_min || o.prediction_horizon_mins))
-        ? Number(o.prediction_horizon_min || o.prediction_horizon_mins) : 30,
-      debug_force_alert: (typeof o.debug_force_alert === 'string' ? o.debug_force_alert : null)
-    };
-  }
-
-  /* ---------- UI helpers ---------- */
-  convertToDisplay(mgdlValue, targetUnit) {
-    return targetUnit === UNITS.MMOL ? (mgdlValue / 18).toFixed(1) : Math.round(mgdlValue);
-  }
-  getTrendArrow(dir) {
-    const map = {
-      DoubleUp: '↑↑', SingleUp: '↑', FortyFiveUp: '↗',
-      Flat: '→',
-      FortyFiveDown: '↘', SingleDown: '↓', DoubleDown: '↓↓',
-      NONE: '-', 'NOT COMPUTABLE': '?'
-    };
-    return map[dir] || '?';
-  }
-  getLanguageSettings(settings) {
-    const langMap = { es: { locale: 'es-ES', timezone: 'Europe/Madrid' }, en: { locale: 'en-US', timezone: 'America/New_York' } };
-    return langMap[settings.language] || langMap.en;
-  }
-  validateTimezone(tz) {
-    const valid = [
-      'Europe/Madrid','Atlantic/Canary','Europe/London','Europe/Paris',
-      'Europe/Berlin','Europe/Rome','America/New_York','America/Chicago',
-      'America/Los_Angeles','America/Mexico_City','America/Argentina/Buenos_Aires',
-      'America/Sao_Paulo','Asia/Tokyo','Australia/Sydney','UTC',
-    ];
-    return valid.includes(tz) ? tz : 'UTC';
-  }
-  _getLocaleBundle(sessionId, settings){
-    const cached = this._sessionLocale.get(sessionId);
-    if (cached && cached.lang === settings.language && cached.tz === (settings.timezone||null)) return cached;
-    const langSettings = this.getLanguageSettings(settings);
-    const tz = settings.timezone ? this.validateTimezone(settings.timezone) : langSettings.timezone;
-    const b = { lang: settings.language||'en', locale: langSettings.locale, tz };
-    this._sessionLocale.set(sessionId, b);
-    return b;
-  }
-
-  async formatForG1(data, settings, sessionId) {
-    const display = this.convertToDisplay(data.sgv, settings.units || UNITS.MGDL);
-    const trend = this.getTrendArrow(data.direction);
-    const b = this._getLocaleBundle(sessionId || 'default', settings);
-    const readingTime = new Date(data.date);
-    const timeStr = readingTime.toLocaleTimeString(b.locale, { timeZone: b.tz, hour: '2-digit', minute: '2-digit', hour12: false });
-    const minutesAgo = Math.floor((Date.now() - data.date) / 60000);
-    const timeAgo = minutesAgo <= 1 ? (b.lang === 'es' ? 'ahora' : 'now') : (b.lang === 'es' ? `hace ${minutesAgo}m` : `${minutesAgo}m ago`);
-    return `${display} ${settings.units || UNITS.MGDL} ${trend}\n${timeStr} (${timeAgo})`;
-  }
-
-  async formatForG1WithPrediction(data, settings, sessionId) {
-    try {
-      const base = await this.formatForG1(data, settings, sessionId);
-      const predShort = await this.buildAdvancedPredictionShort(settings, sessionId);
-      if (!predShort) return base;
-      const parts = base.split('\n');
-      const l1 = parts[0] || '';
-      const l2 = (parts.length > 1 ? parts[1] : '');
-      const sep = ' · ';
-      const rest = parts.slice(2);
-      return `${l1}\n${l2}${sep}${predShort}${rest.length ? `\n${rest.join('\n')}` : ''}`;
-    } catch (error) {
-      console.error('Error in formatForG1WithPrediction, falling back:', error);
-      return await this.formatForG1(data, settings, sessionId);
-    }
-  }
-
-  /* ---------- Cliente HTTP por sesión ---------- */
-  _ensureHttp(sessionId, settings){
-    let cli = this._http.get(sessionId);
-    const baseRaw = (settings.nightscoutUrl || '').trim();
-    if (!baseRaw) return null;
-    const base = baseRaw.startsWith('http') ? baseRaw : ('https://' + baseRaw);
-    const baseURL = base.replace(/\/$/, '');
-    if (!cli || cli.defaults.baseURL !== baseURL || cli.defaults.params?.token !== settings.nightscoutToken){
-      cli = axios.create({
-        baseURL,
-        headers: { 'User-Agent': 'MentraOS-Nightscout/2.12.1' },
-        timeout: 10000,
-        params: settings.nightscoutToken ? { token: settings.nightscoutToken } : {}
-      });
+  /* ===== HTTP por sesión ===== */
+  _httpFor(sessionId, settings){
+    const raw=(settings.nightscoutUrl||'').trim(); if (!raw) return null;
+    const base = raw.startsWith('http')? raw: ('https://'+raw); const baseURL=base.replace(/\/$/, '');
+    let cli=this._http.get(sessionId);
+    if (!cli || cli.defaults.baseURL!==baseURL || (cli.defaults.params?.token||'')!==(settings.nightscoutToken||'')){
+      cli = axios.create({ baseURL, timeout: 10000, headers:{'User-Agent':'MentraOS-Nightscout/2.13.3'}, params: settings.nightscoutToken?{token:settings.nightscoutToken}:{}});
       this._http.set(sessionId, cli);
     }
     return cli;
   }
 
-  // v2.12: Predicción usa límites reales y horizonte; v2.12.1 usa cliente por sesión
-  async buildAdvancedPredictionShort(settings, sessionId='default') {
-    const { low: lowThreshold, high: highThreshold } = this.getAlertLimits(settings); // mg/dL
-    const horizon = Number(settings.prediction_horizon_min || 30);
-    const maxSteps = Math.max(3, Math.min(12, Math.round(horizon / 5))); // 15..60 → 3..12 pasos
-    const isMmol = String(settings.units || '').toLowerCase().includes('mmol');
-    const toDisp = (mgdl) => isMmol ? (mgdl/18).toFixed(1) : String(Math.round(mgdl));
-    const http = this._ensureHttp(sessionId, settings);
-    if (!http) return null;
+  /* ===== Settings ===== */
+  async getUserSettings(session){
+    const keys=[
+      'nightscout_url','nightscout_token','update_interval',
+      'units','language','timezone',
+      'alerts_enabled','low_alert_mg','high_alert_mg','low_alert_mmol','high_alert_mmol',
+      'enable_head_up_display','display_duration_s',
+      'alert_duration_s','alert_cooldown_min',
+      'show_tir_bar','show_range_bar',
+      // nuevas opcionales
+      'enable_ascii_sparkline','sparkline_minutes','animation_type','enable_animations','alert_hysteresis_mg','debug_force_alert',
+      // legacy/compat
+      'display_duration_ms','alert_duration_ms','alert_cooldown_ms',
+      'enable_advanced_mode','advanced_mode_enabled',
+      'prediction_horizon_min','prediction_horizon_mins'
+    ];
+    const vals = await Promise.all(keys.map(k=>session.settings.get(k)));
+    const kv = Object.fromEntries(keys.map((k,i)=>[k,vals[i]]));
 
-    // 1) Método exacto devicestatus
-    try {
-      const { data } = await http.get(`/api/v1/devicestatus.json?count=1`);
-      const ds = Array.isArray(data) ? data[0] : data;
-      const predBGs = ds && (ds.predBGs || ds?.openaps?.suggested?.predBGs || ds?.ar2?.predBGs);
-      if (predBGs) {
-        let series = predBGs.IOB || predBGs.COB || predBGs.UAM || predBGs.ZT || (Array.isArray(predBGs) ? predBGs : null);
-        if (Array.isArray(series) && series.length > 1) {
-          series = series.slice(0, maxSteps + 1);
-          const currentSgv = Number(series[0]);
-          if (Number.isFinite(currentSgv)) {
-            if (currentSgv > lowThreshold) {
-              for (let i = 1; i < series.length; i++) {
-                if (Number(series[i]) <= lowThreshold) return `↓${toDisp(lowThreshold)} @${i*5}m`;
-              }
-            }
-            if (currentSgv < highThreshold) {
-              for (let i = 1; i < series.length; i++) {
-                if (Number(series[i]) >= highThreshold) return `↑${toDisp(highThreshold)} @${i*5}m`;
-              }
-            }
+    const msFromS=(keyS,defS,minS,maxS,legacyKey,legacyMin,legacyMax,legacyDef)=>{
+      const vS=this._parseVal(kv[keyS],NaN); if (Number.isFinite(vS)) return Math.max(minS,Math.min(maxS,vS))*1000;
+      return Math.max(legacyMin,Math.min(legacyMax,this._parseVal(kv[legacyKey],legacyDef)));
+    };
+
+    const ui=this._parseInt(kv.update_interval,5);
+    const displayMs=msFromS('display_duration_s',5,1,15,'display_duration_ms',1000,15000,5000);
+    const alertMs=msFromS('alert_duration_s',15,2,60,'alert_duration_ms',2000,60000,15000);
+    const coolMs=(()=>{ const vMin=this._parseVal(kv.alert_cooldown_min,NaN); if (Number.isFinite(vMin)) return Math.max(1,Math.min(60,vMin))*60*1000; return Math.max(60000,Math.min(3600000,this._parseVal(kv.alert_cooldown_ms,600000))); })();
+    const showTir = (kv.show_tir_bar==null && kv.show_range_bar==null) ? true : (this._toBool(kv.show_tir_bar)||this._toBool(kv.show_range_bar));
+
+    return {
+      nightscoutUrl: String(kv.nightscout_url||'').trim(),
+      nightscoutToken: String(kv.nightscout_token||'').trim(),
+      updateInterval: ui,
+      units: kv.units||UNITS.MGDL,
+      language: kv.language||'en',
+      timezone: kv.timezone||null,
+      alertsEnabled: this._toBool(kv.alerts_enabled),
+      low_alert_mg: Math.max(50,Math.min(120,this._parseVal(kv.low_alert_mg,70))),
+      high_alert_mg: Math.max(180,Math.min(400,this._parseVal(kv.high_alert_mg,250))),
+      low_alert_mmol: this._normMmol(kv.low_alert_mmol) ?? 3.9,
+      high_alert_mmol: this._normMmol(kv.high_alert_mmol) ?? 13.9,
+      enable_head_up_display: this._toBool(kv.enable_head_up_display),
+      display_duration_ms: displayMs,
+      alert_duration_ms: alertMs,
+      alert_cooldown_ms: coolMs,
+      show_tir_bar: showTir,
+      enable_advanced_mode: this._toBool(kv.enable_advanced_mode)||this._toBool(kv.advanced_mode_enabled),
+      // nuevas (opc)
+      enable_ascii_sparkline: this._toBool(kv.enable_ascii_sparkline),
+      sparkline_minutes: this._parseInt(kv.sparkline_minutes,30),
+      animation_type: (kv.animation_type||'cubic'),
+      enable_animations: (kv.enable_animations==null)? true: this._toBool(kv.enable_animations),
+      alert_hysteresis_mg: this._parseVal(kv.alert_hysteresis_mg,5),
+      prediction_horizon_min: [15,30,60].includes(Number(kv.prediction_horizon_min||kv.prediction_horizon_mins)) ? Number(kv.prediction_horizon_min||kv.prediction_horizon_mins) : 30,
+      debug_force_alert: (typeof kv.debug_force_alert === 'string' ? kv.debug_force_alert : null)
+    };
+  }
+
+  parseSettingsFromArray(arr){
+    const o={}; (arr||[]).forEach(s=> o[s.key]=s.value);
+    const getS=(k,fb)=> (o[k]==null?fb:o[k]);
+    const _toB=v=> (v===true||v==='true'||v===1||v==='1');
+    const msFromS=(keyS,defS,minS,maxS,legacyKey,legacyMin,legacyMax,legacyDef)=>{
+      const vS=this._parseVal(getS(keyS,NaN),NaN); if (Number.isFinite(vS)) return Math.max(minS,Math.min(maxS,vS))*1000;
+      return Math.max(legacyMin,Math.min(legacyMax,this._parseVal(getS(legacyKey,legacyDef),legacyDef)));
+    };
+
+    const ui=this._parseInt(getS('update_interval',5),5);
+    const displayMs=msFromS('display_duration_s',5,1,15,'display_duration_ms',1000,15000,5000);
+    const alertMs=msFromS('alert_duration_s',15,2,60,'alert_duration_ms',2000,60000,15000);
+    const coolMs=(()=>{ const vMin=this._parseVal(getS('alert_cooldown_min',NaN),NaN); if (Number.isFinite(vMin)) return Math.max(1,Math.min(60,vMin))*60*1000; return Math.max(60000,Math.min(3600000,this._parseVal(getS('alert_cooldown_ms',600000),600000))); })();
+
+    const showTir=(getS('show_tir_bar',null)==null && getS('show_range_bar',null)==null) ? true : (_toB(getS('show_tir_bar',false))||_toB(getS('show_range_bar',false)));
+
+    return {
+      nightscoutUrl: String(getS('nightscout_url','')).trim(),
+      nightscoutToken: String(getS('nightscout_token','')).trim(),
+      updateInterval: ui,
+      units: getS('units', UNITS.MGDL),
+      language: getS('language','en'),
+      timezone: getS('timezone', null),
+      alertsEnabled: _toB(getS('alerts_enabled', true)),
+      low_alert_mg: Math.max(50,Math.min(120,this._parseVal(getS('low_alert_mg',70),70))),
+      high_alert_mg: Math.max(180,Math.min(400,this._parseVal(getS('high_alert_mg',250),250))),
+      low_alert_mmol: this._normMmol(getS('low_alert_mmol',3.9)) ?? 3.9,
+      high_alert_mmol: this._normMmol(getS('high_alert_mmol',13.9)) ?? 13.9,
+      enable_head_up_display: _toB(getS('enable_head_up_display', true)),
+      display_duration_ms: displayMs,
+      alert_duration_ms: alertMs,
+      alert_cooldown_ms: coolMs,
+      show_tir_bar: showTir,
+      enable_advanced_mode: _toB(getS('enable_advanced_mode', false)) || _toB(getS('advanced_mode_enabled', false)),
+      // nuevas (opc)
+      enable_ascii_sparkline: _toB(getS('enable_ascii_sparkline', false)),
+      sparkline_minutes: this._parseInt(getS('sparkline_minutes',30),30),
+      animation_type: (getS('animation_type','cubic')),
+      enable_animations: (getS('enable_animations',null)==null)? true: _toB(getS('enable_animations',true)),
+      alert_hysteresis_mg: this._parseVal(getS('alert_hysteresis_mg',5),5),
+      prediction_horizon_min: [15,30,60].includes(Number(getS('prediction_horizon_min', getS('prediction_horizon_mins',30)))) ? Number(getS('prediction_horizon_min', getS('prediction_horizon_mins',30))) : 30,
+      debug_force_alert: (typeof getS('debug_force_alert', null) === 'string' ? getS('debug_force_alert', null) : null)
+    };
+  }
+
+  /* ===== Límites (unidad-aware) ===== */
+  getAlertLimits(settings){
+    if ((settings.units||UNITS.MGDL)===UNITS.MGDL) return { low: Math.round(settings.low_alert_mg), high: Math.round(settings.high_alert_mg) };
+    return { low: Math.round((settings.low_alert_mmol??3.9)*18), high: Math.round((settings.high_alert_mmol??13.9)*18) };
+  }
+
+  /* ===== Locale/TZ ===== */
+  _langBundle(settings){
+    const prev=this._locale.get('k');
+    const lang=settings.language||'en';
+    const table={ es:{locale:'es-ES', tz:'Europe/Madrid'}, en:{locale:'en-US', tz:'America/New_York'} };
+    const base=table[lang]||table.en; const tz=settings.timezone||base.tz;
+    const pack={ lang, locale: base.locale, tz };
+    if (!prev || prev.lang!==lang || prev.tz!==tz) this._locale.set('k', pack);
+    return pack;
+  }
+
+  /* ===== Formatos UI ===== */
+  toDisplay(mgdl, unit){ return (unit||UNITS.MGDL)===UNITS.MMOL ? (mgdl/18).toFixed(1) : String(Math.round(mgdl)); }
+  trendArrow(dir){ const m={DoubleUp:'↑↑',SingleUp:'↑',FortyFiveUp:'↗',Flat:'→',FortyFiveDown:'↘',SingleDown:'↓',DoubleDown:'↓↓',NONE:'-','NOT COMPUTABLE':'?'}; return m[dir]||'?'; }
+
+  // Campanita de alarmas al final de la 1ª línea
+  _decorateHeaderFirstLine(line, settings){
+    if (!settings?.alertsEnabled) return line;
+    const maxLen=48; const clean=line.length>(maxLen-2)? line.slice(0,maxLen-2): line;
+    return `${clean}  🔔`;
+  }
+
+  async formatHeader(entry, settings){
+    const { locale, tz, lang } = this._langBundle(settings);
+    const val=this.toDisplay(entry.sgv, settings.units); const arr=this.trendArrow(entry.direction);
+    const t=new Date(entry.date); const hhmm=t.toLocaleTimeString(locale,{timeZone:tz,hour:'2-digit',minute:'2-digit',hour12:false});
+    const agoM=Math.floor((Date.now()-entry.date)/60000);
+    const ago=agoM<=1? (lang==='es'? 'ahora':'now') : (lang==='es'?`hace ${agoM}m`:`${agoM}m ago`);
+    const line1=this._decorateHeaderFirstLine(`${val} ${settings.units} ${arr}`, settings);
+    const line2=`${hhmm} (${ago})`;
+    return `${line1}\n${line2}`;
+  }
+
+  /* ===== Sparkline ASCII (opcional) ===== */
+  buildAsciiSparkline(pointsMgdl, units){
+    if (!pointsMgdl || pointsMgdl.length<3) return '';
+    const blocks=['▁','▂','▃','▄','▅','▆','▇','█'];
+    const n=Math.min(24,Math.max(6,pointsMgdl.length));
+    const arr=pointsMgdl.slice(-n); const min=Math.min(...arr), max=Math.max(...arr);
+    if (!Number.isFinite(min)||!Number.isFinite(max)||max<=min) return '';
+    const map=x=>{ const q=(x-min)/(max-min); return blocks[Math.max(0,Math.min(blocks.length-1,Math.round(q*(blocks.length-1))))]; };
+    const first=this.toDisplay(arr[0], units); const last=this.toDisplay(arr[arr.length-1], units);
+    return `${first} ${units} ${arr.map(map).join('')} ${last} ${units}`;
+  }
+
+  /* ===== Datos Nightscout ===== */
+  _httpGet(sessionId, settings, path){ const http=this._httpFor(sessionId,settings); if(!http) throw new Error('URL no configurada'); return http.get(path); }
+
+  async getLatestEntry(settings, sessionId){
+    const eps=[`/api/v1/entries/sgv.json?count=1`,`/api/v1/entries.json?count=1`,`/api/v1/entries/current.json`];
+    let lastErr; for (const ep of eps){ try{ const {data}=await this._httpGet(sessionId,settings,ep); const r=Array.isArray(data)? data[0]: data; if(!r) throw new Error('Empty'); const sgv=Number(r.sgv??r.glucose); const date=r.date||r.dateString||r.sysTime; if(!Number.isFinite(sgv)||!date) throw new Error('Bad'); return { sgv, date:(typeof date==='string')? new Date(date).getTime(): date, direction: r.direction||r.trend||'NONE' }; } catch(e){ lastErr=e; }}
+    throw new Error(`entries failed: ${lastErr?.message||'unknown'}`);
+  }
+
+  async getEntriesWindow(settings, minutes, sessionId){
+    const { data } = await this._httpGet(sessionId, settings, `/api/v1/entries/sgv.json?count=48`);
+    const arr=(Array.isArray(data)? data: (data?[data]:[]))
+      .map(r=>({ mgdl:Number(r.sgv??r.glucose), ts:(typeof r.date==='string')? new Date(r.date).getTime(): r.date }))
+      .filter(r=> Number.isFinite(r.mgdl)&&r.ts );
+    const since=Date.now()-Math.max(5,minutes)*60*1000;
+    return arr.filter(r=> r.ts>=since).sort((a,b)=> a.ts-b.ts);
+  }
+
+  async getTodayEntries(settings, sessionId){
+    const { locale, tz } = this._langBundle(settings);
+    const todayStr=new Date().toLocaleDateString(locale,{timeZone:tz});
+    const { data } = await this._httpGet(sessionId, settings, `/api/v1/entries/sgv.json?count=400`);
+    return (Array.isArray(data)? data: (data?[data]:[]))
+      .map(r=>({ mgdl:Number(r.sgv??r.glucose), ts:(typeof r.date==='string')? new Date(r.date).getTime(): r.date }))
+      .filter(r=> Number.isFinite(r.mgdl)&&r.ts )
+      .filter(r=> new Date(r.ts).toLocaleDateString(locale,{timeZone:tz})===todayStr)
+      .sort((a,b)=> a.ts-b.ts);
+  }
+
+  /* ===== Predicción ===== */
+  _predTypeFromText(text){ if (!text) return null; const t=text.trim(); if (t.startsWith('↓')) return 'low'; if (t.startsWith('↑')) return 'high'; return null; }
+
+  async buildPredictionShort(settings, sessionId){
+    const limits=this.getAlertLimits(settings); const horizon=Number(settings.prediction_horizon_min||30);
+    const steps=Math.max(3,Math.min(12,Math.round(horizon/5)));
+    const isMmol=(settings.units||UNITS.MGDL)===UNITS.MMOL; const toD=mgdl=> isMmol? (mgdl/18).toFixed(1): String(Math.round(mgdl));
+
+    // 1) Devicestatus predBGs
+    try{
+      const { data } = await this._httpGet(sessionId, settings, `/api/v1/devicestatus.json?count=1`);
+      const ds=Array.isArray(data)? data[0]: data; const predBGs= ds && (ds.predBGs||ds?.openaps?.suggested?.predBGs||ds?.ar2?.predBGs);
+      if (predBGs){
+        let series=predBGs.IOB||predBGs.COB||predBGs.UAM||predBGs.ZT||(Array.isArray(predBGs)? predBGs: null);
+        if (Array.isArray(series)&&series.length>1){
+          series=series.slice(0,steps+1); const now=Number(series[0]);
+          if (Number.isFinite(now)){
+            if (now>limits.low){ for (let i=1;i<series.length;i++){ if (Number(series[i])<=limits.low) return `↓${toD(limits.low)} @${i*5}m`; }}
+            if (now<limits.high){ for (let i=1;i<series.length;i++){ if (Number(series[i])>=limits.high) return `↑${toD(limits.high)} @${i*5}m`; }}
           }
         }
       }
-    } catch (_) {}
+    }catch(_){ }
 
-    // 2) Fallback lineal
-    try {
-      const { data } = await http.get(`/api/v1/entries.json?count=2`);
-      if (data && data.length >= 2) {
-        const last = data[0], prev = data[1];
-        const mgNow = Number(last.sgv ?? last.glucose);
-        const tNow = new Date(last.date || last.dateString).getTime();
-        const mgPrev = Number(prev.sgv ?? prev.glucose);
-        const tPrev = new Date(prev.date || prev.dateString).getTime();
-
-        if (Number.isFinite(mgNow) && Number.isFinite(mgPrev) && tNow > tPrev) {
-          const deltaMinutes = (tNow - tPrev) / 60000;
-          if (deltaMinutes > 0) {
-            const ratePerMin = (mgNow - mgPrev) / deltaMinutes;
-
-            if (ratePerMin < -0.4) {
-              const timeToLow = (lowThreshold - mgNow) / ratePerMin;
-              if (timeToLow > 0 && timeToLow <= horizon) return `↓${toDisp(lowThreshold)} @${Math.round(timeToLow)}m`;
-            }
-            if (ratePerMin > 0.4) {
-              const timeToHigh = (highThreshold - mgNow) / ratePerMin;
-              if (timeToHigh > 0 && timeToHigh <= horizon) return `↑${toDisp(highThreshold)} @${Math.round(timeToHigh)}m`;
-            }
+    // 2) Fallback lineal con pendiente recortada
+    try{
+      const { data } = await this._httpGet(sessionId, settings, `/api/v1/entries.json?count=3`);
+      const arr=Array.isArray(data)? data: [data];
+      if (arr.length>=2){
+        const a=arr[0], b=arr[1];
+        const mgA=Number(a.sgv??a.glucose), mgB=Number(b.sgv??b.glucose);
+        const tA=new Date(a.date||a.dateString).getTime(); const tB=new Date(b.date||b.dateString).getTime();
+        if (Number.isFinite(mgA)&&Number.isFinite(mgB)&&tA>tB){
+          const dM=(tA-tB)/60000; if (dM>0){
+            const slope=(mgA-mgB)/dM; const slopeClamped=Math.max(-3,Math.min(3,slope));
+            if (slopeClamped < -0.4){ const ttLow=(limits.low-mgA)/slopeClamped; if (ttLow>0 && ttLow<=horizon) return `↓${toD(limits.low)} @${Math.round(ttLow)}m`; }
+            if (slopeClamped > 0.4){ const ttHigh=(limits.high-mgA)/slopeClamped; if (ttHigh>0 && ttHigh<=horizon) return `↑${toD(limits.high)} @${Math.round(ttHigh)}m`; }
           }
         }
       }
-    } catch (_) {}
+    }catch(_){ }
 
     return null;
   }
 
-  /* ---------- día local + TIR + tratamientos ---------- */
-  getLocalDayStr(ts, settings, sessionId='default') {
-    const b = this._getLocaleBundle(sessionId, settings);
-    return new Date(ts).toLocaleDateString(b.locale, { timeZone: b.tz });
-  }
-  buildTirBar(tirPct) {
-    if (tirPct === null || !Number.isFinite(tirPct)) return '';
-    const blocks = Math.max(0, Math.min(20, Math.floor(tirPct / 5)));
-    return '¦'.repeat(blocks);
-  }
-  composeTirLines(settings, tirLine, bar, tLine) {
-    const labelBar = `${tirLine}${bar ? ' ' + bar : ''}`;
-    try {
-      let clean = (tLine || '')
-        .replace(/^CH\/Ins hoy: /, '')
-        .replace(/^Carbs\/Ins today: /, '')
-        .replace(/\s*[·•]\s*(Last|Últ):[\s\S]*$/i, '')
-        .replace(/\s*Last:[\s\S]*$/i, '')
-        .replace(/\s*Últ:[\s\S]*$/i, '')
-        .replace(/\s*\/\s*/g, '/')
-        .replace(/\s+/g, ' ')
-        .trim();
-      return clean ? `${labelBar}\n${clean}` : labelBar;
-    } catch { return labelBar; }
+  /* ===== TIR y tratamientos ===== */
+  _dayKey(ts, settings){ const { locale, tz } = this._langBundle(settings); return new Date(ts).toLocaleDateString(locale,{timeZone:tz}); }
+  updateTir(sessionId, mgdl, ts, settings){
+    const key=this._dayKey(ts, settings); let st=this.dailyTir.get(sessionId); if(!st||st.dayStr!==key) st={ dayStr:key, total:0, inRange:0 };
+    const lim=this.getAlertLimits(settings); if (Number.isFinite(mgdl)){ st.total+=1; if (mgdl>=lim.low && mgdl<=lim.high) st.inRange+=1; }
+    this.dailyTir.set(sessionId, st); return st.total>0? Math.round(st.inRange*100/st.total): null;
   }
 
-  updateDailyTirState(sessionId, readingMgdl, readingTs, settings) {
-    const range = this.getAlertLimits(settings);
-    const dayStr = this.getLocalDayStr(readingTs, settings, sessionId);
-    let st = this.dailyTirState.get(sessionId);
-    if (!st || st.dayStr !== dayStr) st = { dayStr, total: 0, inRange: 0 };
-    if (Number.isFinite(readingMgdl)) {
-      st.total += 1;
-      if (readingMgdl >= range.low && readingMgdl <= range.high) st.inRange += 1;
+  async getTreatmentsToday(settings, sessionId){
+    try{
+      const { data } = await this._httpGet(sessionId, settings, `/api/v1/treatments.json?count=1000`);
+      const arr=Array.isArray(data)? data: (data?[data]:[]);
+      const { locale, tz } = this._langBundle(settings); const today=new Date().toLocaleDateString(locale,{timeZone:tz});
+      const ev=arr.map(t=>{ const d=t.created_at||t.timestamp||t.dateString||t.date||null; const ts=(typeof d==='number')? d: (typeof d==='string'? Date.parse(d): null); return { ts, carbs:Number(t.carbs), insulin:Number(t.insulin) }; })
+        .filter(e=> e.ts && (Number.isFinite(e.carbs)||Number.isFinite(e.insulin)));
+      const sameDay=ev.filter(e=> new Date(e.ts).toLocaleDateString(locale,{timeZone:tz})===today);
+      let C=0,I=0,last=null; for (const e of sameDay){ if (Number.isFinite(e.carbs)) C+=e.carbs; if (Number.isFinite(e.insulin)) I+=e.insulin; if (!last||e.ts>last.ts) last=e; }
+      return { carbs:+(Math.round(C*10)/10), insulin:+(Math.round(I*10)/10), last };
+    }catch(_){ return null; }
+  }
+
+  lineTreatments(sum, settings){
+    if (!sum) return ''; const lang=settings.language||'en'; const { carbs, insulin, last } = sum; let lastStr='';
+    if (last && (Number.isFinite(last.carbs)||Number.isFinite(last.insulin))){
+      const { locale, tz } = this._langBundle(settings); const hhmm=new Date(last.ts).toLocaleTimeString(locale,{timeZone:tz,hour:'2-digit',minute:'2-digit',hour12:false});
+      const parts=[]; if (Number.isFinite(last.carbs)) parts.push(`${last.carbs}g`); if (Number.isFinite(last.insulin)) parts.push(`${last.insulin}U`);
+      if (parts.length) lastStr = (lang==='es'? ` · Últ: ${parts.join(', ')} ${hhmm}` : ` · Last: ${parts.join(', ')} ${hhmm}`);
     }
-    this.dailyTirState.set(sessionId, st);
-    return { tirPct: st.total > 0 ? Math.round((st.inRange / st.total) * 100) : null, total: st.total };
+    return (lang==='es')? `CH/Ins hoy: ${carbs}g / ${insulin}U${lastStr}` : `Carbs/Ins today: ${carbs}g / ${insulin}U${lastStr}`;
   }
 
-  async getRecentTreatments(settings, hours = 'day', sessionId='default') {
-    try {
-      const http = this._ensureHttp(sessionId, settings);
-      if (!http) return null;
-      const { data } = await http.get(`/api/v1/treatments.json?count=1000`);
-      const arr = Array.isArray(data) ? data : (data ? [data] : []);
-      const b = this._getLocaleBundle(sessionId, settings);
-      const todayStr = new Date().toLocaleDateString(b.locale, { timeZone: b.tz });
-      const events = arr.map(t => {
-        const dateStr = t.created_at || t.timestamp || t.dateString || t.date || null;
-        let ts = null;
-        if (typeof dateStr === 'number') ts = dateStr;
-        else if (typeof dateStr === 'string') ts = Date.parse(dateStr);
-        return { ts, carbs: Number(t.carbs), insulin: Number(t.insulin) };
-      }).filter(e => e.ts && (Number.isFinite(e.carbs) || Number.isFinite(e.insulin)));
-      let windowed, label;
-      if (hours === 'day') {
-        windowed = events.filter(e => new Date(e.ts).toLocaleDateString(b.locale, { timeZone: b.tz }) === todayStr);
-        label = settings.language === 'es' ? 'hoy' : 'today';
-      } else {
-        const since = Date.now() - Math.max(1, hours) * 60 * 60 * 1000;
-        windowed = events.filter(e => e.ts >= since);
-        label = `${hours}h`;
-      }
-      if (!windowed.length) return { label, totalCarbs: 0, totalInsulin: 0, last: null };
-      let totalCarbs = 0, totalInsulin = 0, last = null;
-      for (const e of windowed) {
-        if (Number.isFinite(e.carbs)) totalCarbs += e.carbs;
-        if (Number.isFinite(e.insulin)) totalInsulin += e.insulin;
-        if (!last || e.ts > last.ts) last = e;
-      }
-      return { label, totalCarbs, totalInsulin, last };
-    } catch (_) { return null; }
-  }
-  formatTreatmentsLine(summary, settings, sessionId='default') {
-    if (!summary) return '';
-    const { label, totalCarbs, totalInsulin, last } = summary;
-    const lang = settings.language || 'en';
-    const round1 = x => Number.isFinite(x) ? Math.round(x * 10) / 10 : 0;
-    const c = round1(totalCarbs), i = round1(totalInsulin);
-    let lastStr = '';
-    if (last && (Number.isFinite(last.carbs) || Number.isFinite(last.insulin))) {
-      const b = this._getLocaleBundle(sessionId, settings);
-      const t = new Date(last.ts).toLocaleTimeString(b.locale, { timeZone: b.tz, hour: '2-digit', minute: '2-digit', hour12: false });
-      const parts = [];
-      if (Number.isFinite(last.carbs)) parts.push(`${round1(last.carbs)}g`);
-      if (Number.isFinite(last.insulin)) parts.push(`${round1(last.insulin)}U`);
-      lastStr = parts.length ? (lang === 'es' ? ` · Últ: ${parts.join(', ')} ${t}` : ` · Last: ${parts.join(', ')} ${t}`) : '';
-    }
-    return lang === 'es'
-      ? (label === 'hoy' ? `CH/Ins hoy: ${c}g / ${i}U${lastStr}` : `CH/Ins ${label}: ${c}g / ${i}U${lastStr}`)
-      : (label === 'today' ? `Carbs/Ins today: ${c}g / ${i}U${lastStr}` : `Carbs/Ins ${label}: ${c}g / ${i}U${lastStr}`);
+  async minMaxLineToday(settings, sessionId='default'){
+    try{
+      const entries=await this.getTodayEntries(settings, sessionId); const vals=entries.map(e=>e.mgdl).filter(Number.isFinite); if (!vals.length) return '';
+      const min=Math.min(...vals), max=Math.max(...vals); const minDisp=this.toDisplay(min, settings.units); const maxDisp=this.toDisplay(max, settings.units);
+      return (settings.language==='es')? `Min/Max hoy: ${minDisp} / ${maxDisp} ${settings.units}` : `Min/Max today: ${minDisp} / ${maxDisp} ${settings.units}`;
+    }catch{ return ''; }
   }
 
-  /* ---------- obtención de datos ---------- */
-  async getTodayEntries(settings, sessionId='default') {
-    const http = this._ensureHttp(sessionId, settings);
-    if (!http) throw new Error('URL no configurada');
-    const { data } = await http.get(`/api/v1/entries/sgv.json?count=400`);
-    const arr = Array.isArray(data) ? data : (data ? [data] : []);
-    const b = this._getLocaleBundle(sessionId, settings);
-    const todayStr = new Date().toLocaleDateString(b.locale, { timeZone: b.tz });
-    const today = arr
-      .map(r => ({ mgdl: Number(r.sgv ?? r.glucose), date: typeof r.date === 'string' ? new Date(r.date).getTime() : r.date }))
-      .filter(r => Number.isFinite(r.mgdl) && r.date)
-      .filter(r => new Date(r.date).toLocaleDateString(b.locale, { timeZone: b.tz }) === todayStr)
-      .sort((a, b) => a.date - b.date);
-    return today;
+  /* ===== UI ===== */
+  show(session, sessionId, text, maxLines=5){ const lines=String(text||'').replace(/\r/g,'').split('\n').filter(l=>l.trim()!==''); const out=lines.slice(0,maxLines).join('\n'); if (this._lastShown.get(sessionId)===out) return; this._lastShown.set(sessionId,out); session.layouts.showTextWall(out); }
+  hideDisplay(session, sessionId){ try{ session.layouts.showTextWall(''); this._lastShown.delete(sessionId);}catch{} }
+
+  async animateTIR(session, sessionId, settings, header, tirPct, extraLines){
+    const showBar=!!settings.show_tir_bar; const animOn=settings.enable_animations!==false; const lang=settings.language||'en';
+    const tag=(lang==='es'? 'TIR hoy:':'TIR:') + (tirPct==null? ' n/d': ` ${tirPct}%`);
+    const baseOut=()=> `${header}\n${tag}${showBar && tirPct!=null? ' '+this._bar(tirPct/100,20):''}${extraLines? ('\n'+extraLines):''}`;
+    if (!showBar || !animOn || tirPct==null || !Number.isFinite(tirPct)){ this.show(session, sessionId, baseOut()); return; }
+    const token=(this._renderToken.get(sessionId)||0)+1; this._renderToken.set(sessionId, token);
+    const slots=20, target=Math.floor(this._clamp01(tirPct/100)*slots); const leadIn=180, totalMs=900; const ease=this._ease(settings.animation_type||'cubic');
+    this.show(session, sessionId, `${header}\n${tag} ${this._bar(0,20)}${extraLines? ('\n'+extraLines):''}`);
+    const t0=Date.now(); while (Date.now()-t0<leadIn){ if (this._renderToken.get(sessionId)!==token) return; await this._delay(30); }
+    const ts=Date.now(); let last=-1; while (true){ if (this._renderToken.get(sessionId)!==token) return; const p=Math.min(1,(Date.now()-ts)/totalMs); const filled=Math.min(target,Math.floor(ease(p)*target)); if (filled!==last){ this.show(session, sessionId, `${header}\n${tag} ${this._bar(filled/slots,20)}${extraLines? ('\n'+extraLines):''}`); last=filled; } if (p>=1) break; await this._delay(32); }
+    this.show(session, sessionId, baseOut());
   }
 
-  async getGlucoseData(settings, sessionId='default') {
-    const http = this._ensureHttp(sessionId, settings);
-    if (!http) throw new Error('URL no configurada');
-
-    const endpoints = [
-      `/api/v1/entries/sgv.json?count=1`,
-      `/api/v1/entries.json?count=1`,
-      `/api/v1/entries/current.json`
-    ];
-    let lastError;
-    for (const endpoint of endpoints) {
-      try {
-        const { data } = await http.get(endpoint);
-        const reading = Array.isArray(data) ? data[0] : data;
-        if (!reading) throw new Error('Empty response');
-        const glucose = Number(reading.sgv ?? reading.glucose);
-        if (!Number.isFinite(glucose)) throw new Error('No glucose data found');
-        const dateValue = reading.date || reading.dateString || reading.sysTime;
-        if (!dateValue) throw new Error('No date found');
-        return { sgv: glucose, date: typeof dateValue === 'string' ? new Date(dateValue).getTime() : dateValue, direction: reading.direction || reading.trend || 'NONE' };
-      } catch (error) { lastError = error; continue; }
-    }
-    throw new Error(`All endpoints failed. Last error: ${lastError?.message || 'unknown'}`);
-  }
-
-  /* ---------- UI ---------- */
-  showClamped(session, sessionId, text, maxLines = 5) {
-    try {
-      const lines = String(text || '').replace(/\r/g, '').split('\n');
-      while (lines.length && lines[0].trim() === '') lines.shift();
-      while (lines.length && lines[lines.length - 1].trim() === '') lines.pop();
-      const out = lines.slice(0, maxLines).join('\n');
-      const last = this._lastShownText.get(sessionId);
-      if (last === out) return;
-      this._lastShownText.set(sessionId, out);
-      session.layouts.showTextWall(out);
-    } catch (_) {}
-  }
-  hideDisplay(session, sessionId) {
-    try { session.layouts.showTextWall(''); this._lastShownText.delete(sessionId); } catch {}
-  }
-
-  /* ---------- ciclo de vida ---------- */
-  async onSession(session, sessionId, userId) {
-    console.log(`✅ Nueva sesión: ${sessionId} para ${userId}`);
-    if (typeof session.updateSettingsForTesting !== 'function') {
-      session.updateSettingsForTesting = async () => { session.logger?.debug?.('Compat shim: updateSettingsForTesting noop'); };
-    }
-    session.logger?.info('Session started', { userId, sessionId });
-
-    let settings = null;
-    try {
-      settings = await this.getUserSettings(session);
-      if (!settings.nightscoutUrl) {
-        const msg = { en: 'Please configure Nightscout\nURL and token in settings', es: 'Configura URL y token\nde Nightscout en ajustes' };
-        this.showClamped(session, sessionId, msg[settings.language || 'en']);
-        return;
-      }
-
-      this.activeSessions.set(sessionId, { session, userId, settings, updateInterval: null });
-      this.setupEventHandlers(session, sessionId, userId);
+  /* ===== Ciclo de vida ===== */
+  async onSession(session, sessionId, userId){
+    session.updateSettingsForTesting ||= async ()=>{};
+    let s; try{
+      s=await this.getUserSettings(session);
+      if (!s.nightscoutUrl){ this.show(session, sessionId, (s.language==='es'? 'Configura URL y token':'Set URL and token')); return; }
+      this.active.set(sessionId, { session, userId, settings: s, iv:null, dayIv:null });
 
       // Semilla TIR
-      try {
-        const entries = await this.getTodayEntries(settings, sessionId);
-        const dayStr = this.getLocalDayStr(Date.now(), settings, sessionId);
-        const range = this.getAlertLimits(settings);
-        let total = 0, inRange = 0;
-        for (const e of entries) {
-          if (Number.isFinite(e.mgdl)) {
-            total += 1;
-            if (e.mgdl >= range.low && e.mgdl <= range.high) inRange += 1;
-          }
-        }
-        this.dailyTirState.set(sessionId, { dayStr, total, inRange });
-      } catch (e) {
-        session.logger?.debug?.('Seed TIR failed', { err: e?.message });
-      }
+      try{ const today=await this.getTodayEntries(s, sessionId); const lim=this.getAlertLimits(s); const key=this._dayKey(Date.now(), s); let total=0,inRange=0; for (const e of today){ if (Number.isFinite(e.mgdl)){ total++; if (e.mgdl>=lim.low && e.mgdl<=lim.high) inRange++; } } this.dailyTir.set(sessionId,{dayStr:key,total,inRange}); }catch{}
 
-      // Reloj de cambio de día
-      const dayWatch = setInterval(() => {
-        const sd = this.activeSessions.get(sessionId);
-        if (!sd) return;
-        const s = sd.settings;
-        const st = this.dailyTirState.get(sessionId);
-        const currentDay = this.getLocalDayStr(Date.now(), s, sessionId);
-        if (!st || st.dayStr !== currentDay) {
-          this.dailyTirState.set(sessionId, { dayStr: currentDay, total: 0, inRange: 0 });
+      // Vigilancia de cambio de día (reset TIR sin esperar a nueva lectura)
+      const dayIv = setInterval(() => {
+        const sd = this.active.get(sessionId); if (!sd) return;
+        const curKey = this._dayKey(Date.now(), sd.settings);
+        const st = this.dailyTir.get(sessionId);
+        if (!st || st.dayStr !== curKey) {
+          this.dailyTir.set(sessionId, { dayStr: curKey, total: 0, inRange: 0 });
         }
       }, 60 * 1000);
-      this.dayWatchTimers.set(sessionId, dayWatch);
+      const sd0 = this.active.get(sessionId); sd0.dayIv = dayIv; this.active.set(sessionId, sd0);
 
-      await this.showInitialAndHide(session, sessionId, settings);
-      await this.startNormalOperation(session, sessionId, userId, settings);
-
-    } catch (e) {
-      session.logger?.error(e, 'Error en sesión');
-      console.error('Error en sesión:', e);
-      const lang = (settings && settings.language) || 'en';
-      this.showClamped(session, sessionId, lang === 'es' ? 'Error: revisa configuración' : 'Error: check settings');
-    }
+      await this._showOnce(session, sessionId, s);
+      await this._startLoop(session, sessionId, userId, s);
+      this._wireEvents(session, sessionId, userId);
+    }catch(e){ console.error('onSession error:', e); this.show(session, sessionId, (s&&s.language)==='es'? 'Error: revisa ajustes':'Error: check settings'); }
   }
 
-  async showInitialAndHide(session, sessionId, settings) {
-    try {
-      const data = await this.getGlucoseData(settings, sessionId);
-      this.lastGoodEntry.set(sessionId, data);
-      const tirRes = this.updateDailyTirState(sessionId, data.sgv, data.date, settings);
-      const formattedData = await this.formatForG1WithPrediction(data, settings, sessionId);
-      if (settings.enable_advanced_mode) {
-        const tirPct = tirRes.tirPct;
-        const tirLine = tirPct === null
-          ? (settings.language === 'es' ? 'TIR hoy: n/d' : 'TIR: n/a')
-          : (settings.language === 'es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
-        const bar = !this.toBool(settings.show_tir_bar) || tirPct === null ? '' : this.buildTirBar(tirPct);
-        let tLine = '';
-        try { const sum = await this.getRecentTreatments(settings, 'day', sessionId); tLine = this.formatTreatmentsLine(sum, settings, sessionId); } catch {}
-        await this.animateTIRFill(session, sessionId, settings, formattedData, tirPct, tLine);
+  async _composeExtraLines(s, sessionId){
+    // Sparkline, tratamientos, min/max
+    let extra=''; if (s.enable_ascii_sparkline){ try{ const win=await this.getEntriesWindow(s, s.sparkline_minutes||30, sessionId); const mg=win.map(w=>w.mgdl); const spark=this.buildAsciiSparkline(mg, s.units); if (spark) extra=spark; }catch{} }
+    let tLine=''; try{ const sum=await this.getTreatmentsToday(s, sessionId); tLine=this.lineTreatments(sum, s); }catch{}
+    let mmLine=''; try{ mmLine=await this.minMaxLineToday(s, sessionId); }catch{}
+    return [extra, tLine, mmLine].filter(Boolean).join('\n');
+  }
+
+  async _showOnce(session, sessionId, s){
+    try{
+      const entry=await this.getLatestEntry(s, sessionId); this.lastGoodEntry.set(sessionId, entry);
+      const tir=this.updateTir(sessionId, entry.sgv, entry.date, s);
+      const header=await this.formatHeader(entry, s);
+      const extraLines=await this._composeExtraLines(s, sessionId);
+
+      if (s.enable_advanced_mode){
+        await this.animateTIR(session, sessionId, s, header, tir, extraLines);
       } else {
-        this.showClamped(session, sessionId, formattedData);
-      }
-      this._scheduleHide(sessionId, settings.display_duration_ms || 5000);
-    } catch (error) {
-      try {
-        const cached = this.lastGoodEntry.get(sessionId);
-        if (cached) {
-          const fallback = await this.formatForG1WithPrediction(cached, settings, sessionId);
-          this.showClamped(session, sessionId, fallback);
-          this._scheduleHide(sessionId, settings.display_duration_ms || 5000);
-          return;
-        }
-      } catch (_) {}
-      const lang = (settings && settings.language) || 'en';
-      const errorMsg = error.message?.includes('URL no configurada')
-        ? { en: 'Nightscout URL not set\nCheck settings', es: 'URL de Nightscout no configurada\nRevisa ajustes' }
-        : (error.message?.includes('Sin datos') || error.message?.includes('timeout'))
-        ? { en: 'Cannot connect to Nightscout\nCheck URL and token', es: 'No se puede conectar\nRevisa URL y token' }
-        : { en: 'Error loading glucose data\nCheck your settings', es: 'Error cargando datos\nRevisa tu configuración' };
-      this.showClamped(session, sessionId, errorMsg[lang]);
-      this._scheduleHide(sessionId, 5000);
-    }
-  }
-
-  async animateTIRFill(session, sessionId, s, headerText, tirPct, tLine='', extraLine='') {
-    try {
-      const showBar = !!s.show_tir_bar;
-      const anims   = s.enable_animations !== false; // por defecto ON aunque no exista setting
-      if (!showBar || !anims || tirPct == null || !Number.isFinite(tirPct)){
-        const bar = showBar && tirPct != null ? ' ' + this.__barFromRatio(tirPct/100, 20) : '';
-        const tirLine = tirPct == null ? (s.language==='es' ? 'TIR hoy: n/d' : 'TIR: n/a') : (s.language==='es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
-        const line2 = `${tirLine}${bar}` + (tLine ? `\n${tLine}` : '');
-        const out = extraLine ? `${headerText}\n${line2}\n${extraLine}` : `${headerText}\n${line2}`;
-        this.showClamped(session, sessionId, out);
-        return;
-      }
-
-      // Token de render para invalidar animaciones viejas
-      const token = (this._renderToken.get(sessionId) || 0) + 1;
-      this._renderToken.set(sessionId, token);
-
-      const slots = 20;
-      const leadIn = 220;    // ligerísimo 'delay' para evitar parpadeo al abrir
-      const totalMs = 920;   // duración total de la animación
-      const target  = Math.floor(this.__clamp01(tirPct/100) * slots);
-
-      const tirLine = (s.language==='es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
-      const base = (filled) =>
-        `${headerText}\n${tirLine} ${this.__barFromRatio(filled/slots, slots)}`
-        + (tLine ? `\n${tLine}` : '')
-        + (extraLine ? `\n${extraLine}` : '');
-
-      this.showClamped(session, sessionId, base(0));
-      if (leadIn>0){
-        const t0 = Date.now();
-        while (Date.now()-t0 < leadIn){
-          if (this._renderToken.get(sessionId) !== token) return;
-          await this.__delay(30);
-        }
-      }
-
-      const tStart = Date.now();
-      let last = -1;
-      const ease = this.__getEasingFunction(String(s.animation_type||'cubic'));
-      while (true){
-        if (this._renderToken.get(sessionId) !== token) return;
-        const t = (Date.now() - tStart) / totalMs;
-        const clamped = Math.max(0, Math.min(1, t));
-        const eased = ease(clamped);
-        const filled = Math.min(target, Math.floor(eased * target));
-        if (filled !== last){
-          this.showClamped(session, sessionId, base(filled));
-          last = filled;
-        }
-        if (clamped >= 1) break;
-        await this.__delay(33);
-      }
-      this.showClamped(session, sessionId, base(target));
-    } catch (_) {
-      try {
-        const bar = this.__barFromRatio((tirPct||0)/100, 20);
-        const tirLine = tirPct == null ? (s.language==='es' ? 'TIR hoy: n/d' : 'TIR: n/a') : (s.language==='es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
-        const line2 = `${tirLine} ${bar}` + (tLine ? `\n${tLine}` : '');
-        const out = extraLine ? `${headerText}\n${line2}\n${extraLine}` : `${headerText}\n${line2}`;
-        this.showClamped(session, sessionId, out);
-      } catch {}
-    }
-  }
-
-  setupEventHandlers(session, sessionId, userId) {
-    try {
-      session.events?.onButtonPress?.(async () => {
-        const sd = this.activeSessions.get(sessionId);
-        const s = sd?.settings || await this.getUserSettings(session);
-        await this.showGlucoseTemporarily(session, sessionId, s.display_duration_ms || 4000, s);
-      });
-
-      // NEW: debounce settings (algunas versiones envían múltiples updates seguidos)
-      const runSettingsHandler = async (settingsData) => {
-        session.logger?.info('Settings update received', { settingsCount: settingsData?.length });
-        try {
-          const settings = this.parseSettingsFromArray(settingsData || []);
-          const sd = this.activeSessions.get(sessionId);
-          if (!sd) return;
-          const old = sd.settings || {};
-
-          if (old.updateInterval !== settings.updateInterval) {
-            if (sd.updateInterval) { clearInterval(sd.updateInterval); sd.updateInterval = null; }
-            await this.startNormalOperation(session, sessionId, userId, settings);
+        // NO avanzado: header + pred corta (si hay) + líneas extra
+        let out=header;
+        try{
+          const pred=await this.buildPredictionShort(s, sessionId);
+          if (pred){
+            this._stickyPred.set(sessionId, { text: pred, type: this._predTypeFromText(pred) });
+            const lang=s.language||'en';
+            const label=(lang==='es')? 'Predicción:':'Prediction:';
+            out = `${out}\n${label} ${pred}`;
+          } else {
+            // si no hay pred ahora, pero había persistente, NO la pintamos y borramos
+            this._stickyPred.delete(sessionId);
           }
-          if (this.alertLimitsChanged(old, settings)) this.alertHistory.delete(sessionId);
+        }catch{ this._stickyPred.delete(sessionId); }
+        if (extraLines) out += `\n${extraLines}`;
+        this.show(session, sessionId, out);
+      }
+      this._scheduleHide(sessionId, s.display_duration_ms||5000, session);
+    }catch(e){
+      const cached=this.lastGoodEntry.get(sessionId);
+      if (cached){ const header=await this.formatHeader(cached, s); this.show(session, sessionId, header); this._scheduleHide(sessionId, s.display_duration_ms||5000, session); }
+      else { this.show(session, sessionId, (s.language==='es'? 'Error al cargar':'Load error')); this._scheduleHide(sessionId, 4000, session); }
+    }
+  }
 
-          sd.settings = settings;
-          this.activeSessions.set(sessionId, sd);
-
-          // feedback rápido de guardado
-          try {
-            try {
-              const dNow = await this.getGlucoseData(settings, sessionId);
-              await this.checkAlerts(session, sessionId, dNow, settings);
-            } catch(_){}
-            const b = this._getLocaleBundle(sessionId, settings);
-            const lines = [];
-            lines.push(settings.language === 'es' ? 'Ajustes guardados' : 'Settings saved');
-            lines.push(`Units: ${settings.units}`);
-            const limits = this.getAlertLimits(settings);
-            lines.push(settings.language === 'es'
-              ? `TIR: ${limits.low}-${limits.high} mg/dL`
-              : `TIR: ${limits.low}-${limits.high} mg/dL`);
-            lines.push(`HeadUp: ${settings.enable_head_up_display ? 'ON' : 'OFF'}`);
-            lines.push(`Advanced: ${settings.enable_advanced_mode ? 'ON' : 'OFF'}`);
-            this.showClamped(session, sessionId, lines.join('\n'));
-            setTimeout(() => this.hideDisplay(session, sessionId), 2200);
-          } catch {}
-        } catch (error) {
-          session.logger?.error(error, 'Failed to process settings update');
+  async _startLoop(session, sessionId, userId, s0){
+    const period=Math.max(1, s0.updateInterval||5)*60*1000;
+    const iv=setInterval(async()=>{
+      if (!this.active.has(sessionId)) return clearInterval(iv);
+      try{
+        const sd=this.active.get(sessionId); const s=sd?.settings||s0;
+        const e=await this.getLatestEntry(s, sessionId); this.lastGoodEntry.set(sessionId, e);
+        this.updateTir(sessionId, e.sgv, e.date, s);
+        if (s.alertsEnabled) await this._checkAlerts(session, sessionId, e, s);
+        // mantener sticky pred en NO avanzado
+        if (!s.enable_advanced_mode){
+          const pred=await this.buildPredictionShort(s, sessionId);
+          if (pred){ this._stickyPred.set(sessionId, { text: pred, type: this._predTypeFromText(pred) }); }
+          else { this._stickyPred.delete(sessionId); }
         }
-      };
-
-      const settingsHandler = (settingsData) => {
-        if (this._settingsDebounce.has(sessionId)) clearTimeout(this._settingsDebounce.get(sessionId));
-        const t = setTimeout(() => runSettingsHandler(settingsData), 120);
-        this._settingsDebounce.set(sessionId, t);
-      };
-
-      session.events?.onAppSettingsUpdate?.(settingsHandler);
-      session.events?.onSettingsUpdate?.(settingsHandler);
-      session.events?.onSettingsChange?.(settingsHandler);
-
-      session.events?.onHeadPosition?.(async (data) => {
-        try {
-          if (data?.position !== 'up') return;
-          const sd = this.activeSessions.get(sessionId);
-          const s = sd?.settings; if (!s) return; if (!s.enable_head_up_display) return;
-          const now = Date.now(); const last = this.headUpLastShown.get(sessionId) || 0;
-          if (now - last < 10000) return; this.headUpLastShown.set(sessionId, now);
-          const reading = await this.getGlucoseData(s, sessionId);
-          const baseLine = await this.formatForG1WithPrediction(reading, s, sessionId);
-          if (!s.enable_advanced_mode) {
-            this.showClamped(session, sessionId, baseLine);
-            this._scheduleHide(sessionId, s.display_duration_ms || 4000);
-            return;
-          }
-          const { tirPct } = this.updateDailyTirState(sessionId, reading.sgv, reading.date, s);
-          let minMaxLine = '';
-          try {
-            const entries = await this.getTodayEntries(s, sessionId);
-            const vals = entries.map(e => e.mgdl).filter(Number.isFinite);
-            if (vals.length) {
-              const min = Math.min(...vals), max = Math.max(...vals);
-              const minDisp = this.convertToDisplay(min, s.units);
-              const maxDisp = this.convertToDisplay(max, s.units);
-              minMaxLine = s.language === 'es'
-                ? `Min/Max hoy: ${minDisp} / ${maxDisp} ${s.units}`
-                : `Min/Max today: ${minDisp} / ${maxDisp} ${s.units}`;
-            }
-          } catch {}
-          let tLine = '';
-          try { const sum = await this.getRecentTreatments(s, 'day', sessionId); tLine = this.formatTreatmentsLine(sum, s, sessionId); } catch {}
-          await this.animateTIRFill(session, sessionId, s, baseLine, tirPct, tLine, minMaxLine);
-          this._scheduleHide(sessionId, s.display_duration_ms || 4000);
-        } catch (e) {
-          this.showClamped(session, sessionId, (this._getLocaleBundle(sessionId, {language:'es'}).lang==='es' ? 'Error al mostrar' : 'Display error'));
-          this._scheduleHide(sessionId, 2000);
-        }
-      });
-
-      session.events?.onDisconnected?.(() => {
-        const t = this.displayTimers.get(sessionId); if (t) clearTimeout(t); this.displayTimers.delete(sessionId);
-        const sd = this.activeSessions.get(sessionId); if (sd?.updateInterval) clearInterval(sd.updateInterval);
-        const dw = this.dayWatchTimers.get(sessionId); if (dw) clearInterval(dw); this.dayWatchTimers.delete(sessionId);
-        this._http.delete(sessionId);
-        this._sessionLocale.delete(sessionId);
-        this.activeSessions.delete(sessionId); this.alertHistory.delete(sessionId);
-        this.headUpLastShown.delete(sessionId); this.dailyTirState.delete(sessionId); this.lastGoodEntry.delete(sessionId);
-        session.logger?.info('Session disconnected');
-      });
-    } catch (error) {
-      console.error('⚠️ Error setting up event handlers:', error);
-      session.logger?.error(error, 'Failed to setup event handlers');
-    }
+      }catch(err){ session.logger?.debug('loop tick error', { msg: err.message }); }
+    }, period);
+    const sd=this.active.get(sessionId)||{}; if (sd.iv) clearInterval(sd.iv); sd.iv=iv; this.active.set(sessionId, sd);
   }
 
-  async showGlucoseTemporarily(session, sessionId, ms, providedSettings) {
-    try {
-      const sd = this.activeSessions.get(sessionId);
-      if (!sd) return;
-      const settings = providedSettings || sd.settings || await this.getUserSettings(sd.session);
-      const data = await this.getGlucoseData(settings, sessionId);
-      this.lastGoodEntry.set(sessionId, data);
-      const { tirPct } = this.updateDailyTirState(sessionId, data.sgv, data.date, settings);
-      if (settings.enable_advanced_mode) {
-        const header = await this.formatForG1WithPrediction(data, settings, sessionId);
-        let tLine = '';
-        try { const sum = await this.getRecentTreatments(settings, 'day', sessionId); tLine = this.formatTreatmentsLine(sum, settings, sessionId); } catch {}
-        await this.animateTIRFill(session, sessionId, settings, header, tirPct, tLine);
-      } else {
-        this.showClamped(session, sessionId, await this.formatForG1WithPrediction(data, settings, sessionId));
-      }
-      this._scheduleHide(sessionId, ms);
-    } catch (error) {
-      try {
-        const cached = this.lastGoodEntry.get(sessionId);
-        if (cached) {
-          const s = this.activeSessions.get(sessionId)?.settings || {};
-          const txt = await this.formatForG1WithPrediction(cached, s, sessionId);
-          this.showClamped(session, sessionId, txt);
-          this._scheduleHide(sessionId, ms);
-          return;
-        }
-      } catch (_) {}
-      session.logger?.error(error, 'Failed to show glucose temporarily');
-    }
+  _wireEvents(session, sessionId, userId){
+    // Botón → mostrar temporal
+    session.events?.onButtonPress?.(async ()=>{ const sd=this.active.get(sessionId); const s=sd?.settings || await this.getUserSettings(session); await this._showOnce(session, sessionId, s); });
+
+    // Settings (debounce)
+    const trigger=(payload)=>{ if (this._debounce.has(sessionId)) clearTimeout(this._debounce.get(sessionId)); const t=setTimeout(async()=>{
+      try{ const s=this.parseSettingsFromArray(payload||[]); const sd=this.active.get(sessionId)||{session,userId,settings:s,iv:null,dayIv:null}; const old=sd.settings||{}; sd.settings=s; this.active.set(sessionId, sd);
+        if ((old.updateInterval||5)!==(s.updateInterval||5)) await this._startLoop(session, sessionId, userId, s);
+        const lim=this.getAlertLimits(s); const lines=[ (s.language==='es'?'Ajustes guardados':'Settings saved'), `Units: ${s.units}`, `TIR: ${lim.low}-${lim.high} mg/dL`, `HeadUp: ${s.enable_head_up_display?'ON':'OFF'}`, `Advanced: ${s.enable_advanced_mode?'ON':'OFF'}` ];
+        this.show(session, sessionId, lines.join('\n')); setTimeout(()=> this.hideDisplay(session, sessionId), 2200);
+      }catch(e){ session.logger?.error(e,'settings apply'); }
+    },120); this._debounce.set(sessionId,t); };
+    session.events?.onAppSettingsUpdate?.(trigger); session.events?.onSettingsUpdate?.(trigger); session.events?.onSettingsChange?.(trigger);
+
+    // Gesto cabeza (debounce 10s)
+    session.events?.onHeadPosition?.(async data=>{ try{ if (data?.position!=='up') return; const now=Date.now(); const last=this._lastHeadUpAt.get(sessionId)||0; if (now-last<10000) return; this._lastHeadUpAt.set(sessionId, now); const sd=this.active.get(sessionId); const s=sd?.settings || await this.getUserSettings(session); if (!s.enable_head_up_display) return; await this._showOnce(session, sessionId, s); }catch{} });
+
+    // Limpieza
+    session.events?.onDisconnected?.(()=>{ const t=this._hideTimers.get(sessionId); if(t) clearTimeout(t); const sd=this.active.get(sessionId); if(sd?.iv) clearInterval(sd.iv); if(sd?.dayIv) clearInterval(sd.dayIv); this._hideTimers.delete(sessionId); this._http.delete(sessionId); this.active.delete(sessionId); this.dailyTir.delete(sessionId); this._lastShown.delete(sessionId); this._renderToken.delete(sessionId); this._stickyPred.delete(sessionId); });
   }
 
-  async startNormalOperation(session, sessionId, userId, initialSettings) {
-    const ms = (initialSettings.updateInterval || 5) * 60 * 1000;
-    const iv = setInterval(async () => {
-      if (!this.activeSessions.has(sessionId)) return clearInterval(iv);
-      try {
-        const sd = this.activeSessions.get(sessionId);
-        const s = (sd && sd.settings) ? sd.settings : await this.getUserSettings(session);
-        const d = await this.getGlucoseData(s, sessionId);
-        this.lastGoodEntry.set(sessionId, d);
-        this.updateDailyTirState(sessionId, d.sgv, d.date, s);
-        if (s.alertsEnabled) await this.checkAlerts(session, sessionId, d, s);
-      } catch (error) {
-        session.logger?.debug('Normal operation cycle failed', { error: error.message });
-      }
-    }, ms);
-    const sd = this.activeSessions.get(sessionId);
-    if (sd) {
-      if (sd.updateInterval) clearInterval(sd.updateInterval);
-      sd.updateInterval = iv;
-      this.activeSessions.set(sessionId, sd);
-    }
+  /* ===== Alertas con histeresis ===== */
+  async _checkAlerts(session, sessionId, entry, settings){
+    const lim=this.getAlertLimits(settings); const hys=Math.max(0, settings.alert_hysteresis_mg||5); const last=this.alertState.get(sessionId)||{lastAt:0,lastType:null}; const cooldown=settings.alert_cooldown_ms||600000; if (Date.now()-last.lastAt<cooldown) return;
+    let type=null; if (entry.sgv <= (lim.low - hys)) type='low'; else if (entry.sgv >= (lim.high + hys)) type='high';
+    // Forzado para test (como en la base)
+    const dbg = String(settings.debug_force_alert || '').toLowerCase();
+    if (!type && (dbg === 'low' || dbg === 'high')) type = dbg;
+
+    if (type && type===last.lastType){ last.lastAt=Date.now(); this.alertState.set(sessionId,last); return; }
+    if (type){ last.lastAt=Date.now(); last.lastType=type; this.alertState.set(sessionId,last); await this._blinkAlert(session, sessionId, entry, settings, type); }
   }
 
-  async checkAlerts(session, sessionId, data, settings) {
-    const limits = this.getAlertLimits(settings);
-    const mgdl = data.sgv;
-    const last = this.alertHistory.get(sessionId);
-    const cooldown = settings.alert_cooldown_ms || 600000;
-    if (last && Date.now() - last < cooldown) return;
-
-    let alertType = null;
-    if (mgdl <= limits.low) alertType = 'low';
-    else if (mgdl >= limits.high) alertType = 'high';
-
-    const dbg = (settings.debug_force_alert || '').toLowerCase();
-    if (!alertType && (dbg === 'low' || dbg === 'high')) alertType = dbg;
-
-    if (alertType) {
-      this.alertHistory.set(sessionId, Date.now());
-      await this.triggerAnimatedAlert(session, sessionId, data, settings, alertType);
-      session.logger?.warn('Alert sent', { type: alertType, value: mgdl });
-    }
+  async _blinkAlert(session, sessionId, entry, settings, type){
+    const unit=settings.units||UNITS.MGDL; const val=this.toDisplay(entry.sgv, unit); const lang=settings.language||'en';
+    const title=(lang==='es'? (type==='low'? '¡GLUCOSA BAJA!':'¡GLUCOSA ALTA!') : (type==='low'? 'LOW GLUCOSE!':'HIGH GLUCOSE!'));
+    const base=`${title}\n${val} ${unit}`; const dur=settings.alert_duration_ms||15000; const blink=600;
+    if (this._hideTimers.has(sessionId)) clearTimeout(this._hideTimers.get(sessionId));
+    const t0=Date.now(); let vis=true; const it=setInterval(()=>{ if (Date.now()-t0>dur){ clearInterval(it); this.hideDisplay(session, sessionId); return; } this.show(session, sessionId, `${vis?'[!]':'[ ]'} ${base}`); vis=!vis; }, blink);
+    this._hideTimers.set(sessionId, setTimeout(()=>{ clearInterval(it); this.hideDisplay(session, sessionId); }, dur+120));
   }
 
-  async triggerAnimatedAlert(session, sessionId, data, settings, type) {
-    const displayValue = this.convertToDisplay(data.sgv, settings.units || UNITS.MGDL);
-    const unit = settings.units || UNITS.MGDL;
-    const lang = settings.language || 'en';
-    const msgs = {
-      en: { low: `LOW GLUCOSE!`, high: `HIGH GLUCOSE!` },
-      es: { low: `¡GLUCOSA BAJA!`, high: `¡GLUCOSA ALTA!` }
-    };
-    const baseText = `${msgs[lang][type]}\n${displayValue} ${unit}`;
-    const alertDuration = settings.alert_duration_ms || 15000;
-    const blinkInterval = 600;
-
-    if (this.displayTimers.has(sessionId)) clearTimeout(this.displayTimers.get(sessionId));
-
-    const startTime = Date.now();
-    let isVisible = true;
-    const blinker = setInterval(() => {
-      if (Date.now() - startTime > alertDuration) {
-        clearInterval(blinker);
-        this.hideDisplay(session, sessionId);
-        return;
-      }
-      const symbol = isVisible ? '[!]' : '[ ]';
-      this.showClamped(session, sessionId, `${symbol} ${baseText}`);
-      isVisible = !isVisible;
-    }, blinkInterval);
-
-    this.displayTimers.set(sessionId, setTimeout(() => {
-      clearInterval(blinker);
-      this.hideDisplay(session, sessionId);
-    }, alertDuration + 120));
-  }
-
-  alertLimitsChanged(oldSettings, newSettings) {
-    if (!oldSettings) return false;
-    return (
-      oldSettings.low_alert_mg !== newSettings.low_alert_mg ||
-      oldSettings.high_alert_mg !== newSettings.high_alert_mg ||
-      oldSettings.low_alert_mmol !== newSettings.low_alert_mmol ||
-      oldSettings.high_alert_mmol !== newSettings.high_alert_mmol ||
-      oldSettings.units !== newSettings.units
-    );
-  }
-
-  /* ---------- MIRA tool ---------- */
-  async onToolCall(data) {
-    const toolId = data.toolId || data.toolName;
-    const userId = data.userId;
-    const activeSession = data.activeSession;
-    const isSpanish = ['obtener_glucosa', 'revisar_glucosa', 'nivel_glucosa', 'mi_glucosa'].includes(toolId);
-    const lang = isSpanish ? 'es' : 'en';
-
-    let settings = null;
-    try {
-      if (activeSession?.settings?.settings) {
-        settings = this.parseSettingsFromArray(activeSession.settings.settings);
-      } else {
-        for (const [, sData] of this.activeSessions) {
-          if (sData.userId === userId) { settings = sData.settings || await this.getUserSettings(sData.session); break; }
-        }
-      }
-      if (!settings?.nightscoutUrl || !settings?.nightscoutToken) {
-        throw new Error(lang === 'es' ? 'Nightscout no configurado' : 'Nightscout not configured');
-      }
-      const reading = await this.getGlucoseData(settings);
-      const display = this.convertToDisplay(reading.sgv, settings.units || UNITS.MGDL);
-      const trend = this.getTrendArrow(reading.direction);
-      const status = this.getGlucoseStatusText(reading.sgv, settings, lang);
-      const { tirPct } = this.updateDailyTirState(activeSession?.sessionId || 'tool', reading.sgv, reading.date, settings);
-      let extra = '';
-      if (settings.enable_advanced_mode && Number.isFinite(tirPct)) {
-        extra = lang === 'es' ? ` TIR hoy: ${tirPct}%` : ` TIR: ${tirPct}%`;
-      }
-      const msg = lang === 'es'
-        ? `Tu glucosa está en ${display} ${settings.units || UNITS.MGDL} ${trend}. Estado: ${status}.${extra}`
-        : `Your glucose is ${display} ${settings.units || UNITS.MGDL} ${trend}. Status: ${status}.${extra}`;
-      return { success: true, data: { glucose: display, unit: settings.units || UNITS.MGDL, trend, status, tirPct: Number.isFinite(tirPct) ? tirPct : null }, message: msg };
-    } catch (e) {
-      return { success: false, error: lang === 'es' ? `Error: ${e.message}` : `Error: ${e.message}` };
-    }
-  }
-
-  getGlucoseStatusText(value, settings, lang) {
-    const limits = this.getAlertLimits(settings);
-    if (value < 70) return lang === 'es' ? 'Crítico Bajo' : 'Critical Low';
-    if (value <= limits.low) return lang === 'es' ? 'Bajo' : 'Low';
-    if (value > 250) return lang === 'es' ? 'Crítico Alto' : 'Critical High';
-    if (value >= limits.high) return lang === 'es' ? 'Alto' : 'High';
-    return lang === 'es' ? 'Normal' : 'Normal';
+  /* ===== Tool (Mira) ===== */
+  async onToolCall(data){
+    const toolId=data.toolId||data.toolName; const userId=data.userId; const isEs=['obtener_glucosa','revisar_glucosa','nivel_glucosa','mi_glucosa'].includes(toolId); const lang=isEs?'es':'en';
+    try{
+      let s=null; if (data.activeSession?.settings?.settings) s=this.parseSettingsFromArray(data.activeSession.settings.settings); else { for (const [,d] of this.active){ if (d.userId===userId){ s=d.settings; break; } } }
+      if (!s?.nightscoutUrl || !s?.nightscoutToken) throw new Error(lang==='es'? 'Nightscout no configurado':'Nightscout not configured');
+      const e=await this.getLatestEntry(s, 'tool'); const disp=this.toDisplay(e.sgv, s.units); const arr=this.trendArrow(e.direction); const lim=this.getAlertLimits(s); const tir=this.updateTir('tool', e.sgv, e.date, s);
+      const status=(()=>{ if (e.sgv<70) return lang==='es'?'Crítico Bajo':'Critical Low'; if (e.sgv<=lim.low) return lang==='es'?'Bajo':'Low'; if (e.sgv>250) return lang==='es'?'Crítico Alto':'Critical High'; if (e.sgv>=lim.high) return lang==='es'?'Alto':'High'; return lang==='es'?'Normal':'Normal'; })();
+      const extra=(s.enable_advanced_mode&&Number.isFinite(tir))? (isEs?` TIR hoy: ${tir}%`:` TIR: ${tir}%`): '';
+      const msg=isEs? `Tu glucosa está en ${disp} ${s.units} ${arr}. Estado: ${status}.${extra}`: `Your glucose is ${disp} ${s.units} ${arr}. Status: ${status}.${extra}`;
+      return { success:true, data:{glucose:disp,unit:s.units,trend:arr,status,tirPct:Number.isFinite(tir)?tir:null}, message:msg };
+    }catch(e){ return { success:false, error: e.message }; }
   }
 }
 
-/* ---------- init ---------- */
-const server = new NightscoutMentraApp({
-  packageName: PACKAGE_NAME,
-  apiKey: MENTRAOS_API_KEY,
-  port: PORT,
-});
-server.start().catch(err => {
-  console.error('⛔ Error iniciando servidor:', err);
-  process.exit(1);
-});
-console.log('🚀 Nightscout MentraOS v2.12.1 — TIR invariant + perf/UX tweaks');
+/* ===== init ===== */
+const server=new NightscoutMentraApp({ packageName: PACKAGE_NAME, apiKey: MENTRAOS_API_KEY, port: PORT });
+server.start().catch(err=>{ console.error('⛔ start error:', err); process.exit(1); });
+console.log('🚀 MentraOS Nightscout v2.13.3 ready');
 
 const KEEP_ALIVE_URL = process.env.RENDER_URL || 'https://mentra-nightscout.onrender.com';
-server.app.get('/health', (_, res) => res.json({
-  status: 'alive',
-  timestamp: new Date().toISOString(),
-  version: '2.12.1',
-  activeSessions: server.activeSessions.size
-}));
-setInterval(() => axios.get(`${KEEP_ALIVE_URL}/health`).catch(() => {}), 3 * 60 * 1000);
+server.app.get('/health',(_,res)=> res.json({ status:'alive', ts:new Date().toISOString(), ver:'2.13.3' }));
+setInterval(()=> axios.get(`${KEEP_ALIVE_URL}/health`).catch(()=>{}), 3*60*1000);
