@@ -70,7 +70,7 @@ __speedMult(speed){ return speed==='slow' ? 1.35 : (speed==='fast' ? 0.75 : 1.0)
    * Cancels if a newer render starts (token check).
    */
   
-  async animateTIRFill(session, sessionId, s, headerText, tirPct, tLine='', extraLine=''){
+  async animateTIRFill(session, sessionId, s, headerText, tirPct, tLine = \'\', extraLine = \'\', restart = false) {
     try {
       const showBar = !!s.show_tir_bar;
       const anims   = s.enable_animations !== false;
@@ -151,7 +151,48 @@ __speedMult(speed){ return speed==='slow' ? 1.35 : (speed==='fast' ? 0.75 : 1.0)
     return (v !== null && Number.isFinite(v)) ? (v >= 30 ? v / 10 : v) : null;
   }
 
-  /* ---------- alertas ---------- */
+  
+  /**
+   * Try to reflect normalized settings back into Mentra UI so selectors/sliders show the chosen value.
+   * Safe, debounced, and only for keys without unit ambiguity.
+   */
+  async reflectSettingsToUI(session, s){
+    try{
+      if (!session || !session.settings) return;
+      const setFn = typeof session.settings.set === 'function'
+        ? async (k,v)=>{ try{ await session.settings.set(k,v); }catch(_){ } }
+        : (typeof session.updateSettingsForTesting === 'function'
+            ? async (k,v)=>{ try{ await session.updateSettingsForTesting({[k]:v}); }catch(_){ } }
+            : null);
+      if (!setFn) return;
+
+      // Debounce per session
+      if (!this._lastWriteback) this._lastWriteback = new Map();
+      const last = this._lastWriteback.get(session) || 0;
+      if (Date.now() - last < 1200) return;
+      this._lastWriteback.set(session, Date.now());
+
+      // Only reflect "safe" keys to avoid unit ×10 confusion in mmol
+      const safe = {
+        prediction_horizon_min: Number(s.prediction_horizon_min) || 30,
+        language: s.language || 'en',
+        units: s.units || 'mg/dL',
+        enable_animations: !!s.enable_animations,
+        show_tir_bar: !!s.show_tir_bar,
+        enable_advanced_mode: !!s.enable_advanced_mode
+      };
+      // In mg/dL we can also reflect alarm thresholds safely
+      if ((s.units || '').toLowerCase().includes('mg')){
+        if (Number.isFinite(s.low_alert_mg))  safe.low_alert_mg  = Math.round(s.low_alert_mg);
+        if (Number.isFinite(s.high_alert_mg)) safe.high_alert_mg = Math.round(s.high_alert_mg);
+      }
+
+      for (const [k,v] of Object.entries(safe)){
+        await setFn(k, v);
+      }
+    }catch(_){}
+  }
+/* ---------- alertas ---------- */
   getAlertLimits(settings) {
     if (settings.units === UNITS.MMOL) {
       const lowM = this.normalizeMmol(settings.low_alert_mmol) ?? 3.9;
@@ -205,7 +246,8 @@ __speedMult(speed){ return speed==='slow' ? 1.35 : (speed==='fast' ? 0.75 : 1.0)
         session.settings.get('time_in_range_low_mmol'),
         session.settings.get('time_in_range_high_mmol'),
         session.settings.get('debug_force_alert'),
-      ]);
+      ],
+        session.settings.get('ui_writeback_enabled'));
 
       const uiMin = parseInt(updateInterval, 10);
       const ui = Number.isFinite(uiMin) ? uiMin : 5;
@@ -254,6 +296,7 @@ __speedMult(speed){ return speed==='slow' ? 1.35 : (speed==='fast' ? 0.75 : 1.0)
         time_in_range_high_mmol: this.normalizeMmol(time_in_range_high_mmol),
             prediction_horizon_min: [15,30,60].includes(Number(prediction_horizon_min || prediction_horizon_mins)) ? Number(prediction_horizon_min || prediction_horizon_mins) : 30,
           debug_force_alert: (typeof debug_force_alert==='string'? debug_force_alert : null),
+          ui_writeback_enabled: this.toBool(ui_writeback_enabled) || false,
     };
     } catch (e) {
       console.error('Error leyendo settings:', e);
@@ -613,7 +656,10 @@ __speedMult(speed){ return speed==='slow' ? 1.35 : (speed==='fast' ? 0.75 : 1.0)
     let settings = null;
     try {
       settings = await this.getUserSettings(session);
-      if (!settings.nightscoutUrl) {
+      
+      // Try to reflect normalized values back to UI (safe keys only)
+      if (settings.ui_writeback_enabled) { try{ await this.reflectSettingsToUI(session, settings); }catch(_){ } }
+if (!settings.nightscoutUrl) {
         const msg = { en: 'Please configure Nightscout\nURL and token in settings', es: 'Configura URL y token\nde Nightscout en ajustes' };
         this.showClamped(session, sessionId, msg[settings.language || 'en']);
         return;
@@ -683,6 +729,7 @@ __speedMult(speed){ return speed==='slow' ? 1.35 : (speed==='fast' ? 0.75 : 1.0)
       }
       const t = setTimeout(() => this.hideDisplay(session, sessionId), settings.display_duration_ms || 5000);
       this.displayTimers.set(sessionId, t);
+      if (settings.ui_writeback_enabled) { try{ await this.reflectSettingsToUI(session, settings); }catch(_){ } }
     } catch (error) {
       try {
         const cached = this.lastGoodEntry.get(sessionId);
@@ -714,46 +761,67 @@ __speedMult(speed){ return speed==='slow' ? 1.35 : (speed==='fast' ? 0.75 : 1.0)
         await this.showGlucoseTemporarily(session, sessionId, s.display_duration_ms || 4000, s);
       });
 
+      
       const settingsHandler = async (settingsData) => {
-        session.logger?.info('Settings update received', { settingsCount: settingsData?.length });
-        let settings = null;
         try {
-          settings = this.parseSettingsFromArray(settingsData || []);
+          session.logger?.info('Settings update received', { settingsCount: settingsData?.length });
+          const newSettings = this.parseSettingsFromArray(settingsData || []);
           const sd = this.activeSessions.get(sessionId);
           if (!sd) return;
           const old = sd.settings || {};
-          if (old.updateInterval !== settings.updateInterval) {
-            if (sd.updateInterval) { clearInterval(sd.updateInterval); sd.updateInterval = null; }
-            await this.startNormalOperation(session, sessionId, userId, settings);
-          }
-          if (this.alertLimitsChanged(old, settings)) this.alertHistory.delete(sessionId);
-          sd.settings = settings;
-          this.activeSessions.set(sessionId, sd);
-          try {
-            // Trigger immediate alert re-check with new limits
-            try { const dNow = await this.getGlucoseData(settings); await this.checkAlerts(session, sessionId, dNow, settings);} catch(_){ }
 
-            const savedMsg = (settings.language === 'es') ? 'Ajustes guardados' : 'Settings saved';
-const lowLbl = (settings.language === 'es') ? 'Bajo' : 'Low';
-const highLbl = (settings.language === 'es') ? 'Alto' : 'High';
-const lines = [savedMsg];
-if (settings.units === UNITS.MMOL) {
-  lines.push(`${lowLbl}: ${(+settings.low_alert_mmol).toFixed(1)} mmol/L`);
-  lines.push(`${highLbl}: ${(+settings.high_alert_mmol).toFixed(1)} mmol/L`);
-} else {
-  lines.push(`${lowLbl}: ${settings.low_alert_mg} mg/dL`);
-  lines.push(`${highLbl}: ${settings.high_alert_mg} mg/dL`);
-}
-            lines.push(`Units: ${settings.units}`);
-            lines.push(`HeadUp: ${settings.enable_head_up_display ? 'ON' : 'OFF'}`);
-            lines.push(`Advanced: ${settings.enable_advanced_mode ? 'ON' : 'OFF'}`);
-            this.showClamped(session, sessionId, lines.join('\n'));
-            setTimeout(() => this.hideDisplay(session, sessionId), 2200);
-          } catch {}
+          // Reiniciar ciclo si cambia el intervalo
+          if (old.updateInterval !== newSettings.updateInterval) {
+            if (sd.updateInterval) { clearInterval(sd.updateInterval); sd.updateInterval = null; }
+            await this.startNormalOperation(session, sessionId, userId, newSettings);
+          }
+
+          // Si cambian límites → limpiar historial de alertas
+          if (this.alertLimitsChanged(old, newSettings)) this.alertHistory.delete(sessionId);
+
+          // Guardar y reflejar en UI (workaround)
+          sd.settings = newSettings;
+          this.activeSessions.set(sessionId, sd);
+          try { await this.reflectSettingsToUI(session, newSettings); } catch(_) {}
+
+          // Eco de ajustes (Alarmas separadas de TIR)
+          const lang = newSettings.language || 'en';
+          const savedMsg = (lang === 'es') ? 'Ajustes guardados' : 'Settings saved';
+          const lowLbl = (lang === 'es') ? 'Alarma baja' : 'Low alarm';
+          const highLbl = (lang === 'es') ? 'Alarma alta' : 'High alarm';
+
+          const lines = [savedMsg];
+
+          if ((newSettings.units || '').toLowerCase().includes('mmol')) {
+            const lo = (+newSettings.low_alert_mmol || 0).toFixed(1);
+            const hi = (+newSettings.high_alert_mmol || 0).toFixed(1);
+            lines.push(`${lowLbl}: ${lo} mmol/L`);
+            lines.push(`${highLbl}: ${hi} mmol/L`);
+          } else {
+            const lo = Math.round(+newSettings.low_alert_mg || 0);
+            const hi = Math.round(+newSettings.high_alert_mg || 0);
+            lines.push(`${lowLbl}: ${lo} mg/dL`);
+            lines.push(`${highLbl}: ${hi} mg/dL`);
+          }
+
+          // Mostrar horizonte de predicción si existe
+          if ([15,30,60].includes(Number(newSettings.prediction_horizon_min))) {
+            const predLbl = (lang === 'es') ? 'Prediccion' : 'Prediction';
+            lines.push(`${predLbl}: ${newSettings.prediction_horizon_min} min`);
+          }
+
+          // Estado de toggles básicos
+          lines.push(`Units: ${newSettings.units}`);
+          lines.push(`HeadUp: ${newSettings.enable_head_up_display ? 'ON' : 'OFF'}`);
+          lines.push(`Advanced: ${newSettings.enable_advanced_mode ? 'ON' : 'OFF'}`);
+
+          this.showClamped(session, sessionId, lines.join('\\n'));
+          setTimeout(() => this.hideDisplay(session, sessionId), 2500);
         } catch (error) {
           session.logger?.error(error, 'Failed to process settings update');
         }
-      };
+      }
+;
 
       session.events?.onAppSettingsUpdate?.(settingsHandler);
       session.events?.onSettingsUpdate?.(settingsHandler);
@@ -823,7 +891,7 @@ if (settings.units === UNITS.MMOL) {
       const settings = providedSettings || sd.settings || await this.getUserSettings(sd.session);
       const data = await this.getGlucoseData(settings);
       const { tirPct } = this.updateDailyTirState(sessionId, data.sgv, data.date, settings);
-      if (settings.enable_advanced_mode) { const header = await this.formatForG1WithPrediction(data, settings); const tirLine = tirPct === null ? (settings.language === 'es' ? 'TIR hoy: n/d' : 'TIR: n/a') : (settings.language === 'es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`); let tLine = ''; try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {} await this.animateTIRFill(session, sessionId, settings, header, tirPct, tLine); } else {
+      if (settings.enable_advanced_mode) { const header = await this.formatForG1WithPrediction(data, settings); const tirLine = tirPct === null ? (settings.language === 'es' ? 'TIR hoy: n/d' : 'TIR: n/a') : (settings.language === 'es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`); let tLine = ''; try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {} await this.animateTIRFill(session, sessionId, settings, header, tirPct, tLine, \'\', true); } else {
         this.showClamped(session, sessionId, await this.formatForG1WithPrediction(data, settings));
       }
       const timer = setTimeout(() => this.hideDisplay(session, sessionId), ms);
