@@ -388,6 +388,9 @@ class NightscoutMentraApp extends AppServer {
 
   // NUEVO: Lógica de predicción avanzada para umbrales.
   async buildAdvancedPredictionShort(settings) {
+    const isMmol = String(settings.units || '').toLowerCase().includes('mmol');
+    const toDisp = (mgdl) => isMmol ? (mgdl/18).toFixed(1) : String(Math.round(mgdl));
+
     const lowThreshold = 75;  // Umbral bajo a predecir
     const highThreshold = 190; // Umbral alto a predecir
     
@@ -411,7 +414,7 @@ class NightscoutMentraApp extends AppServer {
           if (currentSgv > lowThreshold) { // Buscar predicción de bajada
             for (let i = 1; i < series.length; i++) {
               if (series[i] <= lowThreshold) {
-                return `↓${lowThreshold} @${i * 5}m`;
+                return `↓${toDisp(lowThreshold)} @${i * 5}m`;
               }
             }
           }
@@ -419,7 +422,7 @@ class NightscoutMentraApp extends AppServer {
           if (currentSgv < highThreshold) { // Buscar predicción de subida
             for (let i = 1; i < series.length; i++) {
               if (series[i] >= highThreshold) {
-                return `↑${highThreshold} @${i * 5}m`;
+                return `↑${toDisp(highThreshold)} @${i * 5}m`;
               }
             }
           }
@@ -446,14 +449,14 @@ class NightscoutMentraApp extends AppServer {
             if (ratePerMin < -0.5) { // Si está bajando de forma significativa
               const timeToLow = (lowThreshold - mgNow) / ratePerMin;
               if (timeToLow > 0 && timeToLow < 90) { // Predecir solo hasta 90 min
-                return `↓${lowThreshold} @${Math.round(timeToLow)}m`;
+                return `↓${toDisp(lowThreshold)} @${Math.round(timeToLow)}m`;
               }
             }
             
             if (ratePerMin > 0.5) { // Si está subiendo de forma significativa
               const timeToHigh = (highThreshold - mgNow) / ratePerMin;
               if (timeToHigh > 0 && timeToHigh < 120) { // Predecir solo hasta 120 min
-                return `↑${highThreshold} @${Math.round(timeToHigh)}m`;
+                return `↑${toDisp(highThreshold)} @${Math.round(timeToHigh)}m`;
               }
             }
           }
