@@ -32,6 +32,26 @@ if (!MENTRAOS_API_KEY) {
 
 const UNITS = { MGDL: 'mg/dL', MMOL: 'mmol/L' };
 
+
+  newRenderToken(sessionId){
+    const t = Math.random().toString(36).slice(2);
+    this._renderTokens.set(sessionId, t);
+    return t;
+  }
+  isCancelled(sessionId, token){
+    return this._renderTokens.get(sessionId) !== token;
+  }
+  beginDeferredLoading(session, sessionId, msg, delayMs=220){
+    clearTimeout(this._loadingTimers.get(sessionId));
+    const h = setTimeout(()=>{
+      if (this._renderTokens.get(sessionId)) this.showClamped(session, sessionId, msg, this._renderTokens.get(sessionId));
+    }, Math.max(0, delayMs|0));
+    this._loadingTimers.set(sessionId, h);
+  }
+  endDeferredLoading(sessionId){
+    clearTimeout(this._loadingTimers.get(sessionId));
+    this._loadingTimers.delete(sessionId);
+  }
 class NightscoutMentraApp extends AppServer {
   constructor(opts) {
     super(opts);
@@ -42,77 +62,13 @@ class NightscoutMentraApp extends AppServer {
     this.dailyTirState = new Map();
     this.dayWatchTimers = new Map();
     this.lastGoodEntry = new Map();          // cache last valid entry
-  }
+  
+      this._renderTokens = new Map();
+      this._loadingTimers = new Map();
+      this._lastReading = null;
+      this._alertState = new Map();}
 
   /* ---------- helpers ---------- */
-
-  __delay(ms) { return new Promise(res => setTimeout(res, ms)); }
-  __clamp01(x){ return x < 0 ? 0 : (x > 1 ? 1 : x); }
-  __speedMult(speed){ return speed==='slow' ? 1.35 : (speed==='fast' ? 0.75 : 1.0); }
-  __barFromRatio(ratio, slots){
-    const n = Math.round(this.__clamp01(ratio) * slots);
-    const filled = '│'.repeat(n);
-    const empty  = '·'.repeat(Math.max(0, slots - n));
-    return `[${filled}${empty}]`;
-  }
-
-  /**
-   * Animate TIR bar from 0 → tirPct.
-   * Cancels if a newer render starts (token check).
-   */
-  async animateTIRFill(session, sessionId, s, headerText, tirPct, tLine='', extraLine=''){
-    try {
-      const showBar = !!s.show_tir_bar;
-      const anims   = s.enable_animations !== false;
-      if (!showBar || !anims || tirPct == null || !Number.isFinite(tirPct)){
-        const bar = showBar && tirPct != null ? ' ' + this.__barFromRatio(tirPct/100, Number(s.tir_slots)||16) : '';
-        const tirLine = tirPct == null ? (s.language==='es' ? 'TIR hoy: n/d' : 'TIR: n/a') : (s.language==='es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
-        const line2 = `${tirLine}${bar}` + (tLine ? `\n${tLine}` : '');
-        const out = extraLine ? `${headerText}\n${line2}\n${extraLine}` : `${headerText}\n${line2}`;
-        this.showClamped(session, sessionId, out);
-        return;
-      }
-      // token to cancel old animations
-      if (!this._renderToken) this._renderToken = new Map();
-      const token = (this._renderToken.get(sessionId) || 0) + 1;
-      this._renderToken.set(sessionId, token);
-
-      const slots   = Math.max(8, Number(s.tir_slots) || 16);
-      const leadIn  = Number(s.tir_leadin_ms) || 220;
-      const speedM  = this.__speedMult(String(s.animation_speed||'normal'));
-      const totalMs = Math.max(300, Math.min(2000, Math.round((Number(s.tir_anim_ms)||800) * speedM)));
-      const target  = Math.round(this.__clamp01(tirPct/100) * slots);
-      const perSlot = Math.max(50, Math.min(240, Math.round((totalMs - leadIn) / Math.max(1, target))));
-
-      const tirLine = (s.language==='es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
-
-      // initial (empty)
-      let frame = `${headerText}\n${tirLine} ${this.__barFromRatio(0, slots)}` + (tLine ? `\n${tLine}` : '') + (extraLine ? `\n${extraLine}` : '');
-      this.showClamped(session, sessionId, frame);
-      await this.__delay(leadIn);
-      if (this._renderToken.get(sessionId) !== token) return;
-
-      // fill slots
-      for (let i=1; i<=target; i++){
-        frame = `${headerText}\n${tirLine} ${this.__barFromRatio(i/slots, slots)}` + (tLine ? `\n${tLine}` : '') + (extraLine ? `\n${extraLine}` : '');
-        this.showClamped(session, sessionId, frame);
-        await this.__delay(perSlot);
-        if (this._renderToken.get(sessionId) !== token) return;
-      }
-      // final settle with exact percentage bar
-      frame = `${headerText}\n${tirLine} ${this.__barFromRatio(tirPct/100, slots)}` + (tLine ? `\n${tLine}` : '') + (extraLine ? `\n${extraLine}` : '');
-      this.showClamped(session, sessionId, frame);
-    } catch (_) {
-      // fallback: static render
-      try {
-        const bar = this.__barFromRatio((tirPct||0)/100, Number(s.tir_slots)||16);
-        const tirLine = tirPct == null ? (s.language==='es' ? 'TIR hoy: n/d' : 'TIR: n/a') : (s.language==='es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
-        const line2 = `${tirLine} ${bar}` + (tLine ? `\n${tLine}` : '');
-        const out = extraLine ? `${headerText}\n${line2}\n${extraLine}` : `${headerText}\n${line2}`;
-        this.showClamped(session, sessionId, out);
-      } catch {}
-    }
-  }
   parseSlicerValue(val, fallback) {
     const n = (typeof val === 'object' && val !== null) ? parseFloat(val.value) : parseFloat(val);
     return Number.isFinite(n) ? n : fallback;
@@ -126,15 +82,25 @@ class NightscoutMentraApp extends AppServer {
   }
   normalizeMmol(x) {
     const v = this.parseSlicerValue(x, null);
-    return (v !== null && Number.isFinite(v)) ? (v >= 30 ? v / 10 : v) : null;
+    return (v !== null && Number.isFinite(v)) ? (v > 30 ? v / 10 : v) : null;
   }
 
   /* ---------- alertas ---------- */
-  getAlertLimits(settings) {
-    if (settings.units === UNITS.MMOL) {
-      const lowM = this.normalizeMmol(settings.low_alert_mmol) ?? 3.9;
-      const highM = this.normalizeMmol(settings.high_alert_mmol) ?? 13.9;
-      return { low: Math.round(lowM * 18), high: Math.round(highM * 18) };
+  normalizeMmolValue(v){ if(v==null) return null; const n=Number(v); return (n>=30 ? n/10 : n); }
+  getAlertLimits(settings){
+    const units = (settings && settings.units) || 'mg/dL';
+    if (String(units).toLowerCase().includes('mmol')){
+      const lowM = this.normalizeMmolValue(settings.low_alert_mmol ?? settings.low_alert_mg);
+      const highM = this.normalizeMmolValue(settings.high_alert_mmol ?? settings.high_alert_mg);
+      const low = Math.round((lowM ?? 3.9) * 18);
+      const high = Math.round((highM ?? 10.0) * 18);
+      return { low, high, units: 'mmol/L' };
+    } else {
+      const low = Number(settings.low_alert_mg ?? 70);
+      const high = Number(settings.high_alert_mg ?? 180);
+      return { low, high, units: 'mg/dL' };
+    }
+  };
     }
     return { low: Math.round(settings.low_alert_mg), high: Math.round(settings.high_alert_mg) };
   }
@@ -328,7 +294,7 @@ class NightscoutMentraApp extends AppServer {
     const langSettings = this.getLanguageSettings(settings);
     const tz = settings.timezone ? this.validateTimezone(settings.timezone) : langSettings.timezone;
     const readingTime = new Date(data.date);
-    const timeStr = readingTime.toLocaleTimeString(langSettings.locale, { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false });
+    const timeStr = readingTime.toLocaleTimeString(langSettings.locale, { timeZone: tz, hour: '2-digit', minute: '2-digit' });
     const minutesAgo = Math.floor((Date.now() - data.date) / 60000);
     const lang = settings.language || 'en';
     const timeAgo = minutesAgo <= 1 ? (lang === 'es' ? 'ahora' : 'now') : (lang === 'es' ? `hace ${minutesAgo}m` : `${minutesAgo}m ago`);
@@ -348,7 +314,7 @@ class NightscoutMentraApp extends AppServer {
       const parts = base.split('\n');
       const l1 = parts[0] || '';
       const l2 = (parts.length > 1 ? parts[1] : '');
-      const sep = ' · ';
+      const sep = '   ·   ';
       const rest = parts.slice(2);
       return `${l1}\n${l2}${sep}${predShort}${rest.length ? `\n${rest.join('\n')}` : ''}`;
     } catch (_) {
@@ -363,7 +329,7 @@ class NightscoutMentraApp extends AppServer {
    */
   async buildPredictionShort(settings, horizonMin = 30) {
     const unit = settings.units || UNITS.MGDL;
-    const fmt = (mgdl) => this.convertToDisplay(mgdl, unit) + ` @${horizonMin}m`;
+    const fmt = (mgdl) => this.convertToDisplay(mgdl, unit) + ' ' + unit + ` @${horizonMin}m`;
 
     // Normalize base URL
     let base = (settings.nightscoutUrl || '').trim();
@@ -505,7 +471,7 @@ class NightscoutMentraApp extends AppServer {
     if (last && (Number.isFinite(last.carbs) || Number.isFinite(last.insulin))) {
       const langSettings = this.getLanguageSettings(settings);
       const tz = settings.timezone ? this.validateTimezone(settings.timezone) : langSettings.timezone;
-      const t = new Date(last.ts).toLocaleTimeString(langSettings.locale, { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false });
+      const t = new Date(last.ts).toLocaleTimeString(langSettings.locale, { timeZone: tz, hour: '2-digit', minute: '2-digit' });
       const parts = [];
       if (Number.isFinite(last.carbs)) parts.push(`${round1(last.carbs)}g`);
       if (Number.isFinite(last.insulin)) parts.push(`${round1(last.insulin)}U`);
@@ -589,7 +555,7 @@ class NightscoutMentraApp extends AppServer {
     let settings = null;
     try {
       settings = await this.getUserSettings(session);
-      if (!settings.nightscoutUrl) {
+      if (!settings.nightscoutUrl || !settings.nightscoutToken) {
         const msg = { en: 'Please configure Nightscout\nURL and token in settings', es: 'Configura URL y token\nde Nightscout en ajustes' };
         this.showClamped(session, sessionId, msg[settings.language || 'en']);
         return;
@@ -653,7 +619,8 @@ class NightscoutMentraApp extends AppServer {
         const bar = !this.toBool(settings.show_tir_bar) || tirPct === null ? '' : this.buildTirBar(tirPct);
         let tLine = '';
         try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {}
-        await this.animateTIRFill(session, sessionId, settings, formattedData, tirPct, tLine);
+        this.showClamped(session, sessionId, `${formattedData}
+${this.composeTirLines(settings, tirLine, bar, tLine)}`);
       } else {
         this.showClamped(session, sessionId, formattedData);
       }
@@ -767,10 +734,11 @@ if (settings.units === UNITS.MMOL) {
           let tLine = '';
           try { const sum = await this.getRecentTreatments(s, 'day'); tLine = this.formatTreatmentsLine(sum, s); } catch {}
           const line2 = this.composeTirLines(s, tirLine, bar, tLine);
-          await this.animateTIRFill(session, sessionId, s, baseLine, tirPct, tLine, minMaxLine);
+          const out = minMaxLine ? `${baseLine}\n${line2}\n${minMaxLine}` : `${baseLine}\n${line2}`;
+          this.showClamped(session, sessionId, out);
           setTimeout(() => this.hideDisplay(session, sessionId), s.display_duration_ms || 4000);
         } catch (e) {
-          this.showClamped(session, sessionId, (s.language==='es' ? 'Error al mostrar' : 'Display error'));
+          this.showClamped(session, sessionId, 'Error');
           setTimeout(() => this.hideDisplay(session, sessionId), 2000);
         }
       });
