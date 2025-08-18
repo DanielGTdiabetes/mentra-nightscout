@@ -155,8 +155,7 @@ class NightscoutMentraApp extends AppServer {
   /* ---------- lectura de settings ---------- */
   async getUserSettings(session) {
     try {
-      const [
-        url, token, updateInterval,
+      const [url, token, updateInterval,
         lowMg, highMg, lowMmol, highMmol,
         alertsEnabled, language, timezone, units,
         enable_head_up_display,
@@ -165,8 +164,7 @@ class NightscoutMentraApp extends AppServer {
         display_duration_ms, alert_duration_ms, alert_cooldown_ms,
         enable_advanced_mode, advanced_mode_enabled,
         tir_low_mg, tir_high_mg, tir_low_mmol, tir_high_mmol,
-        time_in_range_low_mg, time_in_range_high_mg, time_in_range_low_mmol, time_in_range_high_mmol,
-      ] = await Promise.all([
+        time_in_range_low_mg, time_in_range_high_mg, time_in_range_low_mmol, time_in_range_high_mmol, prediction_horizon_min, prediction_horizon_mins] = await Promise.all([
         session.settings.get('nightscout_url'),
         session.settings.get('nightscout_token'),
         session.settings.get('update_interval'),
@@ -244,7 +242,8 @@ class NightscoutMentraApp extends AppServer {
         time_in_range_high_mg: this.parseSlicerValue(time_in_range_high_mg, null),
         time_in_range_low_mmol: this.normalizeMmol(time_in_range_low_mmol),
         time_in_range_high_mmol: this.normalizeMmol(time_in_range_high_mmol),
-      };
+            prediction_horizon_min: [15,30,60].includes(Number(prediction_horizon_min || prediction_horizon_mins)) ? Number(prediction_horizon_min || prediction_horizon_mins) : 30,
+    };
     } catch (e) {
       console.error('Error leyendo settings:', e);
       return {
@@ -310,6 +309,7 @@ class NightscoutMentraApp extends AppServer {
       time_in_range_high_mg: this.parseSlicerValue(o.time_in_range_high_mg, null),
       time_in_range_low_mmol: this.normalizeMmol(o.time_in_range_low_mmol),
       time_in_range_high_mmol: this.normalizeMmol(o.time_in_range_high_mmol),
+          prediction_horizon_min: [15,30,60].includes(Number(o.prediction_horizon_min || o.prediction_horizon_mins)) ? Number(o.prediction_horizon_min || o.prediction_horizon_mins) : 30,
     };
   }
 
