@@ -222,7 +222,7 @@ class NightscoutMentraApp extends AppServer {
         nightscoutUrl: String(url || '').trim() || '',
         nightscoutToken: String(token || '').trim() || '',
         updateInterval: ui,
-        low_alert_mg: this.validateSlicerValue(lowMg, 40, 90, 70),
+        low_alert_mg: this.validateSlicerValue(lowMg, 50, 120, 70),
         high_alert_mg: this.validateSlicerValue(highMg, 180, 400, 250),
         low_alert_mmol: this.normalizeMmol(lowMmol) ?? 3.9,
         high_alert_mmol: this.normalizeMmol(highMmol) ?? 13.9,
@@ -288,7 +288,7 @@ class NightscoutMentraApp extends AppServer {
       nightscoutUrl: String(o.nightscout_url || '').trim() || '',
       nightscoutToken: String(o.nightscout_token || '').trim() || '',
       updateInterval: ui,
-      low_alert_mg: this.validateSlicerValue(o.low_alert_mg, 40, 90, 70),
+      low_alert_mg: this.validateSlicerValue(o.low_alert_mg, 50, 120, 70),
       high_alert_mg: this.validateSlicerValue(o.high_alert_mg, 180, 400, 250),
       low_alert_mmol: this.normalizeMmol(o.low_alert_mmol) ?? 3.9,
       high_alert_mmol: this.normalizeMmol(o.high_alert_mmol) ?? 13.9,
@@ -727,8 +727,8 @@ const lowLbl = (settings.language === 'es') ? 'Bajo' : 'Low';
 const highLbl = (settings.language === 'es') ? 'Alto' : 'High';
 const lines = [savedMsg];
 if (settings.units === UNITS.MMOL) {
-  lines.push(`${lowLbl}: ${settings.low_alert_mmol} mmol/L`);
-  lines.push(`${highLbl}: ${settings.high_alert_mmol} mmol/L`);
+  lines.push(`${lowLbl}: ${(+settings.low_alert_mmol).toFixed(1)} mmol/L`);
+  lines.push(`${highLbl}: ${(+settings.high_alert_mmol).toFixed(1)} mmol/L`);
 } else {
   lines.push(`${lowLbl}: ${settings.low_alert_mg} mg/dL`);
   lines.push(`${highLbl}: ${settings.high_alert_mg} mg/dL`);
