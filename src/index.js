@@ -32,26 +32,6 @@ if (!MENTRAOS_API_KEY) {
 
 const UNITS = { MGDL: 'mg/dL', MMOL: 'mmol/L' };
 
-
-  newRenderToken(sessionId){
-    const t = Math.random().toString(36).slice(2);
-    this._renderTokens.set(sessionId, t);
-    return t;
-  }
-  isCancelled(sessionId, token){
-    return this._renderTokens.get(sessionId) !== token;
-  }
-  beginDeferredLoading(session, sessionId, msg, delayMs=220){
-    clearTimeout(this._loadingTimers.get(sessionId));
-    const h = setTimeout(()=>{
-      if (this._renderTokens.get(sessionId)) this.showClamped(session, sessionId, msg, this._renderTokens.get(sessionId));
-    }, Math.max(0, delayMs|0));
-    this._loadingTimers.set(sessionId, h);
-  }
-  endDeferredLoading(sessionId){
-    clearTimeout(this._loadingTimers.get(sessionId));
-    this._loadingTimers.delete(sessionId);
-  }
 class NightscoutMentraApp extends AppServer {
   constructor(opts) {
     super(opts);
@@ -62,11 +42,7 @@ class NightscoutMentraApp extends AppServer {
     this.dailyTirState = new Map();
     this.dayWatchTimers = new Map();
     this.lastGoodEntry = new Map();          // cache last valid entry
-  
-      this._renderTokens = new Map();
-      this._loadingTimers = new Map();
-      this._lastReading = null;
-      this._alertState = new Map();}
+  }
 
   /* ---------- helpers ---------- */
   parseSlicerValue(val, fallback) {
@@ -82,25 +58,15 @@ class NightscoutMentraApp extends AppServer {
   }
   normalizeMmol(x) {
     const v = this.parseSlicerValue(x, null);
-    return (v !== null && Number.isFinite(v)) ? (v > 30 ? v / 10 : v) : null;
+    return (v !== null && Number.isFinite(v)) ? (v >= 30 ? v / 10 : v) : null;
   }
 
   /* ---------- alertas ---------- */
-  normalizeMmolValue(v){ if(v==null) return null; const n=Number(v); return (n>=30 ? n/10 : n); }
-  getAlertLimits(settings){
-    const units = (settings && settings.units) || 'mg/dL';
-    if (String(units).toLowerCase().includes('mmol')){
-      const lowM = this.normalizeMmolValue(settings.low_alert_mmol ?? settings.low_alert_mg);
-      const highM = this.normalizeMmolValue(settings.high_alert_mmol ?? settings.high_alert_mg);
-      const low = Math.round((lowM ?? 3.9) * 18);
-      const high = Math.round((highM ?? 10.0) * 18);
-      return { low, high, units: 'mmol/L' };
-    } else {
-      const low = Number(settings.low_alert_mg ?? 70);
-      const high = Number(settings.high_alert_mg ?? 180);
-      return { low, high, units: 'mg/dL' };
-    }
-  };
+  getAlertLimits(settings) {
+    if (settings.units === UNITS.MMOL) {
+      const lowM = this.normalizeMmol(settings.low_alert_mmol) ?? 3.9;
+      const highM = this.normalizeMmol(settings.high_alert_mmol) ?? 13.9;
+      return { low: Math.round(lowM * 18), high: Math.round(highM * 18) };
     }
     return { low: Math.round(settings.low_alert_mg), high: Math.round(settings.high_alert_mg) };
   }
@@ -385,9 +351,57 @@ class NightscoutMentraApp extends AppServer {
   }
   buildTirBar(tirPct) {
     if (tirPct === null || !Number.isFinite(tirPct)) return '';
-    const blocks = Math.max(0, Math.min(20, Math.round(tirPct / 5)));
+    const blocks = Math.max(0, Math.min(20, Math.floor(tirPct / 5)));
     return '│'.repeat(blocks);
   }
+  async animateTIRBar(session, sessionId, settings, headerText, tirLine, tirPct, tLine='', extraLine='') {
+    try {
+      const maxBlocks = 20; // 5% per block
+      const targetBlocks = Math.max(0, Math.min(maxBlocks, Math.floor((Number(tirPct)||0) / 5)));
+      const leadIn = 220;
+      const baseMs = 800;
+      const speed = (settings.animation_speed || 'normal');
+      const mult = (speed==='slow'?1.2:(speed==='fast'?0.8:1.0));
+      const duration = Math.max(200, Math.min(2000, Math.round(baseMs*mult)));
+      const compose = (filled) => {
+        const bar = (settings.show_tir_bar===false || tirPct===null) ? '' : (' ' + '│'.repeat(filled));
+        const line2 = `${tirLine}${bar}`;
+        const l3 = tLine ? `\n${tLine}` : '';
+        const l4 = extraLine ? `\n${extraLine}` : '';
+        return `${headerText}\n${line2}${l3}${l4}`;
+      };
+      if (settings.show_tir_bar===false || tirPct===null) {
+        this.showClamped(session, sessionId, compose(0));
+        return;
+      }
+      // lead-in
+      if (leadIn>0) {
+        this.showClamped(session, sessionId, compose(0));
+        const t0 = Date.now(); while (Date.now()-t0 < leadIn) { await new Promise(r=>setTimeout(r,30)); }
+      }
+      const tStart = Date.now();
+      let last = -1;
+      while (true) {
+        const t = (Date.now() - tStart) / duration;
+        const clamped = Math.max(0, Math.min(1, t));
+        const eased = clamped*clamped*clamped; // ease-in
+        const filled = Math.min(targetBlocks, Math.floor(eased * targetBlocks));
+        if (filled !== last) { this.showClamped(session, sessionId, compose(filled)); last = filled; }
+        if (clamped>=1) break;
+        await new Promise(r=>setTimeout(r,60));
+      }
+      this.showClamped(session, sessionId, compose(targetBlocks));
+    } catch (e) {
+      try {
+        const bar = this.buildTirBar(tirPct);
+        const line2 = `${tirLine}${bar ? ' ' + bar : ''}`;
+        const l3 = tLine ? `\n${tLine}` : '';
+        const l4 = extraLine ? `\n${extraLine}` : '';
+        this.showClamped(session, sessionId, `${headerText}\n${line2}${l3}${l4}`);
+      } catch (_){}
+    }
+  }
+
   /* Compose second line: TIR label+bar and treatments.
      Siempre baja los tratamientos a siguiente línea (sin punto delante). */
   composeTirLines(settings, tirLine, bar, tLine) {
@@ -619,8 +633,7 @@ class NightscoutMentraApp extends AppServer {
         const bar = !this.toBool(settings.show_tir_bar) || tirPct === null ? '' : this.buildTirBar(tirPct);
         let tLine = '';
         try { const sum = await this.getRecentTreatments(settings, 'day'); tLine = this.formatTreatmentsLine(sum, settings); } catch {}
-        this.showClamped(session, sessionId, `${formattedData}
-${this.composeTirLines(settings, tirLine, bar, tLine)}`);
+        await this.animateTIRBar(session, sessionId, settings, formattedData, tirLine, tirRes.tirPct, tLine);
       } else {
         this.showClamped(session, sessionId, formattedData);
       }
@@ -735,7 +748,7 @@ if (settings.units === UNITS.MMOL) {
           try { const sum = await this.getRecentTreatments(s, 'day'); tLine = this.formatTreatmentsLine(sum, s); } catch {}
           const line2 = this.composeTirLines(s, tirLine, bar, tLine);
           const out = minMaxLine ? `${baseLine}\n${line2}\n${minMaxLine}` : `${baseLine}\n${line2}`;
-          this.showClamped(session, sessionId, out);
+          await this.animateTIRBar(session, sessionId, s, baseLine, tirLine, tirPct, tLine, minMaxLine);
           setTimeout(() => this.hideDisplay(session, sessionId), s.display_duration_ms || 4000);
         } catch (e) {
           this.showClamped(session, sessionId, 'Error');
