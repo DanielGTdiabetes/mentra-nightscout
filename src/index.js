@@ -151,48 +151,7 @@ __speedMult(speed){ return speed==='slow' ? 1.35 : (speed==='fast' ? 0.75 : 1.0)
     return (v !== null && Number.isFinite(v)) ? (v >= 30 ? v / 10 : v) : null;
   }
 
-  
-  /**
-   * Try to reflect normalized settings back into Mentra UI so selectors/sliders show the chosen value.
-   * Safe, debounced, and only for keys without unit ambiguity.
-   */
-  async reflectSettingsToUI(session, s){
-    try{
-      if (!session || !session.settings) return;
-      const setFn = typeof session.settings.set === 'function'
-        ? async (k,v)=>{ try{ await session.settings.set(k,v); }catch(_){ } }
-        : (typeof session.updateSettingsForTesting === 'function'
-            ? async (k,v)=>{ try{ await session.updateSettingsForTesting({[k]:v}); }catch(_){ } }
-            : null);
-      if (!setFn) return;
-
-      // Debounce per session
-      if (!this._lastWriteback) this._lastWriteback = new Map();
-      const last = this._lastWriteback.get(session) || 0;
-      if (Date.now() - last < 1200) return;
-      this._lastWriteback.set(session, Date.now());
-
-      // Only reflect "safe" keys to avoid unit ×10 confusion in mmol
-      const safe = {
-        prediction_horizon_min: Number(s.prediction_horizon_min) || 30,
-        language: s.language || 'en',
-        units: s.units || 'mg/dL',
-        enable_animations: !!s.enable_animations,
-        show_tir_bar: !!s.show_tir_bar,
-        enable_advanced_mode: !!s.enable_advanced_mode
-      };
-      // In mg/dL we can also reflect alarm thresholds safely
-      if ((s.units || '').toLowerCase().includes('mg')){
-        if (Number.isFinite(s.low_alert_mg))  safe.low_alert_mg  = Math.round(s.low_alert_mg);
-        if (Number.isFinite(s.high_alert_mg)) safe.high_alert_mg = Math.round(s.high_alert_mg);
-      }
-
-      for (const [k,v] of Object.entries(safe)){
-        await setFn(k, v);
-      }
-    }catch(_){}
-  }
-/* ---------- alertas ---------- */
+  /* ---------- alertas ---------- */
   getAlertLimits(settings) {
     if (settings.units === UNITS.MMOL) {
       const lowM = this.normalizeMmol(settings.low_alert_mmol) ?? 3.9;
@@ -654,10 +613,7 @@ __speedMult(speed){ return speed==='slow' ? 1.35 : (speed==='fast' ? 0.75 : 1.0)
     let settings = null;
     try {
       settings = await this.getUserSettings(session);
-      
-      // Try to reflect normalized values back to UI (safe keys only)
-      try{ await this.reflectSettingsToUI(session, settings); }catch(_){}
-if (!settings.nightscoutUrl) {
+      if (!settings.nightscoutUrl) {
         const msg = { en: 'Please configure Nightscout\nURL and token in settings', es: 'Configura URL y token\nde Nightscout en ajustes' };
         this.showClamped(session, sessionId, msg[settings.language || 'en']);
         return;
@@ -727,7 +683,6 @@ if (!settings.nightscoutUrl) {
       }
       const t = setTimeout(() => this.hideDisplay(session, sessionId), settings.display_duration_ms || 5000);
       this.displayTimers.set(sessionId, t);
-      try{ await this.reflectSettingsToUI(session, settings); }catch(_){}
     } catch (error) {
       try {
         const cached = this.lastGoodEntry.get(sessionId);
