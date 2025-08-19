@@ -18,14 +18,8 @@ const path = require('path');
 const fs = require('fs/promises');
 
 /* ---------- SHIM: compatibilidad SDK ---------- */
-if (typeof Object.prototype.updateSettingsForTesting !== 'function') {
-  Object.defineProperty(Object.prototype, 'updateSettingsForTesting', {
-    value: async () => {},
-    writable: true,
-    configurable: true,
-    enumerable: false
-  });
-}
+// (El shim global ha sido eliminado para evitar tocar Object.prototype)
+// Se aplica un shim local por sesión en onSession().
 
 /* ---------- CONFIG ---------- */
 const PACKAGE_NAME = process.env.PACKAGE_NAME || 'com.tucompania.nightscout-glucose';
@@ -704,20 +698,7 @@ class NightscoutMentraApp extends AppServer {
   hideDisplay(session, sessionId) {
     try {
       const anim = this._activeBitmapAnimation.get(sessionId);
-      if (anim) {
-        try { 
-          if (typeof anim === 'object' && anim.controller && typeof anim.controller.stop === 'function') {
-            anim.controller.stop();
-          } else if (typeof anim.stop === 'function') {
-            anim.stop();
-          }
-          if (anim.stopTimer) {
-            clearTimeout(anim.stopTimer);
-          }
-        } catch(e) {
-          console.log(`⚠️ Error en hideDisplay:`, e.message);
-        }
-      }
+      if (anim && typeof anim.stop === 'function') { try { anim.stop(); } catch(_){} }
       this._activeBitmapAnimation.delete(sessionId);
       try { session.layouts.clearView?.(); } catch(_) {}
       session.layouts.showTextWall('');
@@ -737,11 +718,64 @@ class NightscoutMentraApp extends AppServer {
       path.resolve(__dirname, '..', '..', 'assets', 'bitmaps'),
     ];
     console.log('📁 Directorios candidatos:', candidates);
-    
-    // Función auxiliar para convertir buffer a hex
-    const bufferToHex = (buffer) => {
-      return Array.from(buffer).map(b => b.toString(16).padStart(2, '0')).join('');
-    };
+
+    for (const baseDir of candidates) {
+      tried.push(baseDir);
+      try {
+        console.log(`🔍 Explorando: ${baseDir}`);
+        const entries = await fs.readdir(baseDir);
+        const bmpFiles = entries.filter(f => f.toLowerCase().endsWith('.bmp'));
+        console.log(`📄 Archivos BMP encontrados:`, bmpFiles);
+        for (const f of bmpFiles) {
+          const full = path.join(baseDir, f);
+          try {
+            let hex = null;
+            if (BitmapUtils && typeof BitmapUtils.loadBmpAsHex === 'function') {
+              // ✅ Usa loader oficial del SDK
+              hex = await BitmapUtils.loadBmpAsHex(full);
+            } else {
+              // Fallback: leer fichero y convertir a hex crudo
+              const buffer = await fs.readFile(full);
+              if (buffer.length >= 54 && buffer.toString('ascii', 0, 2) === 'BM') {
+                hex = buffer.toString('hex');
+              }
+            }
+            if (!hex) continue;
+
+            // Validación SDK si está disponible
+            let isValid = true;
+            if (BitmapUtils && typeof BitmapUtils.validateBmpHex === 'function') {
+              try {
+                const v = await BitmapUtils.validateBmpHex(hex);
+                isValid = v && (v.isValid !== false);
+                console.log(`🔍 Validación SDK ${f}:`, v);
+              } catch (e) {
+                console.log(`⚠️ Validación SDK falló para ${f}:`, e.message);
+              }
+            }
+
+            if (isValid) {
+              this._bitmapCache.set(f.toLowerCase(), hex);
+              console.log(`✅ ${f} añadido al cache`);
+            } else {
+              console.log(`❌ ${f} no válido, omitiendo`);
+            }
+          } catch (e) {
+            console.log(`❌ Error cargando ${f}:`, e.message);
+          }
+        }
+        if (this._bitmapCache.size > 0) break;
+      } catch (e) {
+        console.log(`❌ Error explorando ${baseDir}:`, e.message);
+      }
+    }
+    console.log(`📊 Cache final: ${this._bitmapCache.size} bitmaps cargados`);
+    console.log(`📋 Claves en cache:`, Array.from(this._bitmapCache.keys()));
+    if (!this._bitmapCache.size) {
+      console.warn('⚠️ No BMPs loaded. Tried:', tried);
+    }
+    return this._bitmapCache.size > 0;
+  };
     
     // Función auxiliar para validar BMP básico
     const validateBmpBasic = (buffer) => {
@@ -821,23 +855,7 @@ class NightscoutMentraApp extends AppServer {
 
   _stopActiveAnimation(sessionId) {
     const anim = this._activeBitmapAnimation.get(sessionId);
-    if (anim) {
-      try { 
-        if (typeof anim === 'object' && anim.controller && typeof anim.controller.stop === 'function') {
-          anim.controller.stop();
-          console.log(`🛑 Controller.stop() ejecutado desde _stopActiveAnimation`);
-        } else if (typeof anim.stop === 'function') {
-          anim.stop();
-          console.log(`🛑 Animation.stop() ejecutado desde _stopActiveAnimation`);
-        }
-        if (anim.stopTimer) {
-          clearTimeout(anim.stopTimer);
-          console.log(`🛑 Timer cancelado desde _stopActiveAnimation`);
-        }
-      } catch(e) {
-        console.log(`⚠️ Error en _stopActiveAnimation:`, e.message);
-      }
-    }
+    if (anim && typeof anim.stop === 'function') { try { anim.stop(); } catch(_){} }
     this._activeBitmapAnimation.delete(sessionId);
   }
 
@@ -847,13 +865,12 @@ class NightscoutMentraApp extends AppServer {
       const ok = await this._ensureBitmapsLoaded();
       console.log(`📊 Bitmaps cargados: ${ok}`);
       if (!ok) return false;
-      
       // Evita superposición con HUD de texto
       this._stopActiveAnimation(sessionId);
       try { session.layouts.clearView?.(); } catch(_) {}
       try { session.layouts.showTextWall(''); } catch(_) {}
       this._lastShownText.delete(sessionId);
-      
+
       const frames = [];
       const pickHex = (...names) => {
         for (const n of names) { const h = this._getBitmapHex(n); if (h) return h; }
@@ -863,41 +880,80 @@ class NightscoutMentraApp extends AppServer {
       const lowBmp = pickHex('alert-low-576x100.bmp','alert-low-526x100.bmp','alert-low.bmp');
       const highBmp= pickHex('alert-high-576x100.bmp','alert-high-526x100.bmp','alert-high.bmp');
       console.log(`🔍 Bitmaps encontrados: bell=${!!bell}, low=${!!lowBmp}, high=${!!highBmp}`);
-      
       const pick = type === 'low' ? lowBmp : highBmp;
       if (bell && pick) { frames.push(bell, pick); }
       else if (pick) { frames.push(pick); }
       else if (bell) { frames.push(bell); }
-      
       console.log(`🎞️ Frames preparados: ${frames.length}`);
       if (!frames.length) return false;
-      
+
+      const L = session.layouts;
+      const speed = Math.max(200, intervalMs || 600);
+      const total = Math.max(1000, durationMs || 15000) + 80;
+
+      if (typeof L.showBitmapAnimation === 'function') {
+        console.log(`▶️ Iniciando animación con API nativa`);
+        const controller = L.showBitmapAnimation(frames, speed, true);
+        this._activeBitmapAnimation.set(sessionId, controller);
+        setTimeout(() => {
+          try { controller?.stop?.(); } catch(_){}
+          this._activeBitmapAnimation.delete(sessionId);
+          this.hideDisplay(session, sessionId);
+          console.log(`⏹️ Animación bitmap detenida`);
+        }, total);
+        return true;
+      }
+
+      // Polyfill manual a fotogramas
+      const showHex = L.showBitmapHex || L.showBitmap || L.showImageHex;
+      if (typeof showHex !== 'function') {
+        console.log('❌ No hay método disponible para pintar bitmaps en este runtime');
+        return false;
+      }
+      console.log(`▶️ Iniciando animación con polyfill`);
+      let i = 0;
+      const tick = () => {
+        try { showHex.call(L, frames[i]); } catch (e) { console.log('❌ pintar frame:', e.message); }
+        i = (i + 1) % frames.length;
+      };
+      tick();
+      const handle = setInterval(tick, speed);
+      this._activeBitmapAnimation.set(sessionId, { stop: () => clearInterval(handle) });
+      setTimeout(() => {
+        try { clearInterval(handle); } catch(_) {}
+        this._activeBitmapAnimation.delete(sessionId);
+        this.hideDisplay(session, sessionId);
+        console.log(`⏹️ Animación bitmap detenida (polyfill)`);
+      }, total);
+      return true;
+
+    } catch(e) { 
+      console.log(`❌ Error en animación bitmap:`, e.message);
+      return false; 
+    }
+  };
+      const bell   = pickHex('alert-bell-576x100.bmp','alert-bell-526x100.bmp','alert-bell.bmp');
+      const lowBmp = pickHex('alert-low-576x100.bmp','alert-low-526x100.bmp','alert-low.bmp');
+      const highBmp= pickHex('alert-high-576x100.bmp','alert-high-526x100.bmp','alert-high.bmp');
+      console.log(`🔍 Bitmaps encontrados: bell=${!!bell}, low=${!!lowBmp}, high=${!!highBmp}`);
+      const pick = type === 'low' ? lowBmp : highBmp;
+      if (bell && pick) { frames.push(bell, pick); }
+      else if (pick) { frames.push(pick); }
+      else if (bell) { frames.push(bell); }
+      console.log(`🎞️ Frames preparados: ${frames.length}`);
+      if (!frames.length) return false;
       console.log(`▶️ Iniciando animación bitmap...`);
       const controller = session.layouts.showBitmapAnimation(frames, Math.max(200, intervalMs || 600), true);
       this._activeBitmapAnimation.set(sessionId, controller);
-      
-      // programar stop con más margen
-      const stopAfter = Math.max(2000, durationMs || 15000) + 200;
+      // programar stop
+      const stopAfter = Math.max(1000, durationMs || 15000) + 80;
       console.log(`⏰ Animación programada para ${stopAfter}ms`);
-      
-      const stopTimer = setTimeout(() => {
-        console.log(`⏰ Timer de parada ejecutado`);
-        try { 
-          if (controller && typeof controller.stop === 'function') {
-            controller.stop();
-            console.log(`✅ Controller.stop() ejecutado`);
-          }
-        } catch(e) {
-          console.log(`⚠️ Error al parar controller:`, e.message);
-        }
+      setTimeout(() => {
+        try { controller?.stop?.(); } catch(_){}
         this._activeBitmapAnimation.delete(sessionId);
         this.hideDisplay(session, sessionId);
         console.log(`⏹️ Animación bitmap detenida`);
       }, stopAfter);
-      
-      // Guardar el timer para poder cancelarlo si es necesario
-      this._activeBitmapAnimation.set(sessionId, { controller, stopTimer });
-      
       return true;
     } catch(e) { 
       console.log(`❌ Error en animación bitmap:`, e.message);
