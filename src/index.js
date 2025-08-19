@@ -1,19 +1,7 @@
 
-/* ---------- Bitmap Debug Helpers ---------- */
-let SUPPRESS_UNTIL = 0;
-function suppress(ms){ SUPPRESS_UNTIL = Date.now() + ms; }
-function canRenderHUD(){ return Date.now() >= SUPPRESS_UNTIL; }
-
-async function showDebugBitmap(bitmapKey) {
-  if (!bitmaps[bitmapKey]) {
-    console.error("[debug] Bitmap no encontrado:", bitmapKey);
-    return;
-  }
-  console.log("[debug] DEBUG_BOOT_BITMAP=%s → mostrando 8000ms en DASHBOARD y MAIN", bitmapKey);
+console.log("[debug] DEBUG_BOOT_BITMAP=%s → mostrando 8000ms en DASHBOARD y MAIN", bitmapKey);
   suppress(8000);
   try {
-    await AppServer.showBitmap(bitmaps[bitmapKey], { location: "DASHBOARD", durationMs: 8000 });
-    await AppServer.showBitmap(bitmaps[bitmapKey], { location: "MAIN", durationMs: 8000 });
   } catch (err) {
     console.error("[debug] fallo mostrando DEBUG_BOOT_BITMAP:", err.message);
   }
@@ -730,7 +718,7 @@ getAlertLimits(settings) {
         if (hex) {
           try {
             console.log(`[debug] DEBUG_BOOT_BITMAP=${key} → mostrando 5s en DASHBOARD`);
-            await session.layouts.showBitmapView(hex, { durationMs: 5000, view: ViewType.DASHBOARD });
+            await session.layouts.showBitmapView(hex, { durationMs: 5000, location: ViewType.DASHBOARD });
             await new Promise(r => setTimeout(r, 5000));
           } catch (e) {
             console.warn('[debug] fallo mostrando DEBUG_BOOT_BITMAP:', e?.message || e);
