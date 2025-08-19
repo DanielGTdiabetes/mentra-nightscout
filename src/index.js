@@ -55,7 +55,7 @@ class NightscoutMentraApp extends AppServer {
     this._http = new Map();             // cliente axios por sesión
     this._settingsDebounce = new Map(); // debounce settings
     this._sessionLocale = new Map();    // cache locale/tz por sesión
-    this._bitmapCache = new Map();      // nombre.bmp -> hex
+    this._bitmapCache = new Map();      // nombre.bmp (lowercase) -> hex
     this._activeBitmapAnimation = new Map(); // sessionId -> controller
   }
 
@@ -713,26 +713,42 @@ class NightscoutMentraApp extends AppServer {
   }
 
   /* ---------- bitmap helpers ---------- */
-  async _ensureBitmapsLoaded(baseDir = path.resolve(process.cwd(), 'assets', 'bitmaps')) {
+  async _ensureBitmapsLoaded() {
     if (this._bitmapCache.size) return true;
-    try {
-      const entries = await fs.readdir(baseDir);
-      const bmpFiles = entries.filter(f => f.toLowerCase().endsWith('.bmp'));
-      for (const f of bmpFiles) {
-        const full = path.join(baseDir, f);
-        try {
-          const hex = await BitmapUtils.loadBmpAsHex(full);
-          // Validación básica
-          const v = await (BitmapUtils.validateBmpHex?.(hex) || { isValid: !!hex });
-          if (v && (v.isValid !== false)) this._bitmapCache.set(f, hex);
-        } catch (_) { /* skip bad file */ }
-      }
-      return this._bitmapCache.size > 0;
-    } catch (_) { return false; }
+    const candidates = [
+      path.resolve(process.cwd(), 'assets', 'bitmaps'),
+      path.resolve(__dirname, 'assets', 'bitmaps'),
+      path.resolve(__dirname, '..', 'assets', 'bitmaps'),
+      path.resolve(__dirname, '..', '..', 'assets', 'bitmaps'),
+    ];
+    for (const baseDir of candidates) {
+      try {
+        const entries = await fs.readdir(baseDir);
+        const bmpFiles = entries.filter(f => f.toLowerCase().endsWith('.bmp'));
+        for (const f of bmpFiles) {
+          const full = path.join(baseDir, f);
+          try {
+            const hex = await BitmapUtils.loadBmpAsHex(full);
+            const v = await (BitmapUtils.validateBmpHex?.(hex) || { isValid: !!hex });
+            if (v && (v.isValid !== false)) this._bitmapCache.set(f.toLowerCase(), hex);
+          } catch (_) { /* skip bad file */ }
+        }
+        if (this._bitmapCache.size > 0) break;
+      } catch (_) { /* try next */ }
+    }
+    return this._bitmapCache.size > 0;
   }
 
   _getBitmapHex(name) {
-    return this._bitmapCache.get(name) || null;
+    if (!name) return null;
+    const key = String(name).toLowerCase();
+    return this._bitmapCache.get(key) || null;
+  }
+
+  _stopActiveAnimation(sessionId) {
+    const anim = this._activeBitmapAnimation.get(sessionId);
+    if (anim && typeof anim.stop === 'function') { try { anim.stop(); } catch(_){} }
+    this._activeBitmapAnimation.delete(sessionId);
   }
 
   async _playAlertBitmap(session, sessionId, type, intervalMs, durationMs) {
@@ -740,6 +756,7 @@ class NightscoutMentraApp extends AppServer {
       const ok = await this._ensureBitmapsLoaded();
       if (!ok) return false;
       // Evita superposición con HUD de texto
+      this._stopActiveAnimation(sessionId);
       try { session.layouts.clearView?.(); } catch(_) {}
       this._lastShownText.delete(sessionId);
       const frames = [];
@@ -966,6 +983,12 @@ class NightscoutMentraApp extends AppServer {
             this.alertLatch.delete(sessionId); // reinicia latch al cambiar límites
           }
 
+          // Si cambia debug_force_alert, resetea cooldown/latch para pruebas inmediatas
+          const dbgChanged = (old.debug_force_alert || '') !== (settings.debug_force_alert || '');
+          if (dbgChanged) {
+            this.alertHistory.delete(sessionId);
+            this.alertLatch.delete(sessionId);
+          }
           sd.settings = settings;
           this.activeSessions.set(sessionId, sd);
 
