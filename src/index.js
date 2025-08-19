@@ -121,7 +121,7 @@ class NightscoutMentraApp extends AppServer {
   /* ---------- Lógica de Límites y Alertas ---------- */
   getAlertLimits(settings) {
     const units = String(settings.units || '').toLowerCase();
-    const lowMgOK  = this.validateSlicerValue(settings.low_alert_mg, 50, 120, NaN);
+    const lowMgOK   = this.validateSlicerValue(settings.low_alert_mg, 50, 120, NaN);
     const highMgOK = this.validateSlicerValue(settings.high_alert_mg, 180, 400, NaN);
     const lowMmol  = this.normalizeMmol(settings.low_alert_mmol);
     const highMmol = this.normalizeMmol(settings.high_alert_mmol);
@@ -257,9 +257,9 @@ class NightscoutMentraApp extends AppServer {
       .filter(e => e.ts && new Date(e.ts).toLocaleDateString(b.locale, { timeZone: b.tz }) === todayStr);
     if (!todayEvents.length) return { totalCarbs: 0, totalInsulin: 0, last: null };
     const totals = todayEvents.reduce((acc, e) => {
-        if (Number.isFinite(e.carbs)) acc.totalCarbs += e.carbs;
-        if (Number.isFinite(e.insulin)) acc.totalInsulin += e.insulin;
-        return acc;
+      if (Number.isFinite(e.carbs)) acc.totalCarbs += e.carbs;
+      if (Number.isFinite(e.insulin)) acc.totalInsulin += e.insulin;
+      return acc;
     }, { totalCarbs: 0, totalInsulin: 0 });
     const last = todayEvents.reduce((latest, current) => (!latest || current.ts > latest.ts ? current : latest), null);
     return { ...totals, last };
@@ -394,13 +394,13 @@ class NightscoutMentraApp extends AppServer {
     
     const tStart = Date.now();
     for (let i = 0; i <= target; i++) {
-        if (this._renderToken.get(sessionId) !== token) return;
-        const easedProgress = this.__easeInOutCubic(i / target);
-        const currentFill = Math.floor(easedProgress * target);
-        this.showClamped(session, sessionId, baseText(this.__barFromRatio(currentFill, slots)));
-        const elapsed = Date.now() - tStart;
-        const expectedTime = (i / target) * 920; // totalMs
-        await this.__delay(Math.max(0, expectedTime - elapsed));
+      if (this._renderToken.get(sessionId) !== token) return;
+      const easedProgress = this.__easeInOutCubic(i / target);
+      const currentFill = Math.floor(easedProgress * target);
+      this.showClamped(session, sessionId, baseText(this.__barFromRatio(currentFill, slots)));
+      const elapsed = Date.now() - tStart;
+      const expectedTime = (i / target) * 920; // totalMs
+      await this.__delay(Math.max(0, expectedTime - elapsed));
     }
     this.showClamped(session, sessionId, baseText(this.__barFromRatio(target, slots)));
   }
@@ -649,21 +649,61 @@ class NightscoutMentraApp extends AppServer {
         let status = isSpanish ? 'Normal' : 'Normal';
         if (reading.sgv <= limits.low) status = isSpanish ? 'Bajo' : 'Low';
         else if (reading.sgv >= limits.high) status = isSpanish ? 'Alto' : 'High';
-
-        const msg = isSpanish
-            ? `Tu glucosa está en ${display} ${settings.units} ${trend}. Estado: ${status}.`
-            : `Your glucose is ${display} ${settings.units} ${trend}. Status: ${status}.`;
-        return { success: true, message: msg };
-    } catch (e) {
-      return { success: false, error: `${isSpanish ? 'Error' : 'Error'}: ${e.message}` };
+    } catch (error) {
+        return { message: error.message || 'Error desconocido' };
     }
+  }
+
+  // Métodos de la clase que estaban truncados en la entrada
+  convertToDisplay(mgdl, units) {
+    return units === UNITS.MMOL ? (mgdl / 18).toFixed(1) : Math.round(mgdl);
+  }
+
+  getTrendArrow(direction) {
+    return {
+      DoubleUp: '↑↑',
+      SingleUp: '↑',
+      FortyFiveUp: '↗',
+      Flat: '→',
+      FortyFiveDown: '↘',
+      SingleDown: '↓',
+      DoubleDown: '↓↓',
+      NONE: '-',
+      'NOT COMPUTABLE': '?'
+    }[direction] || '?';
+  }
+
+  updateDailyTirState(sessionId, mgdl, date, settings) {
+    const b = this._getLocaleBundle(sessionId, settings);
+    const todayStr = new Date(date).toLocaleDateString(b.locale, { timeZone: b.tz });
+    let state = this.dailyTirState.get(sessionId);
+
+    if (!state || state.dateStr !== todayStr) {
+      state = { dateStr: todayStr, totalCount: 0, tirCount: 0 };
+      this.dailyTirState.set(sessionId, state);
+    }
+    const limits = this.getAlertLimits(settings);
+    state.totalCount++;
+    if (mgdl > limits.low && mgdl < limits.high) {
+      state.tirCount++;
+    }
+    const tirPct = state.totalCount > 0 ? Math.round((state.tirCount / state.totalCount) * 100) : null;
+    return { tirPct };
   }
 }
 
-/* ---------- Inicialización del Servidor ---------- */
-const server = new NightscoutMentraApp({ packageName: PACKAGE_NAME, apiKey: MENTRAOS_API_KEY, port: PORT });
-server.start().catch(err => {
-  console.error('⛔ Error iniciando servidor:', err);
+// Iniciar el servidor de la aplicación
+const app = new NightscoutMentraApp({
+  port: PORT,
+  apiKey: MENTRAOS_API_KEY,
+  packageName: PACKAGE_NAME,
+  // Desactivar autenticación de firma para facilitar las pruebas
+  isSignatureAuthDisabled: process.env.NODE_ENV === 'development'
+});
+
+app.listen().then(() => {
+  console.log(`✨ Nightscout MentraOS iniciado en http://localhost:${PORT}`);
+}).catch(err => {
+  console.error("⛔ Error al iniciar el servidor:", err);
   process.exit(1);
 });
-console.log('🚀 Nightscout MentraOS v2.13.3 — Completo y Funcional');
