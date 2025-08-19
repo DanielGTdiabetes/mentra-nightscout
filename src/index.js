@@ -706,6 +706,7 @@ class NightscoutMentraApp extends AppServer {
       const anim = this._activeBitmapAnimation.get(sessionId);
       if (anim && typeof anim.stop === 'function') { try { anim.stop(); } catch(_){} }
       this._activeBitmapAnimation.delete(sessionId);
+      try { session.layouts.clearView?.(); } catch(_) {}
       session.layouts.showTextWall('');
       this._lastShownText.delete(sessionId);
     } catch {}
@@ -721,7 +722,9 @@ class NightscoutMentraApp extends AppServer {
         const full = path.join(baseDir, f);
         try {
           const hex = await BitmapUtils.loadBmpAsHex(full);
-          if (hex) this._bitmapCache.set(f, hex);
+          // Validación básica
+          const v = await (BitmapUtils.validateBmpHex?.(hex) || { isValid: !!hex });
+          if (v && (v.isValid !== false)) this._bitmapCache.set(f, hex);
         } catch (_) { /* skip bad file */ }
       }
       return this._bitmapCache.size > 0;
@@ -736,6 +739,9 @@ class NightscoutMentraApp extends AppServer {
     try {
       const ok = await this._ensureBitmapsLoaded();
       if (!ok) return false;
+      // Evita superposición con HUD de texto
+      try { session.layouts.clearView?.(); } catch(_) {}
+      this._lastShownText.delete(sessionId);
       const frames = [];
       const bell = this._getBitmapHex('alert-bell-526x100.bmp');
       const lowBmp = this._getBitmapHex('alert-low-526x100.bmp');
