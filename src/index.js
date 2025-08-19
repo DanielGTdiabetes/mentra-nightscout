@@ -716,6 +716,7 @@ class NightscoutMentraApp extends AppServer {
   async _ensureBitmapsLoaded() {
     if (this._bitmapCache.size) return true;
     console.log('🔍 Buscando bitmaps...');
+    const tried = [];
     const candidates = [
       path.resolve(process.cwd(), 'assets', 'bitmaps'),
       path.resolve(__dirname, 'assets', 'bitmaps'),
@@ -724,6 +725,7 @@ class NightscoutMentraApp extends AppServer {
     ];
     console.log('📁 Directorios candidatos:', candidates);
     for (const baseDir of candidates) {
+      tried.push(baseDir);
       try {
         console.log(`🔍 Explorando: ${baseDir}`);
         const entries = await fs.readdir(baseDir);
@@ -752,6 +754,9 @@ class NightscoutMentraApp extends AppServer {
     }
     console.log(`📊 Cache final: ${this._bitmapCache.size} bitmaps cargados`);
     console.log(`📋 Claves en cache:`, Array.from(this._bitmapCache.keys()));
+    if (!this._bitmapCache.size) {
+      console.warn('⚠️ No BMPs loaded. Tried:', tried);
+    }
     return this._bitmapCache.size > 0;
   }
 
@@ -779,9 +784,13 @@ class NightscoutMentraApp extends AppServer {
       try { session.layouts.showTextWall(''); } catch(_) {}
       this._lastShownText.delete(sessionId);
       const frames = [];
-      const bell = this._getBitmapHex('alert-bell-526x100.bmp');
-      const lowBmp = this._getBitmapHex('alert-low-526x100.bmp');
-      const highBmp = this._getBitmapHex('alert-high-526x100.bmp');
+      const pickHex = (...names) => {
+        for (const n of names) { const h = this._getBitmapHex(n); if (h) return h; }
+        return null;
+      };
+      const bell   = pickHex('alert-bell-576x100.bmp','alert-bell-526x100.bmp','alert-bell.bmp');
+      const lowBmp = pickHex('alert-low-576x100.bmp','alert-low-526x100.bmp','alert-low.bmp');
+      const highBmp= pickHex('alert-high-576x100.bmp','alert-high-526x100.bmp','alert-high.bmp');
       console.log(`🔍 Bitmaps encontrados: bell=${!!bell}, low=${!!lowBmp}, high=${!!highBmp}`);
       const pick = type === 'low' ? lowBmp : highBmp;
       if (bell && pick) { frames.push(bell, pick); }
