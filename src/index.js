@@ -29,9 +29,22 @@ function canShowIcon(key) {
   return true;
 }
 
+
 async function showBitmapSafe(session, bmpHex, durationMs = ICON_DURATION_MS, fallbackText = null, options = {}) {
   try {
-    await session.layouts.showBitmapView(bmpHex, { durationMs, ...options });
+    // Render en DASHBOARD y MAIN de forma explícita
+    await session.layouts.showBitmapView(bmpHex, { durationMs, location: ViewType.DASHBOARD, ...options });
+    await session.layouts.showBitmapView(bmpHex, { durationMs, location: ViewType.MAIN, ...options });
+  } catch (err) {
+    console.error("[bitmap] error al mostrar:", err?.message || err);
+    if (fallbackText) {
+      try {
+        await session.layouts.showTextWall(fallbackText, { durationMs });
+      } catch (_) {}
+    }
+  }
+}
+);
   } catch (err) {
     console.error("[bitmap] error al mostrar:", err?.message || err);
     if (fallbackText) {
@@ -40,11 +53,18 @@ async function showBitmapSafe(session, bmpHex, durationMs = ICON_DURATION_MS, fa
   }
 }
 
+
 async function maybeShowAlertIcon(session, state) {
   if (!ICONS) return;
   if (state === "low" && canShowIcon("low")) {
     await showBitmapSafe(session, ICONS.low, ICON_DURATION_MS, "ALERTA LOW [!]");
   } else if (state === "high" && canShowIcon("high")) {
+    await showBitmapSafe(session, ICONS.high, ICON_DURATION_MS, "ALERTA HIGH [!]");
+  } else if ((state === "in" || state === "normal") && canShowIcon("sun") && ICONS.sun) {
+    await showBitmapSafe(session, ICONS.sun, ICON_DURATION_MS);
+  }
+}
+else if (state === "high" && canShowIcon("high")) {
     await showBitmapSafe(session, ICONS.high, ICON_DURATION_MS, "ALERTA HIGH [!]");
   }
 }
@@ -707,9 +727,9 @@ getAlertLimits(settings) {
         const hex = map[key];
         if (hex) {
           try {
-            console.log(`[debug] DEBUG_BOOT_BITMAP=${key} → mostrando 5s en DASHBOARD`);
+            console.log(`[debug] DEBUG_BOOT_BITMAP=${key} → mostrando 5s en DASHBOARD y MAIN`);
             await session.layouts.showBitmapView(hex, { durationMs: 5000, location: ViewType.DASHBOARD });
-            await new Promise(r => setTimeout(r, 5000));
+            await session.layouts.showBitmapView(hex, { durationMs: 5000, location: ViewType.MAIN });
           } catch (e) {
             console.warn('[debug] fallo mostrando DEBUG_BOOT_BITMAP:', e?.message || e);
           }
