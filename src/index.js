@@ -1,13 +1,3 @@
-
-console.log("[debug] DEBUG_BOOT_BITMAP=%s → mostrando 8000ms en DASHBOARD y MAIN", bitmapKey);
-  suppress(8000);
-  try {
-  } catch (err) {
-    console.error("[debug] fallo mostrando DEBUG_BOOT_BITMAP:", err.message);
-  }
-}
-
-
 "use strict";
 /**
  * Nightscout MentraOS v2.13.1 (Hysteresis + ECO con estado de alarma + Pred no-avanzado)
@@ -24,90 +14,6 @@ console.log("[debug] DEBUG_BOOT_BITMAP=%s → mostrando 8000ms en DASHBOARD y MA
 require('dotenv').config();
 const { AppServer, ViewType } = require('@mentra/sdk');
 const axios = require('axios');
-
-/* ---------- Dynamic Bitmap Registry (auto-load *.bmp) ---------- */
-const fs = require('fs');
-const path = require('path');
-
-function loadBitmapHex(filePath) {
-  try {
-    const buf = fs.readFileSync(filePath);
-    if (buf.length < 4) return null;
-    // Quick header check (BM)
-    if (!(buf[0] === 0x42 && buf[1] === 0x4D)) {
-      console.warn(`[bitmaps] Skipping non-BMP: ${filePath}`);
-      return null;
-    }
-    const hex = '0x' + buf.toString('hex');
-    const head = hex.slice(2, 10);
-    console.log(`[bitmaps] ${path.basename(filePath)}: head=${head}, bytes=${buf.length}`);
-    return hex;
-  } catch (e) {
-    console.warn(`[bitmaps] Error reading ${filePath}: ${e?.message || e}`);
-    return null;
-  }
-}
-
-function initBitmapRegistry(dir) {
-  const tryDirs = [];
-  if (process.env.BITMAP_DIR) {
-    tryDirs.push(path.isAbsolute(process.env.BITMAP_DIR) ? process.env.BITMAP_DIR
-                                                         : path.join(__dirname, process.env.BITMAP_DIR));
-  }
-  // defaults
-  tryDirs.push(path.join(__dirname, 'assets', 'bitmaps'));
-  tryDirs.push(path.join(__dirname, 'assets', 'bmp'));
-  let chosen = null;
-  for (const d of tryDirs) {
-    if (fs.existsSync(d)) { chosen = d; break; }
-  }
-  if (!chosen) { chosen = tryDirs[0]; } // fallback first candidate
-
-  const registry = {};
-  try {
-    if (!fs.existsSync(chosen)) {
-      console.log(`[bitmaps] directory not found: ${dir}`);
-      return registry;
-    }
-    const files = fs.readdirSync(chosen).filter(f => f.toLowerCase().endsWith('.bmp'));
-    for (const f of files) {
-      const name = f.replace(/\.bmp$/i, '');           // full file base (e.g., alert-high-526x100)
-      const simple = name.replace(/-\d+x\d+$/i, '');   // strip trailing size => alert-high
-      const hex = loadBitmapHex(path.join(chosen, f));
-      if (!hex) continue;
-      // Prefer exact name; also fill "simple" key if vacant
-      if (!registry[name]) registry[name] = hex;
-      if (!registry[simple]) registry[simple] = hex;
-    }
-    console.log(`[bitmaps] cargados y validados desde: ${chosen}`);
-  } catch (e) {
-    console.warn(`[bitmaps] registry init error: ${e?.message || e}`);
-  }
-  return registry;
-}
-
-// Global ICONS registry (merge with any pre-existing ICONS)
-let __AUTO_ICONS__ = initBitmapRegistry();
-if (typeof ICONS === 'undefined' || !ICONS) {
-  global.ICONS = __AUTO_ICONS__;
-} else {
-  global.ICONS = { ...__AUTO_ICONS__, ...ICONS };
-}
-
-// Helper para mostrar un icono por clave en una o más ubicaciones
-async function showIcon(session, key, opts = {}) {
-  const { durationMs = 5000, locations = [ViewType.DASHBOARD] } = opts;
-  if (!session?.layouts?.showBitmapView) return;
-  const hex = global.ICONS?.[key] || global.ICONS?.[String(key).toLowerCase()] || null;
-  if (!hex) {
-    console.warn(`[bitmaps] icono no encontrado: ${key}`);
-    return;
-  }
-  for (const loc of locations) {
-    await session.layouts.showBitmapView(hex, { durationMs, location: loc });
-  }
-}
-
 // === Bitmaps (iconos) ===
 const { loadBitmaps } = require("./bitmaps"); // loader del paquete v2
 let ICONS = null;                               // { high, low, sun, cloud, rain } en hex
