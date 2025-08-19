@@ -704,7 +704,20 @@ class NightscoutMentraApp extends AppServer {
   hideDisplay(session, sessionId) {
     try {
       const anim = this._activeBitmapAnimation.get(sessionId);
-      if (anim && typeof anim.stop === 'function') { try { anim.stop(); } catch(_){} }
+      if (anim) {
+        try { 
+          if (typeof anim === 'object' && anim.controller && typeof anim.controller.stop === 'function') {
+            anim.controller.stop();
+          } else if (typeof anim.stop === 'function') {
+            anim.stop();
+          }
+          if (anim.stopTimer) {
+            clearTimeout(anim.stopTimer);
+          }
+        } catch(e) {
+          console.log(`⚠️ Error en hideDisplay:`, e.message);
+        }
+      }
       this._activeBitmapAnimation.delete(sessionId);
       try { session.layouts.clearView?.(); } catch(_) {}
       session.layouts.showTextWall('');
@@ -808,7 +821,23 @@ class NightscoutMentraApp extends AppServer {
 
   _stopActiveAnimation(sessionId) {
     const anim = this._activeBitmapAnimation.get(sessionId);
-    if (anim && typeof anim.stop === 'function') { try { anim.stop(); } catch(_){} }
+    if (anim) {
+      try { 
+        if (typeof anim === 'object' && anim.controller && typeof anim.controller.stop === 'function') {
+          anim.controller.stop();
+          console.log(`🛑 Controller.stop() ejecutado desde _stopActiveAnimation`);
+        } else if (typeof anim.stop === 'function') {
+          anim.stop();
+          console.log(`🛑 Animation.stop() ejecutado desde _stopActiveAnimation`);
+        }
+        if (anim.stopTimer) {
+          clearTimeout(anim.stopTimer);
+          console.log(`🛑 Timer cancelado desde _stopActiveAnimation`);
+        }
+      } catch(e) {
+        console.log(`⚠️ Error en _stopActiveAnimation:`, e.message);
+      }
+    }
     this._activeBitmapAnimation.delete(sessionId);
   }
 
@@ -818,11 +847,13 @@ class NightscoutMentraApp extends AppServer {
       const ok = await this._ensureBitmapsLoaded();
       console.log(`📊 Bitmaps cargados: ${ok}`);
       if (!ok) return false;
+      
       // Evita superposición con HUD de texto
       this._stopActiveAnimation(sessionId);
       try { session.layouts.clearView?.(); } catch(_) {}
       try { session.layouts.showTextWall(''); } catch(_) {}
       this._lastShownText.delete(sessionId);
+      
       const frames = [];
       const pickHex = (...names) => {
         for (const n of names) { const h = this._getBitmapHex(n); if (h) return h; }
@@ -832,24 +863,41 @@ class NightscoutMentraApp extends AppServer {
       const lowBmp = pickHex('alert-low-576x100.bmp','alert-low-526x100.bmp','alert-low.bmp');
       const highBmp= pickHex('alert-high-576x100.bmp','alert-high-526x100.bmp','alert-high.bmp');
       console.log(`🔍 Bitmaps encontrados: bell=${!!bell}, low=${!!lowBmp}, high=${!!highBmp}`);
+      
       const pick = type === 'low' ? lowBmp : highBmp;
       if (bell && pick) { frames.push(bell, pick); }
       else if (pick) { frames.push(pick); }
       else if (bell) { frames.push(bell); }
+      
       console.log(`🎞️ Frames preparados: ${frames.length}`);
       if (!frames.length) return false;
+      
       console.log(`▶️ Iniciando animación bitmap...`);
       const controller = session.layouts.showBitmapAnimation(frames, Math.max(200, intervalMs || 600), true);
       this._activeBitmapAnimation.set(sessionId, controller);
-      // programar stop
-      const stopAfter = Math.max(1000, durationMs || 15000) + 80;
+      
+      // programar stop con más margen
+      const stopAfter = Math.max(2000, durationMs || 15000) + 200;
       console.log(`⏰ Animación programada para ${stopAfter}ms`);
-      setTimeout(() => {
-        try { controller?.stop?.(); } catch(_){}
+      
+      const stopTimer = setTimeout(() => {
+        console.log(`⏰ Timer de parada ejecutado`);
+        try { 
+          if (controller && typeof controller.stop === 'function') {
+            controller.stop();
+            console.log(`✅ Controller.stop() ejecutado`);
+          }
+        } catch(e) {
+          console.log(`⚠️ Error al parar controller:`, e.message);
+        }
         this._activeBitmapAnimation.delete(sessionId);
         this.hideDisplay(session, sessionId);
         console.log(`⏹️ Animación bitmap detenida`);
       }, stopAfter);
+      
+      // Guardar el timer para poder cancelarlo si es necesario
+      this._activeBitmapAnimation.set(sessionId, { controller, stopTimer });
+      
       return true;
     } catch(e) { 
       console.log(`❌ Error en animación bitmap:`, e.message);
