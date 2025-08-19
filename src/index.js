@@ -12,7 +12,7 @@
  */
 
 require('dotenv').config();
-const { AppServer } = require('@mentra/sdk');
+const { AppServer, ViewType } = require('@mentra/sdk');
 const axios = require('axios');
 // === Bitmaps (iconos) ===
 const { loadBitmaps } = require("./bitmaps"); // loader del paquete v2
@@ -29,9 +29,9 @@ function canShowIcon(key) {
   return true;
 }
 
-async function showBitmapSafe(session, bmpHex, durationMs = ICON_DURATION_MS, fallbackText = null) {
+async function showBitmapSafe(session, bmpHex, durationMs = ICON_DURATION_MS, fallbackText = null, options = {}) {
   try {
-    await session.layouts.showBitmapView(bmpHex, { durationMs });
+    await session.layouts.showBitmapView(bmpHex, { durationMs, **options });
   } catch (err) {
     console.error("[bitmap] error al mostrar:", err?.message || err);
     if (fallbackText) {
@@ -700,6 +700,24 @@ getAlertLimits(settings) {
         if (!ICONS) {
           ICONS = await loadBitmaps();
           console.log("[bitmaps] cargados y validados");
+      // --- DEBUG: Mostrar un bitmap al arrancar si se define DEBUG_BOOT_BITMAP (low|high|sun|cloud|rain) ---
+      if (process.env.DEBUG_BOOT_BITMAP && ICONS) {
+        const key = String(process.env.DEBUG_BOOT_BITMAP).toLowerCase();
+        const map = { low: ICONS?.low, high: ICONS?.high, sun: ICONS?.sun, cloud: ICONS?.cloud, rain: ICONS?.rain };
+        const hex = map[key];
+        if (hex) {
+          try {
+            console.log(`[debug] DEBUG_BOOT_BITMAP=${key} → mostrando 5s en DASHBOARD`);
+            await session.layouts.showBitmapView(hex, { durationMs: 5000, view: ViewType.DASHBOARD });
+            await new Promise(r => setTimeout(r, 5000));
+          } catch (e) {
+            console.warn('[debug] fallo mostrando DEBUG_BOOT_BITMAP:', e?.message || e);
+          }
+        } else {
+          console.log(`[debug] DEBUG_BOOT_BITMAP=${key} no reconocido`);
+        }
+      }
+
         }
       } catch (e) {
         console.warn("[bitmaps] no se pudieron cargar (fallback texto):", e?.message || e);
@@ -1035,6 +1053,9 @@ getAlertLimits(settings) {
   }
 
   async checkAlerts(session, sessionId, data, settings) {
+    // --- DEBUG: override por variable de entorno (prioridad sobre settings.debug_force_alert) ---
+    const debugForceEnv = (process.env.DEBUG_FORCE_ALERT || '').toLowerCase();
+    
     const limits = this.getAlertLimits(settings);
     const mgdl = data.sgv;
     const cooldown = settings.alert_cooldown_ms || 600000;
@@ -1059,11 +1080,9 @@ getAlertLimits(settings) {
     const dbg = (settings.debug_force_alert || '').toLowerCase();
     let alertType = null;
 
-    if (mgdl <= limits.low || dbg === 'low') {
-      alertType = 'low';
-    } else if (mgdl >= limits.high || dbg === 'high') {
-      alertType = 'high';
-    }
+        // Override final por DEBUG_FORCE_ALERT
+    if (debugForceEnv === 'low') alertType = 'low';
+    else if (debugForceEnv === 'high') alertType = 'high';
 
     if (alertType) {
       // Mostrar icono de alerta (bitmap) si está disponible (una sola vez, rate-limited)
