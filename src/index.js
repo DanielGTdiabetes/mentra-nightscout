@@ -31,7 +31,7 @@ function canShowIcon(key) {
 
 async function showBitmapSafe(session, bmpHex, durationMs = ICON_DURATION_MS, fallbackText = null, options = {}) {
   try {
-    await session.layouts.showBitmapView(bmpHex, { durationMs, **options });
+    await session.layouts.showBitmapView(bmpHex, { durationMs, ...options });
   } catch (err) {
     console.error("[bitmap] error al mostrar:", err?.message || err);
     if (fallbackText) {
