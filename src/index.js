@@ -715,27 +715,43 @@ class NightscoutMentraApp extends AppServer {
   /* ---------- bitmap helpers ---------- */
   async _ensureBitmapsLoaded() {
     if (this._bitmapCache.size) return true;
+    console.log('🔍 Buscando bitmaps...');
     const candidates = [
       path.resolve(process.cwd(), 'assets', 'bitmaps'),
       path.resolve(__dirname, 'assets', 'bitmaps'),
       path.resolve(__dirname, '..', 'assets', 'bitmaps'),
       path.resolve(__dirname, '..', '..', 'assets', 'bitmaps'),
     ];
+    console.log('📁 Directorios candidatos:', candidates);
     for (const baseDir of candidates) {
       try {
+        console.log(`🔍 Explorando: ${baseDir}`);
         const entries = await fs.readdir(baseDir);
         const bmpFiles = entries.filter(f => f.toLowerCase().endsWith('.bmp'));
+        console.log(`📄 Archivos BMP encontrados:`, bmpFiles);
         for (const f of bmpFiles) {
           const full = path.join(baseDir, f);
           try {
+            console.log(`📖 Cargando: ${full}`);
             const hex = await BitmapUtils.loadBmpAsHex(full);
+            console.log(`✅ Cargado ${f}: ${hex ? hex.substring(0, 20) + '...' : 'null'}`);
             const v = await (BitmapUtils.validateBmpHex?.(hex) || { isValid: !!hex });
+            console.log(`🔍 Validación ${f}:`, v);
             if (v && (v.isValid !== false)) this._bitmapCache.set(f.toLowerCase(), hex);
-          } catch (_) { /* skip bad file */ }
+            else console.log(`❌ ${f} no válido, omitiendo`);
+          } catch (e) { 
+            console.log(`❌ Error cargando ${f}:`, e.message);
+            /* skip bad file */ 
+          }
         }
         if (this._bitmapCache.size > 0) break;
-      } catch (_) { /* try next */ }
+      } catch (e) { 
+        console.log(`❌ Error explorando ${baseDir}:`, e.message);
+        /* try next */ 
+      }
     }
+    console.log(`📊 Cache final: ${this._bitmapCache.size} bitmaps cargados`);
+    console.log(`📋 Claves en cache:`, Array.from(this._bitmapCache.keys()));
     return this._bitmapCache.size > 0;
   }
 
@@ -753,32 +769,43 @@ class NightscoutMentraApp extends AppServer {
 
   async _playAlertBitmap(session, sessionId, type, intervalMs, durationMs) {
     try {
+      console.log(`🎬 Intentando animación bitmap para ${type}...`);
       const ok = await this._ensureBitmapsLoaded();
+      console.log(`📊 Bitmaps cargados: ${ok}`);
       if (!ok) return false;
       // Evita superposición con HUD de texto
       this._stopActiveAnimation(sessionId);
       try { session.layouts.clearView?.(); } catch(_) {}
+      try { session.layouts.showTextWall(''); } catch(_) {}
       this._lastShownText.delete(sessionId);
       const frames = [];
       const bell = this._getBitmapHex('alert-bell-526x100.bmp');
       const lowBmp = this._getBitmapHex('alert-low-526x100.bmp');
       const highBmp = this._getBitmapHex('alert-high-526x100.bmp');
+      console.log(`🔍 Bitmaps encontrados: bell=${!!bell}, low=${!!lowBmp}, high=${!!highBmp}`);
       const pick = type === 'low' ? lowBmp : highBmp;
       if (bell && pick) { frames.push(bell, pick); }
       else if (pick) { frames.push(pick); }
       else if (bell) { frames.push(bell); }
+      console.log(`🎞️ Frames preparados: ${frames.length}`);
       if (!frames.length) return false;
+      console.log(`▶️ Iniciando animación bitmap...`);
       const controller = session.layouts.showBitmapAnimation(frames, Math.max(200, intervalMs || 600), true);
       this._activeBitmapAnimation.set(sessionId, controller);
       // programar stop
       const stopAfter = Math.max(1000, durationMs || 15000) + 80;
+      console.log(`⏰ Animación programada para ${stopAfter}ms`);
       setTimeout(() => {
         try { controller?.stop?.(); } catch(_){}
         this._activeBitmapAnimation.delete(sessionId);
         this.hideDisplay(session, sessionId);
+        console.log(`⏹️ Animación bitmap detenida`);
       }, stopAfter);
       return true;
-    } catch(_) { return false; }
+    } catch(e) { 
+      console.log(`❌ Error en animación bitmap:`, e.message);
+      return false; 
+    }
   }
 
   /* ---------- helpers ECO ---------- */
