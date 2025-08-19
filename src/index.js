@@ -784,7 +784,7 @@ class NightscoutMentraApp extends AppServer {
     console.log(`📊 Cache final: ${this._bitmapCache.size} bitmaps`);
     if (!this._bitmapCache.size) console.warn('⚠️ No BMPs loaded. Tried:', tried);
     return this._bitmapCache.size > 0;
-  }`);
+  }
         const entries = await fs.readdir(baseDir);
         const bmpFiles = entries.filter(f => f.toLowerCase().endsWith('.bmp'));
         console.log(`📄 Archivos BMP encontrados:`, bmpFiles);
