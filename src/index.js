@@ -12,8 +12,10 @@
  */
 
 require('dotenv').config();
-const { AppServer } = require('@mentra/sdk');
+const { AppServer, BitmapUtils } = require('@mentra/sdk');
 const axios = require('axios');
+const path = require('path');
+const fs = require('fs/promises');
 
 /* ---------- SHIM: compatibilidad SDK ---------- */
 if (typeof Object.prototype.updateSettingsForTesting !== 'function') {
@@ -53,6 +55,8 @@ class NightscoutMentraApp extends AppServer {
     this._http = new Map();             // cliente axios por sesión
     this._settingsDebounce = new Map(); // debounce settings
     this._sessionLocale = new Map();    // cache locale/tz por sesión
+    this._bitmapCache = new Map();      // nombre.bmp -> hex
+    this._activeBitmapAnimation = new Map(); // sessionId -> controller
   }
 
   /* ---------- helpers ---------- */
@@ -129,6 +133,12 @@ class NightscoutMentraApp extends AppServer {
         'tir_low_mg','tir_high_mg','tir_low_mmol','tir_high_mmol',
         'time_in_range_low_mg','time_in_range_high_mg','time_in_range_low_mmol','time_in_range_high_mmol',
         'prediction_horizon_min','prediction_horizon_mins',
+        // tuning predicción
+        'prediction_enable_robust',
+        'prediction_window_points',
+        'prediction_max_gap_min',
+        'prediction_min_slope_mg_per_min',
+        'prediction_min_r2',
         'debug_force_alert'
       ];
       const vals = await Promise.all(keys.map(k => session.settings.get(k)));
@@ -185,6 +195,12 @@ class NightscoutMentraApp extends AppServer {
         time_in_range_high_mmol: this.normalizeMmol(kv.time_in_range_high_mmol),
         prediction_horizon_min: [15,30,60].includes(Number(kv.prediction_horizon_min || kv.prediction_horizon_mins))
           ? Number(kv.prediction_horizon_min || kv.prediction_horizon_mins) : 30,
+        // tuning predicción (defaults seguros)
+        prediction_enable_robust: this.toBool(kv.prediction_enable_robust) !== false,
+        prediction_window_points: this.validateSlicerValue(kv.prediction_window_points, 4, 20, 12),
+        prediction_max_gap_min: this.validateSlicerValue(kv.prediction_max_gap_min, 2, 15, 10),
+        prediction_min_slope_mg_per_min: this.validateSlicerValue(kv.prediction_min_slope_mg_per_min, 0, 5, 0.25),
+        prediction_min_r2: this.validateSlicerValue(kv.prediction_min_r2, 0, 1, 0.35),
         debug_force_alert: (typeof kv.debug_force_alert === 'string' ? kv.debug_force_alert : null),
       };
     } catch (e) {
@@ -261,6 +277,12 @@ class NightscoutMentraApp extends AppServer {
       time_in_range_high_mmol: this.normalizeMmol(o.time_in_range_high_mmol),
       prediction_horizon_min: [15,30,60].includes(Number(o.prediction_horizon_min || o.prediction_horizon_mins))
         ? Number(o.prediction_horizon_min || o.prediction_horizon_mins) : 30,
+      // tuning predicción (defaults seguros)
+      prediction_enable_robust: this.toBool(o.prediction_enable_robust) !== false,
+      prediction_window_points: this.validateSlicerValue(o.prediction_window_points, 4, 20, 12),
+      prediction_max_gap_min: this.validateSlicerValue(o.prediction_max_gap_min, 2, 15, 10),
+      prediction_min_slope_mg_per_min: this.validateSlicerValue(o.prediction_min_slope_mg_per_min, 0, 5, 0.25),
+      prediction_min_r2: this.validateSlicerValue(o.prediction_min_r2, 0, 1, 0.35),
       debug_force_alert: (typeof o.debug_force_alert === 'string' ? o.debug_force_alert : null)
     };
   }
@@ -268,6 +290,15 @@ class NightscoutMentraApp extends AppServer {
   /* ---------- UI helpers ---------- */
   convertToDisplay(mgdlValue, targetUnit) {
     return targetUnit === UNITS.MMOL ? (mgdlValue / 18).toFixed(1) : Math.round(mgdlValue);
+  }
+  formatRangeByUnits(lowMgdl, highMgdl, units) {
+    const isMmol = String(units || '').toLowerCase().includes('mmol');
+    if (isMmol) {
+      const low = (lowMgdl / 18).toFixed(1);
+      const high = (highMgdl / 18).toFixed(1);
+      return `${low}-${high} mmol/L`;
+    }
+    return `${Math.round(lowMgdl)}-${Math.round(highMgdl)} mg/dL`;
   }
   getTrendArrow(dir) {
     const map = {
@@ -394,7 +425,105 @@ class NightscoutMentraApp extends AppServer {
       }
     } catch (_) {}
 
-    // 2) Fallback lineal
+    // 2) Fallback por regresión lineal con múltiples puntos y robustez (segmento contiguo, outliers, R²)
+    try {
+      const maxPoints = Number(settings.prediction_window_points || 12);
+      const maxGapMin = Number(settings.prediction_max_gap_min || 10);
+      const minSlopeCfg = Number(settings.prediction_min_slope_mg_per_min || 0.25);
+      const minR2Cfg = Number(settings.prediction_min_r2 || 0.35);
+      const robustEnabled = settings.prediction_enable_robust !== false;
+
+      const { data } = await http.get(`/api/v1/entries.json?count=${Math.max(4, Math.min(20, maxPoints * 2))}`);
+      const arr = Array.isArray(data) ? data : (data ? [data] : []);
+      const raw = arr
+        .map(r => ({
+          mgdl: Number(r.sgv ?? r.glucose),
+          ts: new Date(r.date || r.dateString).getTime()
+        }))
+        .filter(p => Number.isFinite(p.mgdl) && Number.isFinite(p.ts))
+        .sort((a, b) => a.ts - b.ts);
+
+      // Segmento contiguo reciente: desde el final hacia atrás mientras los gaps <= 10min
+      let seg = [];
+      for (let i = raw.length - 1; i >= 0; i--) {
+        if (seg.length === 0) { seg.unshift(raw[i]); continue; }
+        const head = seg[0];
+        const gapMin = (head.ts - raw[i].ts) / 60000;
+        if (gapMin <= maxGapMin) { seg.unshift(raw[i]); } else { break; }
+      }
+      // Limitar a máximo 12 puntos para estabilidad
+      if (seg.length > maxPoints) seg = seg.slice(seg.length - maxPoints);
+      if (seg.length >= 4) {
+        const last = seg[seg.length - 1];
+        const t0 = last.ts;
+        let xs = seg.map(p => (p.ts - t0) / 60000);
+        let ys = seg.map(p => p.mgdl);
+
+        const regress = (xv, yv) => {
+          const n = xv.length;
+          const meanX = xv.reduce((a, b) => a + b, 0) / n;
+          const meanY = yv.reduce((a, b) => a + b, 0) / n;
+          let num = 0, den = 0;
+          for (let i = 0; i < n; i++) {
+            const dx = xv[i] - meanX;
+            const dy = yv[i] - meanY;
+            num += dx * dy;
+            den += dx * dx;
+          }
+          const slope = den > 0 ? (num / den) : 0;
+          const intercept = meanY - slope * meanX;
+          // R²
+          let sse = 0, sst = 0;
+          for (let i = 0; i < n; i++) {
+            const pred = intercept + slope * xv[i];
+            const err = yv[i] - pred;
+            sse += err * err;
+            const dev = yv[i] - meanY;
+            sst += dev * dev;
+          }
+          const r2 = sst > 0 ? (1 - sse / sst) : 0;
+          // residuales para MAD
+          const residuals = xv.map((x, i) => yv[i] - (intercept + slope * x));
+          const absRes = residuals.map(Math.abs).sort((a,b)=>a-b);
+          const mid = Math.floor(absRes.length / 2);
+          const mad = absRes.length % 2 ? absRes[mid] : (absRes[mid-1] + absRes[mid]) / 2;
+          return { slope, intercept, r2, residuals, mad, meanY };
+        };
+
+        // Primera pasada
+        let { slope, intercept, r2, residuals, mad } = regress(xs, ys);
+
+        // Filtra outliers por residuales (umbral dinámico con suelo)
+        const resThresh = Math.max(12, 2.5 * (mad || 0));
+        if (robustEnabled && resThresh > 0) {
+          const kept = [];
+          for (let i = 0; i < xs.length; i++) {
+            if (Math.abs(residuals[i]) <= resThresh) kept.push(i);
+          }
+          if (kept.length >= 4 && kept.length < xs.length) {
+            xs = kept.map(i => xs[i]);
+            ys = kept.map(i => ys[i]);
+            ({ slope, intercept, r2 } = regress(xs, ys));
+          }
+        }
+
+        const mgNow = last.mgdl;
+        const minSlope = minSlopeCfg; // mg/dL/min
+        const minR2 = minR2Cfg;
+        if (Math.abs(slope) >= minSlope && r2 >= minR2) {
+          if (slope < 0 && mgNow > lowThreshold) {
+            const minutes = (lowThreshold - mgNow) / slope;
+            if (minutes > 0 && minutes <= horizon) return `↓${toDisp(lowThreshold)} @${Math.round(minutes)}m`;
+          }
+          if (slope > 0 && mgNow < highThreshold) {
+            const minutes = (highThreshold - mgNow) / slope;
+            if (minutes > 0 && minutes <= horizon) return `↑${toDisp(highThreshold)} @${Math.round(minutes)}m`;
+          }
+        }
+      }
+    } catch (_) {}
+
+    // 3) Fallback lineal básico 2 puntos
     try {
       const { data } = await http.get(`/api/v1/entries.json?count=2`);
       if (data && data.length >= 2) {
@@ -573,7 +702,60 @@ class NightscoutMentraApp extends AppServer {
     } catch (_) {}
   }
   hideDisplay(session, sessionId) {
-    try { session.layouts.showTextWall(''); this._lastShownText.delete(sessionId); } catch {}
+    try {
+      const anim = this._activeBitmapAnimation.get(sessionId);
+      if (anim && typeof anim.stop === 'function') { try { anim.stop(); } catch(_){} }
+      this._activeBitmapAnimation.delete(sessionId);
+      session.layouts.showTextWall('');
+      this._lastShownText.delete(sessionId);
+    } catch {}
+  }
+
+  /* ---------- bitmap helpers ---------- */
+  async _ensureBitmapsLoaded(baseDir = path.resolve(process.cwd(), 'assets', 'bitmaps')) {
+    if (this._bitmapCache.size) return true;
+    try {
+      const entries = await fs.readdir(baseDir);
+      const bmpFiles = entries.filter(f => f.toLowerCase().endsWith('.bmp'));
+      for (const f of bmpFiles) {
+        const full = path.join(baseDir, f);
+        try {
+          const hex = await BitmapUtils.loadBmpAsHex(full);
+          if (hex) this._bitmapCache.set(f, hex);
+        } catch (_) { /* skip bad file */ }
+      }
+      return this._bitmapCache.size > 0;
+    } catch (_) { return false; }
+  }
+
+  _getBitmapHex(name) {
+    return this._bitmapCache.get(name) || null;
+  }
+
+  async _playAlertBitmap(session, sessionId, type, intervalMs, durationMs) {
+    try {
+      const ok = await this._ensureBitmapsLoaded();
+      if (!ok) return false;
+      const frames = [];
+      const bell = this._getBitmapHex('alert-bell-526x100.bmp');
+      const lowBmp = this._getBitmapHex('alert-low-526x100.bmp');
+      const highBmp = this._getBitmapHex('alert-high-526x100.bmp');
+      const pick = type === 'low' ? lowBmp : highBmp;
+      if (bell && pick) { frames.push(bell, pick); }
+      else if (pick) { frames.push(pick); }
+      else if (bell) { frames.push(bell); }
+      if (!frames.length) return false;
+      const controller = session.layouts.showBitmapAnimation(frames, Math.max(200, intervalMs || 600), true);
+      this._activeBitmapAnimation.set(sessionId, controller);
+      // programar stop
+      const stopAfter = Math.max(1000, durationMs || 15000) + 80;
+      setTimeout(() => {
+        try { controller?.stop?.(); } catch(_){}
+        this._activeBitmapAnimation.delete(sessionId);
+        this.hideDisplay(session, sessionId);
+      }, stopAfter);
+      return true;
+    } catch(_) { return false; }
   }
 
   /* ---------- helpers ECO ---------- */
@@ -797,11 +979,7 @@ class NightscoutMentraApp extends AppServer {
 
             const line1 = isEs ? 'Ajustes guardados' : 'Settings saved';
             const line2 = `Units: ${settings.units} · HeadUp: ${settings.enable_head_up_display ? 'ON' : 'OFF'}`;
-            const isMmolUnits = String(settings.units || '').toLowerCase().includes('mmol');
-            const tirRangeStr = isMmolUnits
-              ? `${(limits.low/18).toFixed(1)}-${(limits.high/18).toFixed(1)} mmol/L`
-              : `${limits.low}-${limits.high} mg/dL`;
-            const line3 = (isEs ? 'TIR' : 'TIR') + `: ${tirRangeStr}`;
+            const line3 = (isEs ? 'TIR' : 'TIR') + `: ${this.formatRangeByUnits(limits.low, limits.high, settings.units)}`;
             const line4 = `${isEs ? 'Avanzado' : 'Advanced'}: ${settings.enable_advanced_mode ? 'ON' : 'OFF'}`;
             const line5 = (isEs ? 'Alarmas' : 'Alerts') + `: ${settings.alertsEnabled ? 'ON' : 'OFF'} · Hyst: ±${hystMg} mg/dL (±${hystMmol} mmol/L) · ${stateStr}`;
 
@@ -976,15 +1154,16 @@ class NightscoutMentraApp extends AppServer {
     const displayValue = this.convertToDisplay(data.sgv, settings.units || UNITS.MGDL);
     const unit = settings.units || UNITS.MGDL;
     const lang = settings.language || 'en';
-    const msgs = {
-      en: { low: `LOW GLUCOSE!`, high: `HIGH GLUCOSE!` },
-      es: { low: `¡GLUCOSA BAJA!`, high: `¡GLUCOSA ALTA!` }
-    };
+    const msgs = { en: { low: `LOW GLUCOSE!`, high: `HIGH GLUCOSE!` }, es: { low: `¡GLUCOSA BAJA!`, high: `¡GLUCOSA ALTA!` } };
     const baseText = `${msgs[lang][type]}\n${displayValue} ${unit}`;
     const alertDuration = settings.alert_duration_ms || 15000;
     const blinkInterval = 600;
 
     if (this.displayTimers.has(sessionId)) clearTimeout(this.displayTimers.get(sessionId));
+
+    // Intentar animación de bitmap; si falla, usar texto parpadeante
+    const bitmapOk = await this._playAlertBitmap(session, sessionId, type, blinkInterval, alertDuration);
+    if (bitmapOk) return;
 
     const startTime = Date.now();
     let isVisible = true;
