@@ -48,24 +48,38 @@ function loadBitmapHex(filePath) {
   }
 }
 
-function initBitmapRegistry(dir = path.join(__dirname, 'assets', 'bitmaps')) {
+function initBitmapRegistry(dir) {
+  const tryDirs = [];
+  if (process.env.BITMAP_DIR) {
+    tryDirs.push(path.isAbsolute(process.env.BITMAP_DIR) ? process.env.BITMAP_DIR
+                                                         : path.join(__dirname, process.env.BITMAP_DIR));
+  }
+  // defaults
+  tryDirs.push(path.join(__dirname, 'assets', 'bitmaps'));
+  tryDirs.push(path.join(__dirname, 'assets', 'bmp'));
+  let chosen = null;
+  for (const d of tryDirs) {
+    if (fs.existsSync(d)) { chosen = d; break; }
+  }
+  if (!chosen) { chosen = tryDirs[0]; } // fallback first candidate
+
   const registry = {};
   try {
-    if (!fs.existsSync(dir)) {
+    if (!fs.existsSync(chosen)) {
       console.log(`[bitmaps] directory not found: ${dir}`);
       return registry;
     }
-    const files = fs.readdirSync(dir).filter(f => f.toLowerCase().endswith('.bmp'));
+    const files = fs.readdirSync(chosen).filter(f => f.toLowerCase().endsWith('.bmp'));
     for (const f of files) {
       const name = f.replace(/\.bmp$/i, '');           // full file base (e.g., alert-high-526x100)
       const simple = name.replace(/-\d+x\d+$/i, '');   // strip trailing size => alert-high
-      const hex = loadBitmapHex(path.join(dir, f));
+      const hex = loadBitmapHex(path.join(chosen, f));
       if (!hex) continue;
       // Prefer exact name; also fill "simple" key if vacant
       if (!registry[name]) registry[name] = hex;
       if (!registry[simple]) registry[simple] = hex;
     }
-    console.log('[bitmaps] cargados y validados');
+    console.log(`[bitmaps] cargados y validados desde: ${chosen}`);
   } catch (e) {
     console.warn(`[bitmaps] registry init error: ${e?.message || e}`);
   }
