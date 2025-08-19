@@ -718,126 +718,74 @@ class NightscoutMentraApp extends AppServer {
 
   /* ---------- bitmap helpers ---------- */
   async _ensureBitmapsLoaded() {
-    if (this._bitmapCache?.size) return true;
+  if (this._bitmapCache?.size) return true;
 
-    this._bitmapCache = this._bitmapCache || new Map();
-    const tried = [];
-    const candidates = [
-      path.resolve(process.cwd(), 'assets', 'bitmaps'),
-      path.resolve(__dirname, 'assets', 'bitmaps'),
-      path.resolve(__dirname, '.', 'assets', 'bitmaps'),
-      path.resolve(__dirname, '..', 'assets', 'bitmaps'),
-    ];
-    console.log('📁 Directorios candidatos:', candidates);
+  this._bitmapCache = this._bitmapCache || new Map();
+  const tried = [];
+  const candidates = [
+    path.resolve(process.cwd(), 'assets', 'bitmaps'),
+    path.resolve(__dirname, 'assets', 'bitmaps'),
+    path.resolve(__dirname, '.', 'assets', 'bitmaps'),
+    path.resolve(__dirname, '..', 'assets', 'bitmaps'),
+  ];
+  console.log('📁 Directorios candidatos:', candidates);
 
-    for (const baseDir of candidates) {
-      tried.push(baseDir);
-      try {
-        console.log(`🔍 Explorando: ${baseDir}`);
-        const entries  = await fs.readdir(baseDir);
-        const bmpFiles = entries.filter(f => f.toLowerCase().endsWith('.bmp'));
-        console.log(`📄 BMP encontrados:`, bmpFiles);
+  for (const baseDir of candidates) {
+    tried.push(baseDir);
+    try {
+      console.log(`🔍 Explorando: ${baseDir}`);
+      const entries = await fs.readdir(baseDir);
+      const bmpFiles = entries.filter(f => f.toLowerCase().endsWith('.bmp'));
+      console.log(`📄 Archivos BMP encontrados:`, bmpFiles);
 
-        for (const f of bmpFiles) {
-          const full = path.join(baseDir, f);
-          try {
-            let hex = null;
-            if (BitmapUtils?.loadBmpAsHex) {
-              hex = await BitmapUtils.loadBmpAsHex(full);
-            } else {
-              const buffer = await fs.readFile(full);
-              if (!validateBmpBasic(buffer)) {
-                console.log(`❌ ${f} no es un BMP válido (signature/header)`);
-                continue;
-              }
-              hex = bufferToHex(buffer);
+      for (const f of bmpFiles) {
+        const full = path.join(baseDir, f);
+        try {
+          let hex = null;
+          if (BitmapUtils?.loadBmpAsHex) {
+            hex = await BitmapUtils.loadBmpAsHex(full);
+          } else {
+            const buffer = await fs.readFile(full);
+            if (!validateBmpBasic(buffer)) {
+              console.log(`❌ ${f} no es un BMP válido (signature/header)`);
+              continue;
             }
-
-            let ok = !!hex;
-            if (ok && BitmapUtils?.validateBmpHex) {
-              try {
-                const v = await BitmapUtils.validateBmpHex(hex);
-                ok = v && v.isValid !== false;
-                console.log(`🔍 Validación SDK ${f}:`, v);
-              } catch (e) {
-                console.log(`⚠️ Validación SDK falló para ${f}:`, e.message);
-              }
-            }
-
-            if (ok) {
-              this._bitmapCache.set(f.toLowerCase(), hex);
-              console.log(`✅ ${f} cacheado`);
-            } else {
-              console.log(`❌ ${f} no válido, omitido`);
-            }
-          } catch (e) {
-            console.log(`❌ Error cargando ${f}:`, e.message);
+            hex = buffer.toString('hex');
           }
+
+          let ok = !!hex;
+          if (ok && BitmapUtils?.validateBmpHex) {
+            try {
+              const v = await BitmapUtils.validateBmpHex(hex);
+              ok = v && v.isValid !== false;
+              console.log(`🔍 Validación SDK ${f}:`, v);
+            } catch (e) {
+              console.log(`⚠️ Validación SDK falló para ${f}:`, e.message);
+            }
+          }
+
+          if (ok) {
+            this._bitmapCache.set(f.toLowerCase(), hex);
+            console.log(`✅ ${f} cacheado`);
+          } else {
+            console.log(`❌ ${f} no válido, omitido`);
+          }
+        } catch (e) {
+          console.log(`❌ Error cargando ${f}:`, e.message);
         }
-
-        if (this._bitmapCache.size > 0) break;
-      } catch (e) {
-        console.log(`❌ Error explorando ${baseDir}:`, e.message);
       }
-    }
 
-    console.log(`📊 Cache final: ${this._bitmapCache.size} bitmaps`);
-    if (!this._bitmapCache.size) console.warn('⚠️ No BMPs loaded. Tried:', tried);
-    return this._bitmapCache.size > 0;
+      if (this._bitmapCache.size > 0) break;
+    } catch (e) {
+      console.log(`❌ Error explorando ${baseDir}:`, e.message);
+    }
   }
-        const entries = await fs.readdir(baseDir);
-        const bmpFiles = entries.filter(f => f.toLowerCase().endsWith('.bmp'));
-        console.log(`📄 Archivos BMP encontrados:`, bmpFiles);
-        for (const f of bmpFiles) {
-          const full = path.join(baseDir, f);
-          try {
-            let hex = null;
-            if (BitmapUtils && typeof BitmapUtils.loadBmpAsHex === 'function') {
-              // ✅ Usa loader oficial del SDK
-              hex = await BitmapUtils.loadBmpAsHex(full);
-            } else {
-              // Fallback: leer fichero y convertir a hex crudo
-              const buffer = await fs.readFile(full);
-              if (buffer.length >= 54 && buffer.toString('ascii', 0, 2) === 'BM') {
-                hex = buffer.toString('hex');
-              }
-            }
-            if (!hex) continue;
 
-            // Validación SDK si está disponible
-            let isValid = true;
-            if (BitmapUtils && typeof BitmapUtils.validateBmpHex === 'function') {
-              try {
-                const v = await BitmapUtils.validateBmpHex(hex);
-                isValid = v && (v.isValid !== false);
-                console.log(`🔍 Validación SDK ${f}:`, v);
-              } catch (e) {
-                console.log(`⚠️ Validación SDK falló para ${f}:`, e.message);
-              }
-            }
+  console.log(`📊 Cache final: ${this._bitmapCache.size} bitmaps`);
+  if (!this._bitmapCache.size) console.warn('⚠️ No BMPs loaded. Tried:', tried);
+  return this._bitmapCache.size > 0;
+}
 
-            if (isValid) {
-              this._bitmapCache.set(f.toLowerCase(), hex);
-              console.log(`✅ ${f} añadido al cache`);
-            } else {
-              console.log(`❌ ${f} no válido, omitiendo`);
-            }
-          } catch (e) {
-            console.log(`❌ Error cargando ${f}:`, e.message);
-          }
-        }
-        if (this._bitmapCache.size > 0) break;
-      } catch (e) {
-        console.log(`❌ Error explorando ${baseDir}:`, e.message);
-      }
-    }
-    console.log(`📊 Cache final: ${this._bitmapCache.size} bitmaps cargados`);
-    console.log(`📋 Claves en cache:`, Array.from(this._bitmapCache.keys()));
-    if (!this._bitmapCache.size) {
-      console.warn('⚠️ No BMPs loaded. Tried:', tried);
-    }
-    return this._bitmapCache.size > 0;
-  };
     
    
     
