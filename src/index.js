@@ -1291,4 +1291,4 @@ class NightscoutMentraApp extends AppServer {
     }, blinkInterval);
 
     this.displayTimers.set(sessionId, setTimeout(() => {
-      clear
+      clearInterval(blinker);
