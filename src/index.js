@@ -724,6 +724,20 @@ class NightscoutMentraApp extends AppServer {
       path.resolve(__dirname, '..', '..', 'assets', 'bitmaps'),
     ];
     console.log('📁 Directorios candidatos:', candidates);
+    
+    // Función auxiliar para convertir buffer a hex
+    const bufferToHex = (buffer) => {
+      return Array.from(buffer).map(b => b.toString(16).padStart(2, '0')).join('');
+    };
+    
+    // Función auxiliar para validar BMP básico
+    const validateBmpBasic = (buffer) => {
+      if (buffer.length < 54) return false; // Header mínimo
+      const signature = buffer.toString('ascii', 0, 2);
+      if (signature !== 'BM') return false;
+      return true;
+    };
+    
     for (const baseDir of candidates) {
       tried.push(baseDir);
       try {
@@ -735,12 +749,38 @@ class NightscoutMentraApp extends AppServer {
           const full = path.join(baseDir, f);
           try {
             console.log(`📖 Cargando: ${full}`);
-            const hex = await BitmapUtils.loadBmpAsHex(full);
-            console.log(`✅ Cargado ${f}: ${hex ? hex.substring(0, 20) + '...' : 'null'}`);
-            const v = await (BitmapUtils.validateBmpHex?.(hex) || { isValid: !!hex });
-            console.log(`🔍 Validación ${f}:`, v);
-            if (v && (v.isValid !== false)) this._bitmapCache.set(f.toLowerCase(), hex);
-            else console.log(`❌ ${f} no válido, omitiendo`);
+            const buffer = await fs.readFile(full);
+            console.log(`📊 Buffer size: ${buffer.length} bytes`);
+            
+            // Validación básica
+            if (!validateBmpBasic(buffer)) {
+              console.log(`❌ ${f} no es un BMP válido (signature/header)`);
+              continue;
+            }
+            
+            // Convertir a hex
+            const hex = bufferToHex(buffer);
+            console.log(`✅ Cargado ${f}: ${hex.substring(0, 20)}... (${hex.length} chars)`);
+            
+            // Intentar validación del SDK si existe
+            let isValid = true;
+            if (BitmapUtils.validateBmpHex) {
+              try {
+                const v = await BitmapUtils.validateBmpHex(hex);
+                isValid = v && (v.isValid !== false);
+                console.log(`🔍 Validación SDK ${f}:`, v);
+              } catch (e) {
+                console.log(`⚠️ Validación SDK falló para ${f}:`, e.message);
+                // Continuar con validación básica
+              }
+            }
+            
+            if (isValid) {
+              this._bitmapCache.set(f.toLowerCase(), hex);
+              console.log(`✅ ${f} añadido al cache`);
+            } else {
+              console.log(`❌ ${f} no válido, omitiendo`);
+            }
           } catch (e) { 
             console.log(`❌ Error cargando ${f}:`, e.message);
             /* skip bad file */ 
