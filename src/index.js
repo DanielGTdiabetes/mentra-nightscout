@@ -1,13 +1,3 @@
-
-console.log("[debug] DEBUG_BOOT_BITMAP=%s → mostrando 8000ms en DASHBOARD y MAIN", bitmapKey);
-  suppress(8000);
-  try {
-  } catch (err) {
-    console.error("[debug] fallo mostrando DEBUG_BOOT_BITMAP:", err.message);
-  }
-}
-
-
 "use strict";
 /**
  * Nightscout MentraOS v2.13.1 (Hysteresis + ECO con estado de alarma + Pred no-avanzado)
