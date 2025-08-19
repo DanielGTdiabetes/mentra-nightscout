@@ -14,6 +14,41 @@
 require('dotenv').config();
 const { AppServer } = require('@mentra/sdk');
 const axios = require('axios');
+// === Bitmaps (iconos) ===
+const { loadBitmaps } = require("./bitmaps"); // loader del paquete v2
+let ICONS = null;                               // { high, low, sun, cloud, rain } en hex
+const LAST_ICON_AT = new Map();                 // rate limiting por icono
+const MIN_ICON_GAP_MS = 10_000;                 // no repetir el mismo icono en <10s
+const ICON_DURATION_MS = 4_000;                 // ms visible el bitmap
+
+function canShowIcon(key) {
+  const now = Date.now();
+  const last = LAST_ICON_AT.get(key) || 0;
+  if (now - last < MIN_ICON_GAP_MS) return false;
+  LAST_ICON_AT.set(key, now);
+  return true;
+}
+
+async function showBitmapSafe(session, bmpHex, durationMs = ICON_DURATION_MS, fallbackText = null) {
+  try {
+    await session.layouts.showBitmapView(bmpHex, { durationMs });
+  } catch (err) {
+    console.error("[bitmap] error al mostrar:", err?.message || err);
+    if (fallbackText) {
+      await session.layouts.showTextWall(fallbackText, { durationMs });
+    }
+  }
+}
+
+async function maybeShowAlertIcon(session, state) {
+  if (!ICONS) return;
+  if (state === "low" && canShowIcon("low")) {
+    await showBitmapSafe(session, ICONS.low, ICON_DURATION_MS, "ALERTA LOW [!]");
+  } else if (state === "high" && canShowIcon("high")) {
+    await showBitmapSafe(session, ICONS.high, ICON_DURATION_MS, "ALERTA HIGH [!]");
+  }
+}
+
 
 /* ---------- SHIM: compatibilidad SDK ---------- */
 if (typeof Object.prototype.updateSettingsForTesting !== 'function') {
@@ -660,6 +695,17 @@ getAlertLimits(settings) {
       }
 
       this.activeSessions.set(sessionId, { session, userId, settings, updateInterval: null });
+      // Cargar bitmaps (una vez por proceso; cache en ICONS)
+      try {
+        if (!ICONS) {
+          ICONS = await loadBitmaps();
+          console.log("[bitmaps] cargados y validados");
+        }
+      } catch (e) {
+        console.warn("[bitmaps] no se pudieron cargar (fallback texto):", e?.message || e);
+        ICONS = null;
+      }
+
       this.setupEventHandlers(session, sessionId, userId);
 
       // Semilla TIR
@@ -1020,6 +1066,9 @@ getAlertLimits(settings) {
     }
 
     if (alertType) {
+      // Mostrar icono de alerta (bitmap) si está disponible (una sola vez, rate-limited)
+      try { await maybeShowAlertIcon(session, alertType); } catch(_) {}
+
       this.alertHistory.set(sessionId, Date.now());
       this.alertLatch.set(sessionId, alertType);
       await this.triggerAnimatedAlert(session, sessionId, data, settings, alertType);
