@@ -1,3 +1,25 @@
+
+/* ---------- Bitmap Debug Helpers ---------- */
+let SUPPRESS_UNTIL = 0;
+function suppress(ms){ SUPPRESS_UNTIL = Date.now() + ms; }
+function canRenderHUD(){ return Date.now() >= SUPPRESS_UNTIL; }
+
+async function showDebugBitmap(bitmapKey) {
+  if (!bitmaps[bitmapKey]) {
+    console.error("[debug] Bitmap no encontrado:", bitmapKey);
+    return;
+  }
+  console.log("[debug] DEBUG_BOOT_BITMAP=%s → mostrando 8000ms en DASHBOARD y MAIN", bitmapKey);
+  suppress(8000);
+  try {
+    await AppServer.showBitmap(bitmaps[bitmapKey], { location: "DASHBOARD", durationMs: 8000 });
+    await AppServer.showBitmap(bitmaps[bitmapKey], { location: "MAIN", durationMs: 8000 });
+  } catch (err) {
+    console.error("[debug] fallo mostrando DEBUG_BOOT_BITMAP:", err.message);
+  }
+}
+
+
 "use strict";
 /**
  * Nightscout MentraOS v2.13.1 (Hysteresis + ECO con estado de alarma + Pred no-avanzado)
