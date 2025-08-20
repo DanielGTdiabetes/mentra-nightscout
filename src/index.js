@@ -791,8 +791,10 @@ app.start()
     process.exit(1);
   });
 
-app.listen(PORT, () => {
-  console.log(`Health server listening on ${PORT} (pkg: ${process.env.PACKAGE_NAME || 'com.tucompania.nightscout-glucose'})`);
+app.start().then(() => {
+  console.log(`✅ Nightscout MentraOS app iniciada en puerto ${PORT}`);
+}).catch(err => {
+  console.error("❌ Error al iniciar la app:", err);
 });
 
 /* ---------- Helpers extra opcionales ---------- */
