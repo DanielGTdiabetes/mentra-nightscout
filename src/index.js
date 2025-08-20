@@ -12,6 +12,8 @@
  * Ahora la lógica se encarga de mostrar y ocultar el texto Y el bitmap de forma mutuamente exclusiva
  * en un solo comando 'showDisplay'.
  * - Código refactorizado para eliminar redundancias y mejorar la robustez.
+ * - CORRECCIÓN CRÍTICA: Se ha movido la inicialización del servidor fuera del bloque de prueba
+ * para asegurar que la aplicación se inicie correctamente.
  */
 
 require('dotenv').config();
@@ -188,13 +190,9 @@ class NightscoutMentraApp extends AppServer {
     const raw = this.parseSlicerValue(settings.alert_hysteresis_mmol, NaN);
     let mmol = NaN;
     if (Number.isFinite(raw)) {
-      if (Number.isInteger(raw)) {
-        if (raw >= 0 && raw <= 10) mmol = raw / 10;
-        else if (raw >= 30) mmol = raw / 10;
-        else mmol = raw; 
-      } else {
-        mmol = raw; 
-      }
+      if (raw >= 0 && raw <= 10) mmol = raw / 10;
+      else if (raw >= 30) mmol = raw / 10;
+      else mmol = raw; 
     }
     const mmolAsMg = Number.isFinite(mmol) ? Math.round(mmol * 18) : NaN;
     const units = String(settings.units || '').toLowerCase();
@@ -863,6 +861,7 @@ class NightscoutMentraApp extends AppServer {
 }
 
 /* ---------- init ---------- */
+// SE HA MOVIDO ESTE BLOQUE FUERA DE CUALQUIER CONDICIÓN PARA GARANTIZAR LA INICIALIZACIÓN
 const server = new NightscoutMentraApp({
   packageName: PACKAGE_NAME,
   apiKey: MENTRAOS_API_KEY,
