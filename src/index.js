@@ -765,12 +765,31 @@ class NightscoutMentraApp extends AppServer {
   mgToUnit(mg, unit) { return unit === UNITS.MMOL ? (mg / 18).toFixed(1) : Math.round(mg); }
 }
 
-/* ---------- Arranque servidor ---------- */
+/* ---------- Arranque servidor (SDK usa start()) ---------- */
 const PORT = Number(process.env.PORT || 3000);
 const app = new NightscoutMentraApp({
   packageName: process.env.PACKAGE_NAME || 'com.tucompania.nightscout-glucose',
-  apiKey: process.env.MENTRAOS_API_KEY || 'demo' // necesario para @mentra/sdk
+  apiKey: process.env.MENTRAOS_API_KEY || 'demo',
+  port: PORT
 });
+
+app.start()
+  .then(() => {
+    console.log(`Server started on ${PORT} (pkg: ${process.env.PACKAGE_NAME || 'com.tucompania.nightscout-glucose'})`);
+    // Ruta /health opcional para Render
+    try {
+      app.app?.get?.('/health', (_req, res) => res.json({
+        status: 'alive',
+        timestamp: new Date().toISOString(),
+        version: '2.13.1',
+        activeSessions: app.activeSessions?.size ?? 0
+      }));
+    } catch {}
+  })
+  .catch(err => {
+    console.error('⛔ Error iniciando servidor:', err);
+    process.exit(1);
+  });
 
 app.listen(PORT, () => {
   console.log(`Health server listening on ${PORT} (pkg: ${process.env.PACKAGE_NAME || 'com.tucompania.nightscout-glucose'})`);
