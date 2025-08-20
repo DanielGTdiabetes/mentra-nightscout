@@ -1325,3 +1325,48 @@ ${displayValue} ${unit}`;
     this.hideDisplay(session, sessionId);
   }, alertDuration));
 }
+
+  /* ---------- util: estado eco de alarma (para ECO de ajustes) ---------- */
+  getAlarmEchoState(sessionId, mgdl, settings) {
+    try {
+      if (!settings) return null;
+      const latch = this.alertLatch.get(sessionId) || null;
+      if (latch) return latch;
+      if (!Number.isFinite(mgdl)) return null;
+      const lim = this.getAlertLimits(settings);
+      if (mgdl <= lim.low) return 'low';
+      if (mgdl >= lim.high) return 'high';
+      return null;
+    } catch (_) { return null; }
+  }
+
+  /* ---------- util: detectar cambio en límites de alerta ---------- */
+  alertLimitsChanged(oldSettings, newSettings) {
+    if (!oldSettings) return true;
+    const ol = this.getAlertLimits(oldSettings || {});
+    const nl = this.getAlertLimits(newSettings || {});
+    const oh = this.getHysteresisMg(oldSettings || {});
+    const nh = this.getHysteresisMg(newSettings || {});
+    return ol.low !== nl.low || ol.high !== nl.high || oh !== nh;
+  }
+} // <-- cierre de la clase NightscoutMentraApp
+
+/* ---------- Bootstrap del servidor ---------- */
+const app = new NightscoutMentraApp({
+  packageName: PACKAGE_NAME,
+  apiKey: MENTRAOS_API_KEY,
+});
+
+app.listen(PORT, () => {
+  console.log(`🚀 Nightscout MentraOS server listening on port ${PORT} (pkg: ${PACKAGE_NAME})`);
+});
+
+process.on('SIGTERM', () => {
+  try { console.log('🛑 SIGTERM recibido, cerrando...'); } catch (_) {}
+  process.exit(0);
+});
+
+process.on('SIGINT', () => {
+  try { console.log('🛑 SIGINT recibido, cerrando...'); } catch (_) {}
+  process.exit(0);
+});
