@@ -33,14 +33,13 @@ function toHexBitmap(data) {
 }
 const ICON_DURATION_MS = 4_000;                 // ms visible el bitmap
 
-
-
 async function showBitmapSafe(session, bmpHex, durationMs = ICON_DURATION_MS, fallbackText = null, options = {}) {
   try {
     const hex = toHexBitmap(bmpHex);
     await session.layouts.showBitmapView(hex, { durationMs, location: ViewType.DASHBOARD, ...options });
     await session.layouts.showBitmapView(hex, { durationMs, location: ViewType.MAIN,      ...options });
-  } catch (err) {
+  } catch (e) {
+    console.error("Error showing bitmap, falling back to text:", e);
     if (fallbackText) {
       try {
         if (session.layouts?.showTextView) {
@@ -65,10 +64,9 @@ function canShowIcon(key) {
 }
 
 
-// Se eliminaron bloques de código que no tenían un propósito claro o eran redundantes, como la llave de cierre `}` extra.
-// Además, se corrigió el bloque if/else en la función `maybeShowAlertIcon` para que el flujo sea el esperado.
 async function maybeShowAlertIcon(session, state) {
   if (!ICONS) return;
+
   if (state === "low") {
     if (canShowIcon("low")) {
       await showBitmapSafe(session, ICONS.low, ICON_DURATION_MS, "ALERTA LOW [!]");
@@ -201,7 +199,7 @@ getAlertLimits(settings) {
   }
 }
 
-  getHysteresisMg(settings) {
+getHysteresisMg(settings) {
   // Lee candidatos
   const mg = this.validateSlicerValue(settings.alert_hysteresis_mg, 0, 50, NaN);
 
@@ -311,11 +309,11 @@ getAlertLimits(settings) {
           ? Number(kv.prediction_horizon_min || kv.prediction_horizon_mins) : 30,
         debug_force_alert: (typeof kv.debug_force_alert === 'string' ? kv.debug_force_alert : null),
       };
-    } catch(error) {
-        throw new Error(`Error parsing user settings: ${error.message}`);
+    } catch (error) {
+      console.error('Error fetching user settings:', error);
+      return {};
     }
-}
-
+  }
 
   parseSettingsFromArray(arr) {
     const o = {};
@@ -437,9 +435,9 @@ getAlertLimits(settings) {
       const sep = ' · ';
       const rest = parts.slice(2);
       return `${l1}\n${l2}${sep}${predShort}${rest.length ? `\n${rest.join('\n')}` : ''}`;
-    } catch(err) {
-      // Si la predicción falla, devuelve el formato base.
-      return this.formatForG1(data, settings, sessionId);
+    } catch (e) {
+      console.error("Error formatting with prediction:", e);
+      return await this.formatForG1(data, settings, sessionId);
     }
   }
 
@@ -503,10 +501,9 @@ getAlertLimits(settings) {
           }
         }
       }
-    } catch(err) {
-      console.log('Error en predicción devicestatus, probando fallback:', err.message);
+    } catch (e) {
+      console.warn("Devicestatus prediction failed:", e.message);
     }
-    
     // 2) Fallback lineal
     try {
       const { data } = await http.get(`/api/v1/entries.json?count=2`);
@@ -533,8 +530,8 @@ getAlertLimits(settings) {
           }
         }
       }
-    } catch(err) {
-      console.log('Error en predicción lineal:', err.message);
+    } catch (e) {
+      console.warn("Linear prediction fallback failed:", e.message);
     }
     return null;
   }
@@ -610,11 +607,12 @@ getAlertLimits(settings) {
         if (!last || e.ts > last.ts) last = e;
       }
       return { label, totalCarbs, totalInsulin, last };
-    } catch(err) {
+    } catch (e) {
+      console.error("Failed to get recent treatments:", e);
       return null;
     }
   }
-
+  
   formatTreatmentsLine(summary, settings, sessionId='default') {
     if (!summary) return '';
     const { label, totalCarbs, totalInsulin, last } = summary;
@@ -689,11 +687,10 @@ getAlertLimits(settings) {
       if (last === out) return;
       this._lastShownText.set(sessionId, out);
       session.layouts.showTextWall(out);
-    } catch(err) {
-      session.logger?.error(err, 'showClamped failed');
+    } catch (e) {
+      console.error("Error showing clamped text:", e);
     }
   }
-
   hideDisplay(session, sessionId) {
     try { session.layouts.showTextWall(''); this._lastShownText.delete(sessionId); } catch {}
   }
@@ -747,13 +744,14 @@ getAlertLimits(settings) {
             console.log(`[debug] DEBUG_BOOT_BITMAP=${key} → mostrando 5s en DASHBOARD y MAIN`);
             await session.layouts.showBitmapView(toHexBitmap(hex), { durationMs: 5000, location: ViewType.DASHBOARD });
             await session.layouts.showBitmapView(toHexBitmap(hex), { durationMs: 5000, location: ViewType.MAIN });
-          } catch(e) {
-            console.error(`[debug] Error showing bitmap: ${e.message}`);
+          } catch (e) {
+            console.error("Error showing debug bitmap:", e);
           }
         } else {
           console.log(`[debug] DEBUG_BOOT_BITMAP=${key} no reconocido`);
         }
       }
+
       this.setupEventHandlers(session, sessionId, userId);
 
       // Semilla TIR
@@ -770,9 +768,8 @@ getAlertLimits(settings) {
         }
         this.dailyTirState.set(sessionId, { dayStr, total, inRange });
       } catch (e) {
-        console.error('Error seeding TIR:', e);
+        console.error("Failed to seed TIR state:", e);
       }
-
       // Reloj de cambio de día
       const dayWatch = setInterval(() => {
         const sd = this.activeSessions.get(sessionId);
@@ -788,12 +785,12 @@ getAlertLimits(settings) {
 
       await this.showInitialAndHide(session, sessionId, settings);
       await this.startNormalOperation(session, sessionId, userId, settings);
-    } catch(error) {
-      session.logger?.error(error, 'onSession failed');
+    } catch (e) {
+      console.error('Error in onSession:', e);
       const lang = (settings && settings.language) || 'en';
-      const errorMsg = error.message?.includes('URL no configurada')
+      const errorMsg = e.message?.includes('URL no configurada')
         ? { en: 'Nightscout URL not set\nCheck settings', es: 'URL de Nightscout no configurada\nRevisa ajustes' }
-        : (error.message?.includes('Sin datos') || error.message?.includes('timeout'))
+        : (e.message?.includes('Sin datos') || e.message?.includes('timeout'))
         ? { en: 'Cannot connect to Nightscout\nCheck URL and token', es: 'No se puede conectar\nRevisa URL y token' }
         : { en: 'Error loading glucose data\nCheck your settings', es: 'Error cargando datos\nRevisa tu configuración' };
       this.showClamped(session, sessionId, errorMsg[lang]);
@@ -822,6 +819,7 @@ getAlertLimits(settings) {
       }
       this._scheduleHide(sessionId, settings.display_duration_ms || 5000);
     } catch (error) {
+      console.error("showInitialAndHide failed:", error);
       const lang = (settings && settings.language) || 'en';
       const errorMsg = error.message?.includes('URL no configurada')
         ? { en: 'Nightscout URL not set\nCheck settings', es: 'URL de Nightscout no configurada\nRevisa ajustes' }
@@ -832,7 +830,6 @@ getAlertLimits(settings) {
       this._scheduleHide(sessionId, 5000);
     }
   }
-
 
   async animateTIRFill(session, sessionId, s, headerText, tirPct, tLine='', extraLine='') {
     try {
@@ -887,9 +884,8 @@ getAlertLimits(settings) {
         await this.__delay(33);
       }
       this.showClamped(session, sessionId, base(target));
-    } catch(err) {
-      console.error('Error during TIR animation:', err);
-      // Fallback a mostrar el texto estático si la animación falla
+    } catch (e) {
+      console.error("Animate TIR fill failed:", e);
       const bar = s.show_tir_bar && tirPct != null ? ' ' + this.__barFromRatio(tirPct/100, 20) : '';
       const tirLine = tirPct == null ? (s.language==='es' ? 'TIR hoy: n/d' : 'TIR: n/a') : (s.language==='es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
       const line2 = `${tirLine}${bar}` + (tLine ? `\n${tLine}` : '');
@@ -952,11 +948,9 @@ getAlertLimits(settings) {
 
             this.showClamped(session, sessionId, [line1,line2,line3,line4,line5].join('\n'));
             setTimeout(() => this.hideDisplay(session, sessionId), 2200);
-          } catch(e) {
-            console.error('Error in settings echo:', e);
-          }
-        } catch(e) {
-          session.logger?.error(e, 'Failed to handle settings update');
+          } catch {}
+        } catch (e) {
+          console.error("Settings handler failed:", e);
         }
       };
 
@@ -1002,9 +996,9 @@ getAlertLimits(settings) {
           try { const sum = await this.getRecentTreatments(s, 'day', sessionId); tLine = this.formatTreatmentsLine(sum, s, sessionId); } catch {}
           await this.animateTIRFill(session, sessionId, s, baseLine, tirPct, tLine, minMaxLine);
           this._scheduleHide(sessionId, s.display_duration_ms || 4000);
-        } catch(err) {
-          session.logger?.error(err, 'onHeadPosition failed');
-          this.showClamped(session, sessionId, (session.logger?.lang==='es' ? 'Error al mostrar' : 'Display error'));
+        } catch (e) {
+          console.error('onHeadPosition failed:', e);
+          this.showClamped(session, sessionId, (s?.language||'en') ==='es' ? 'Error al mostrar' : 'Display error');
           this._scheduleHide(sessionId, 2000);
         }
       });
@@ -1020,8 +1014,8 @@ getAlertLimits(settings) {
         this.headUpLastShown.delete(sessionId); this.dailyTirState.delete(sessionId); this.lastGoodEntry.delete(sessionId);
         session.logger?.info('Session disconnected');
       });
-    } catch(err) {
-      session.logger?.error(err, 'setupEventHandlers failed');
+    } catch (e) {
+      console.error("Error setting up event handlers:", e);
     }
   }
 
@@ -1043,9 +1037,9 @@ getAlertLimits(settings) {
       }
       this._scheduleHide(sessionId, ms);
     } catch (error) {
-      session.logger?.error(error, 'Failed to show glucose temporarily');
-      const cached = this.lastGoodEntry.get(sessionId);
+      console.error('Failed to show glucose temporarily:', error);
       const s = this.activeSessions.get(sessionId)?.settings;
+      const cached = this.lastGoodEntry.get(sessionId);
       if (cached && s) {
         const txt = await this.formatForG1WithPrediction(cached, s, sessionId);
         this.showClamped(session, sessionId, txt);
@@ -1068,7 +1062,7 @@ getAlertLimits(settings) {
         this.updateDailyTirState(sessionId, d.sgv, d.date, s);
         if (s.alertsEnabled) await this.checkAlerts(session, sessionId, d, s);
       } catch (e) {
-        session.logger?.error(e, 'Error in normal operation loop');
+        console.error(`Error in normal operation loop for session ${sessionId}:`, e);
       }
     }, ms);
     const sd = this.activeSessions.get(sessionId);
@@ -1079,7 +1073,6 @@ getAlertLimits(settings) {
     }
   }
 
-  
   async checkAlerts(session, sessionId, data, settings) {
     const debugForceEnv = (process.env.DEBUG_FORCE_ALERT || '').toLowerCase();
     const limits = this.getAlertLimits(settings);
@@ -1099,27 +1092,25 @@ getAlertLimits(settings) {
     // Cooldown general
     if (lastAlertTs && Date.now() - lastAlertTs < cooldown) return;
 
-    // Determinar tipo de alerta real
     let alertType = null;
     if (Number.isFinite(mgdl)) {
       if (mgdl <= limits.low) alertType = 'low';
       else if (mgdl >= limits.high) alertType = 'high';
     }
-    
-    // Override por DEBUG_FORCE_ALERT
+
+    // Override final por DEBUG_FORCE_ALERT
     if (debugForceEnv === 'low') alertType = 'low';
     else if (debugForceEnv === 'high') alertType = 'high';
 
-    if (!alertType) return;
-    
-    try { await maybeShowAlertIcon(session, alertType); } catch(_) {}
+    if (alertType) {
+      try { await maybeShowAlertIcon(session, alertType); } catch(_) {}
 
-    this.alertHistory.set(sessionId, Date.now());
-    this.alertLatch.set(sessionId, alertType);
-    await this.triggerAnimatedAlert(session, sessionId, data, settings, alertType);
-    session.logger?.warn('Alert sent', { type: alertType, value: mgdl });
+      this.alertHistory.set(sessionId, Date.now());
+      this.alertLatch.set(sessionId, alertType);
+      await this.triggerAnimatedAlert(session, sessionId, data, settings, alertType);
+      session.logger?.warn('Alert sent', { type: alertType, value: mgdl });
+    }
   }
-
 
   async triggerAnimatedAlert(session, sessionId, data, settings, type) {
     const displayValue = this.convertToDisplay(data.sgv, settings.units || UNITS.MGDL);
@@ -1201,7 +1192,7 @@ getAlertLimits(settings) {
         : `Your glucose is ${display} ${settings.units || UNITS.MGDL} ${trend}. Status: ${status}.${extra}`;
       return { success: true, data: { glucose: display, unit: settings.units || UNITS.MGDL, trend, status, tirPct: Number.isFinite(tirPct) ? tirPct : null }, message: msg };
     } catch (e) {
-      return { success: false, data: null, message: lang === 'es' ? `Error: ${e.message}` : `Error: ${e.message}` };
+      return { success: false, message: lang === 'es' ? `Error: ${e.message}` : `Error: ${e.message}` };
     }
   }
 
