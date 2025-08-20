@@ -156,12 +156,16 @@ class NightscoutMentraApp extends AppServer {
 
   /* ---------- render layering helpers ---------- */
   _canRender(sessionId, layer) {
-    const hold = this._renderHoldUntil.get(sessionId) || 0;
-    if (Date.now() < hold) return false;
-    const current = this._renderLayer.get(sessionId);
-    if (current == null) return layer >= RENDER_LAYERS.HUD;
-    return layer >= current;
-  }
+  const hold = this._renderHoldUntil.get(sessionId) || 0;
+  if (Date.now() < hold) return false;
+
+  const current = this._renderLayer.get(sessionId);
+  // Si NO hay overlay activo (current null/undefined) o la capa actual <= HUD ⇒ permitir pintar
+  if (current == null || current <= RENDER_LAYERS.HUD) return true;
+
+  // Si hay overlay activo (BOOT/ALERT), sólo permitir si la capa solicitada >= capa actual
+  return layer >= current;
+}
 
   _beginOverlay(sessionId, layer, durationMs) {
     const until = Date.now() + (durationMs || 0);
@@ -233,6 +237,7 @@ class NightscoutMentraApp extends AppServer {
         'show_tir_bar','show_range_bar',
         'display_duration_ms','alert_duration_ms','alert_cooldown_ms',
         'enable_advanced_mode','advanced_mode_enabled',
+        alert_present_mode: (String(o.alert_present_mode || o.alert_present) || 'mixed').toLowerCase(),
         'alert_hysteresis_mg','alert_hysteresis_mmol',
         'tir_low_mg','tir_high_mg','tir_low_mmol','tir_high_mmol',
         'time_in_range_low_mg','time_in_range_high_mg','time_in_range_low_mmol','time_in_range_high_mmol',
