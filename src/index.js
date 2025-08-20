@@ -9,104 +9,11 @@
  *  - Histeresis de alarmas (alert_hysteresis_mg / alert_hysteresis_mmol) con latch
  *  - En NO avanzado, predicción sólo si cruza ≤60 o ≥180 mg/dL (fijos)
  *  - ECO al guardar ajustes incluye estado de alarmas (BAJA/ALTA/Sin) en ES/EN, compacto
- *
- * BITMAPS:
- *  - Carga segura de BMP con verificación de firma 'BM' + BitmapUtils.loadBmpAsHex + validateBmpHex
- *  - showBitmapView(hex, { view, durationMs }) con try/catch y fallback por location si build lo soporta
- *  - DEBUG_BOOT_BITMAP (low|high|sun|cloud|rain) para overlay inicial 5s
- *  - ClearView tras overlays/alertas
  */
 
 require('dotenv').config();
-const { AppServer, ViewType, BitmapUtils } = require('@mentra/sdk');
+const { AppServer } = require('@mentra/sdk');
 const axios = require('axios');
-const path = require('path');
-const fs = require('fs');
-
-/* ---------- BITMAPS: rutas por alias ---------- */
-const BITMAPS_DIR = path.join(process.cwd(), 'assets', 'bitmaps');
-const BMP_ALIAS_TO_FILE = {
-  low:   'alert-low-526x100.bmp',
-  high:  'alert-high-526x100.bmp',
-  sun:   'weather-sun-526x100.bmp',
-  cloud: 'weather-cloud-526x100.bmp',
-  rain:  'weather-rain-526x100.bmp',
-};
-const DEBUG_BOOT_BITMAP = (process.env.DEBUG_BOOT_BITMAP || '').toLowerCase().trim(); // low|high|sun|cloud|rain
-
-function getBitmapLocationByAlias(alias) {
-  const file = BMP_ALIAS_TO_FILE[alias];
-  if (!file) return null;
-  return path.join(BITMAPS_DIR, file);
-}
-
-/** Verificación rápida: ¿es un BMP real? (firma 'BM') */
-function isLikelyBmp(location) {
-  try {
-    const fd = fs.openSync(location, 'r');
-    const buf = Buffer.alloc(2);
-    fs.readSync(fd, buf, 0, 2, 0);
-    fs.closeSync(fd);
-    return buf.length === 2 && buf[0] === 0x42 && buf[1] === 0x4D; // 'B','M'
-  } catch {
-    return false;
-  }
-}
-
-/** Muestra un bitmap desde ubicación de archivo; robusto y sin bloquear la app */
-async function showBitmapByLocation(session, location, { view = ViewType.DASHBOARD, durationMs = 5000 } = {}) {
-  // 0) Comprobación previa: evitar que el SDK reciba basura y tumbe el proceso
-  if (!location || !isLikelyBmp(location)) {
-    session.logger?.warn?.('Bitmap inválido o ausente (firma BM no encontrada); usando fallback', { location });
-    // Fallback 1: intenta por 'location' si el SDK lo soporta
-    try {
-      session.layouts.showBitmapView("", { view, durationMs, location });
-      return true;
-    } catch (_) {
-      // Fallback 2: texto para no dejar la pantalla en negro
-      try { session.layouts.showTextWall('(bitmap invalid)', { view, durationMs }); } catch {}
-      return false;
-    }
-  }
-
-  // 1) Vía segura: hex desde disco con util oficial
-  try {
-    const hex = await BitmapUtils.loadBmpAsHex(location);
-    const validation = BitmapUtils.validateBmpHex(hex);
-    if (validation && validation.isValid === false) {
-      throw new Error(`BMP inválido: ${Array.isArray(validation.errors) ? validation.errors.join(', ') : 'desconocido'}`);
-    }
-    // 1.1) showBitmapView puede arrojar si no le gusta el BMP -> try/catch local
-    try {
-      session.layouts.showBitmapView(hex, { view, durationMs });
-      return true;
-    } catch (eShow) {
-      session.logger?.debug?.('showBitmapView(hex) lanzó excepción; intento por location', { msg: eShow?.message, location });
-      // 2) Fallback: algunas builds soportan pasar location en options
-      try {
-        session.layouts.showBitmapView("", { view, durationMs, location });
-        return true;
-      } catch (e2) {
-        // 3) Fallback final: texto
-        try { session.layouts.showTextWall('(bitmap error)', { view, durationMs }); } catch {}
-        session.logger?.warn?.('showBitmapByLocation falló (hex + location)', { eShow: eShow?.message, e2: e2?.message, location });
-        return false;
-      }
-    }
-  } catch (e1) {
-    session.logger?.debug?.('loadBmpAsHex/validateBmpHex falló; intento por location', { msg: e1?.message, location });
-    // 2) Fallback: por location
-    try {
-      session.layouts.showBitmapView("", { view, durationMs, location });
-      return true;
-    } catch (e2) {
-      // 3) Fallback final: texto
-      try { session.layouts.showTextWall('(bitmap error)', { view, durationMs }); } catch {}
-      session.logger?.warn?.('showBitmapByLocation falló (sin hex, por location)', { e1: e1?.message, e2: e2?.message, location });
-      return false;
-    }
-  }
-}
 
 /* ---------- SHIM: compatibilidad SDK ---------- */
 if (typeof Object.prototype.updateSettingsForTesting !== 'function') {
@@ -666,11 +573,7 @@ class NightscoutMentraApp extends AppServer {
     } catch (_) {}
   }
   hideDisplay(session, sessionId) {
-    try {
-      session.layouts.clearView();
-      session.layouts.clearView({ view: ViewType.DASHBOARD });
-      this._lastShownText.delete(sessionId);
-    } catch {}
+    try { session.layouts.showTextWall(''); this._lastShownText.delete(sessionId); } catch {}
   }
 
   /* ---------- helpers ECO ---------- */
@@ -733,23 +636,6 @@ class NightscoutMentraApp extends AppServer {
         }
       }, 60 * 1000);
       this.dayWatchTimers.set(sessionId, dayWatch);
-
-      /* ---------- BOOT OVERLAY BMP (5s) con captura de errores ---------- */
-      if (DEBUG_BOOT_BITMAP) {
-        const loc = getBitmapLocationByAlias(DEBUG_BOOT_BITMAP);
-        if (loc && isLikelyBmp(loc)) {
-          session.logger?.debug?.(`[debug] DEBUG_BOOT_BITMAP=${DEBUG_BOOT_BITMAP} → mostrando 5s en DASHBOARD`);
-          try {
-            await showBitmapByLocation(session, loc, { view: ViewType.DASHBOARD, durationMs: 5000 });
-          } catch (e) {
-            session.logger?.warn?.('Boot bitmap falló', { msg: e?.message });
-          } finally {
-            setTimeout(() => this.hideDisplay(session, sessionId), 5100);
-          }
-        } else {
-          console.warn(`[debug] DEBUG_BOOT_BITMAP="${DEBUG_BOOT_BITMAP}" no válido o no encontrado en assets/bitmaps`);
-        }
-      }
 
       await this.showInitialAndHide(session, sessionId, settings);
       await this.startNormalOperation(session, sessionId, userId, settings);
@@ -1043,19 +929,6 @@ class NightscoutMentraApp extends AppServer {
     }
   }
 
-  alertLimitsChanged(oldSettings, newSettings) {
-    if (!oldSettings) return false;
-    return (
-      oldSettings.low_alert_mg !== newSettings.low_alert_mg ||
-      oldSettings.high_alert_mg !== newSettings.high_alert_mg ||
-      oldSettings.low_alert_mmol !== newSettings.low_alert_mmol ||
-      oldSettings.high_alert_mmol !== newSettings.high_alert_mmol ||
-      oldSettings.units !== newSettings.units ||
-      oldSettings.alert_hysteresis_mg !== newSettings.alert_hysteresis_mg ||
-      oldSettings.alert_hysteresis_mmol !== newSettings.alert_hysteresis_mmol
-    );
-  }
-
   async checkAlerts(session, sessionId, data, settings) {
     const limits = this.getAlertLimits(settings);
     const mgdl = data.sgv;
@@ -1090,13 +963,12 @@ class NightscoutMentraApp extends AppServer {
     if (alertType) {
       this.alertHistory.set(sessionId, Date.now());
       this.alertLatch.set(sessionId, alertType);
-      await this.triggerBitmapAlert(session, sessionId, data, settings, alertType);
+      await this.triggerAnimatedAlert(session, sessionId, data, settings, alertType);
       session.logger?.warn('Alert sent', { type: alertType, value: mgdl });
     }
   }
 
-  /** Intenta mostrar alerta con BMP; si falla, usa texto parpadeante como fallback */
-  async triggerBitmapAlert(session, sessionId, data, settings, type) {
+  async triggerAnimatedAlert(session, sessionId, data, settings, type) {
     const displayValue = this.convertToDisplay(data.sgv, settings.units || UNITS.MGDL);
     const unit = settings.units || UNITS.MGDL;
     const lang = settings.language || 'en';
@@ -1106,42 +978,40 @@ class NightscoutMentraApp extends AppServer {
     };
     const baseText = `${msgs[lang][type]}\n${displayValue} ${unit}`;
     const alertDuration = settings.alert_duration_ms || 15000;
+    const blinkInterval = 600;
 
-    // 1) Intentar BMP si existe y es válido
-    const loc = getBitmapLocationByAlias(type === 'low' ? 'low' : 'high');
-    let ok = false;
-    if (loc && isLikelyBmp(loc)) {
-      try {
-        ok = await showBitmapByLocation(session, loc, { view: ViewType.DASHBOARD, durationMs: alertDuration });
-      } catch (_) { ok = false; }
-    }
+    if (this.displayTimers.has(sessionId)) clearTimeout(this.displayTimers.get(sessionId));
 
-    // 2) Si no hay BMP o falla, fallback a texto parpadeante
-    if (!ok) {
-      const blinkInterval = 600;
-      if (this.displayTimers.has(sessionId)) clearTimeout(this.displayTimers.get(sessionId));
-      const startTime = Date.now();
-      let isVisible = true;
-      const blinker = setInterval(() => {
-        if (Date.now() - startTime > alertDuration) {
-          clearInterval(blinker);
-          this.hideDisplay(session, sessionId);
-          return;
-        }
-        const symbol = isVisible ? '[!]' : '[ ]';
-        this.showClamped(session, sessionId, `${symbol} ${baseText}`);
-        isVisible = !isVisible;
-      }, blinkInterval);
-
-      this.displayTimers.set(sessionId, setTimeout(() => {
+    const startTime = Date.now();
+    let isVisible = true;
+    const blinker = setInterval(() => {
+      if (Date.now() - startTime > alertDuration) {
         clearInterval(blinker);
         this.hideDisplay(session, sessionId);
-      }, alertDuration + 120));
-      return;
-    }
+        return;
+      }
+      const symbol = isVisible ? '[!]' : '[ ]';
+      this.showClamped(session, sessionId, `${symbol} ${baseText}`);
+      isVisible = !isVisible;
+    }, blinkInterval);
 
-    // 3) Si BMP ok: ocultar al acabar
-    setTimeout(() => this.hideDisplay(session, sessionId), alertDuration + 120);
+    this.displayTimers.set(sessionId, setTimeout(() => {
+      clearInterval(blinker);
+      this.hideDisplay(session, sessionId);
+    }, alertDuration + 120));
+  }
+
+  alertLimitsChanged(oldSettings, newSettings) {
+    if (!oldSettings) return false;
+    return (
+      oldSettings.low_alert_mg !== newSettings.low_alert_mg ||
+      oldSettings.high_alert_mg !== newSettings.high_alert_mg ||
+      oldSettings.low_alert_mmol !== newSettings.low_alert_mmol ||
+      oldSettings.high_alert_mmol !== newSettings.high_alert_mmol ||
+      oldSettings.units !== newSettings.units ||
+      oldSettings.alert_hysteresis_mg !== newSettings.alert_hysteresis_mg ||
+      oldSettings.alert_hysteresis_mmol !== newSettings.alert_hysteresis_mmol
+    );
   }
 
   /* ---------- MIRA tool ---------- */
@@ -1163,7 +1033,7 @@ class NightscoutMentraApp extends AppServer {
       }
       if (!settings?.nightscoutUrl || !settings?.nightscoutToken) {
         throw new Error(lang === 'es' ? 'Nightscout no configurado' : 'Nightscout not configured');
-      }
+        }
       const reading = await this.getGlucoseData(settings);
       const display = this.convertToDisplay(reading.sgv, settings.units || UNITS.MGDL);
       const trend = this.getTrendArrow(reading.direction);
@@ -1202,7 +1072,7 @@ server.start().catch(err => {
   console.error('⛔ Error iniciando servidor:', err);
   process.exit(1);
 });
-console.log('🚀 Nightscout MentraOS v2.13.1 — Hysteresis + ECO + Pred no-avanzado + Bitmaps');
+console.log('🚀 Nightscout MentraOS v2.13.1 — Hysteresis + ECO + Pred no-avanzado');
 
 const KEEP_ALIVE_URL = process.env.RENDER_URL || 'https://mentra-nightscout.onrender.com';
 server.app.get('/health', (_, res) => res.json({
