@@ -1325,25 +1325,3 @@ ${displayValue} ${unit}`;
     this.hideDisplay(session, sessionId);
   }, alertDuration));
 }
-
-    try {
-      const shown = await this._playAlertBitmap(session, sessionId, type, blinkInterval, alertDuration);
-      if (shown) return;
-    } catch (_) {}
-
-    if (this.displayTimers.has(sessionId)) clearTimeout(this.displayTimers.get(sessionId));
-    const startTime = Date.now();
-    let isVisible = true;
-    const blinker = setInterval(() => {
-      if (Date.now() - startTime > alertDuration) {
-        clearInterval(blinker);
-        this.hideDisplay(session, sessionId);
-        return;
-      }
-      const symbol = isVisible ? '[!]' : '[ ]';
-      this.showClamped(session, sessionId, `${symbol} ${baseText}`);
-      isVisible = !isVisible;
-    }, blinkInterval);
-
-    this.displayTimers.set(sessionId, setTimeout(() => {
-      clearInterval(blinker);
