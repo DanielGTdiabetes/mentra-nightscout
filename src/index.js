@@ -1131,59 +1131,76 @@ class NightscoutMentraApp extends AppServer {
 
   /** Intenta mostrar alerta con BMP (base64); si falla, usa texto parpadeante */
   async triggerBitmapAlert(session, sessionId, data, settings, type) {
-    const displayValue = this.convertToDisplay(data.sgv, settings.units || UNITS.MGDL);
-    const unit = settings.units || UNITS.MGDL;
-    const lang = settings.language || 'en';
-    const msgs = {
-      en: { low: `LOW GLUCOSE!`, high: `HIGH GLUCOSE!` },
-      es: { low: `¡GLUCOSA BAJA!`, high: `¡GLUCOSA ALTA!` }
-    };
-    const baseText = `${msgs[lang][type]}\n${displayValue} ${unit}`;
-    const alertDuration = settings.alert_duration_ms || 15000;
+  const displayValue = this.convertToDisplay(data.sgv, settings.units || UNITS.MGDL);
+  const unit = settings.units || UNITS.MGDL;
+  const lang = settings.language || 'en';
+  const msgs = { en: { low: `LOW GLUCOSE!`, high: `HIGH GLUCOSE!` },
+                 es: { low: `¡GLUCOSA BAJA!`, high: `¡GLUCOSA ALTA!` } };
+  const baseText = `${msgs[lang][type]}\n${displayValue} ${unit}`;
+  const alertDuration = settings.alert_duration_ms || 15000;
 
-    // 1) Intentar BMP si existe alias
-    const alias = type === 'low' ? 'low' : 'high';
-    const loc = getBitmapLocationByAlias(alias);
-    let ok = false;
-    if (loc) {
-      try {
-        this._beginOverlay(sessionId, RENDER_LAYERS.ALERT, alertDuration);
-        ok = await showBitmapByLocation(session, loc, { durationMs: alertDuration });
-      } catch (_) { ok = false; }
-    }
+  const mode = ['mixed','icon','text'].includes(settings.alert_present_mode)
+    ? settings.alert_present_mode : 'mixed';
 
-    // 2) Si no hay BMP o falla, fallback a texto parpadeante
-    if (!ok) {
-      this._beginOverlay(sessionId, RENDER_LAYERS.ALERT, alertDuration);
-      const blinkInterval = 600;
-      if (this.displayTimers.has(sessionId)) clearTimeout(this.displayTimers.get(sessionId));
-      const startTime = Date.now();
-      let isVisible = true;
-      const blinker = setInterval(() => {
-        if (Date.now() - startTime > alertDuration) {
-          clearInterval(blinker);
-          this._endOverlay(session, sessionId);
-          return;
-        }
-        const symbol = isVisible ? '[!]' : '[ ]';
-        this.showClamped(session, sessionId, `${symbol} ${baseText}`);
-        isVisible = !isVisible;
-      }, blinkInterval);
+  const alias = type === 'low' ? 'low' : 'high';
+  const loc = getBitmapLocationByAlias(alias);
 
-      this.displayTimers.set(sessionId, setTimeout(() => { clearInterval(blinker); this._endOverlay(session, sessionId); }, alertDuration + 120));
+  // Empezamos overlay ALERT
+  this._beginOverlay(sessionId, RENDER_LAYERS.ALERT, alertDuration);
+
+  if (mode === 'icon' && loc) {
+    // Sólo icono
+    const ok = await showBitmapByLocation(session, loc, { durationMs: alertDuration });
+    setTimeout(() => this._endOverlay(session, sessionId), alertDuration + 120);
+    return;
+  }
+
+  if (mode === 'text' || !loc) {
+    // Sólo texto (o no hay BMP): parpadeo
+    const blink = 600;
+    const start = Date.now();
+    const timer = setInterval(() => {
+      if (Date.now() - start > alertDuration) {
+        clearInterval(timer);
+        this._endOverlay(session, sessionId);
+        return;
+      }
+      const on = Math.floor((Date.now() - start) / blink) % 2 === 0;
+      this.showClamped(session, sessionId, `${on ? '[!]' : '[ ]'} ${baseText}`);
+    }, blink);
+    this.displayTimers.set(sessionId, setTimeout(() => { clearInterval(timer); this._endOverlay(session, sessionId); }, alertDuration + 120));
+    return;
+  }
+
+  // Modo mezclado: alternar icono y texto
+  const slice = 600; // ms por fase
+  const start = Date.now();
+  let phase = 0; // 0: icono, 1: texto
+  // mostramos rápido el icono al inicio
+  await showBitmapByLocation(session, loc, { durationMs: Math.min(slice, alertDuration) });
+
+  const inter = setInterval(async () => {
+    const elapsed = Date.now() - start;
+    if (elapsed > alertDuration) {
+      clearInterval(inter);
+      this._endOverlay(session, sessionId);
       return;
     }
+    phase = 1 - phase;
+    if (phase === 0) {
+      await showBitmapByLocation(session, loc, { durationMs: Math.min(slice, alertDuration - elapsed) });
+    } else {
+      this.showClamped(session, sessionId, baseText);
+    }
+  }, slice);
 
-    // 3) Si BMP ok: ocultar al acabar
-    setTimeout(() => this._endOverlay(session, sessionId), alertDuration + 120);
+  this.displayTimers.set(sessionId, setTimeout(() => { clearInterval(inter); this._endOverlay(session, sessionId); }, alertDuration + 120));
 
-    // (Opcional) refrescar HUD tras la alerta:
-    setTimeout(async () => {
-      try {
-        await this.showGlucoseTemporarily(session, sessionId, (settings.display_duration_ms || 5000), settings);
-      } catch {}
-    }, alertDuration + 180);
-  }
+  // Opcional: refresco HUD al terminar
+  setTimeout(async () => {
+    try { await this.showGlucoseTemporarily(session, sessionId, (settings.display_duration_ms || 5000), settings); } catch {}
+  }, alertDuration + 180);
+}
 
   /* ---------- MIRA tool ---------- */
   async onToolCall(data) {
