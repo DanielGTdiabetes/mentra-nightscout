@@ -57,11 +57,7 @@ class NightscoutMentraApp extends AppServer {
     this._sessionLocale = new Map();    // cache locale/tz por sesión
     this._bitmapCache = new Map();      // nombre.bmp (lowercase) -> hex
     this._activeBitmapAnimation = new Map(); // sessionId -> controller
-  
-    this._bitmapCache = this._bitmapCache || new Map();
-
-    this._activeBitmapAnimation = this._activeBitmapAnimation || new Map();
-}
+  }
 
   /* ---------- helpers ---------- */
   __delay(ms) { return new Promise(res => setTimeout(res, ms)); }
@@ -342,7 +338,7 @@ class NightscoutMentraApp extends AppServer {
     const b = this._getLocaleBundle(sessionId || 'default', settings);
     const readingTime = new Date(data.date);
     const timeStr = readingTime.toLocaleTimeString(b.locale, { timeZone: b.tz, hour: '2-digit', minute: '2-digit', hour12: false });
-    const minutesAgo = Math.max(0, Math.floor((Date.now() - data.date) / 60000));
+    const minutesAgo = Math.floor((Date.now() - data.date) / 60000);
     const timeAgo = minutesAgo <= 1 ? (b.lang === 'es' ? 'ahora' : 'now') : (b.lang === 'es' ? `hace ${minutesAgo}m` : `${minutesAgo}m ago`);
     return `${display} ${settings.units || UNITS.MGDL} ${trend}\n${timeStr} (${timeAgo})`;
   }
@@ -372,7 +368,7 @@ class NightscoutMentraApp extends AppServer {
     let cli = this._http.get(sessionId);
     const baseRaw = (settings.nightscoutUrl || '').trim();
     if (!baseRaw) return null;
-    const base = /^https?:\/\//i.test(baseRaw) ? baseRaw : ('https://' + baseRaw);
+    const base = baseRaw.startsWith('http') ? baseRaw : ('https://' + baseRaw);
     const baseURL = base.replace(/\/$/, '');
     if (!cli || cli.defaults.baseURL !== baseURL || cli.defaults.params?.token !== settings.nightscoutToken){
       cli = axios.create({
@@ -718,74 +714,74 @@ class NightscoutMentraApp extends AppServer {
 
   /* ---------- bitmap helpers ---------- */
   async _ensureBitmapsLoaded() {
-  if (this._bitmapCache?.size) return true;
+    if (this._bitmapCache.size) return true;
+    console.log('🔍 Buscando bitmaps...');
+    const tried = [];
+    const candidates = [
+      path.resolve(process.cwd(), 'assets', 'bitmaps'),
+      path.resolve(__dirname, 'assets', 'bitmaps'),
+      path.resolve(__dirname, '..', 'assets', 'bitmaps'),
+      path.resolve(__dirname, '..', '..', 'assets', 'bitmaps'),
+    ];
+    console.log('📁 Directorios candidatos:', candidates);
 
-  this._bitmapCache = this._bitmapCache || new Map();
-  const tried = [];
-  const candidates = [
-    path.resolve(process.cwd(), 'assets', 'bitmaps'),
-    path.resolve(__dirname, 'assets', 'bitmaps'),
-    path.resolve(__dirname, '.', 'assets', 'bitmaps'),
-    path.resolve(__dirname, '..', 'assets', 'bitmaps'),
-  ];
-  console.log('📁 Directorios candidatos:', candidates);
-
-  for (const baseDir of candidates) {
-    tried.push(baseDir);
-    try {
-      console.log(`🔍 Explorando: ${baseDir}`);
-      const entries = await fs.readdir(baseDir);
-      const bmpFiles = entries.filter(f => f.toLowerCase().endsWith('.bmp'));
-      console.log(`📄 Archivos BMP encontrados:`, bmpFiles);
-
-      for (const f of bmpFiles) {
-        const full = path.join(baseDir, f);
-        try {
-          let hex = null;
-          if (BitmapUtils?.loadBmpAsHex) {
-            hex = await BitmapUtils.loadBmpAsHex(full);
-          } else {
-            const buffer = await fs.readFile(full);
-            if (!validateBmpBasic(buffer)) {
-              console.log(`❌ ${f} no es un BMP válido (signature/header)`);
-              continue;
+    for (const baseDir of candidates) {
+      tried.push(baseDir);
+      try {
+        console.log(`🔍 Explorando: ${baseDir}`);
+        const entries = await fs.readdir(baseDir);
+        const bmpFiles = entries.filter(f => f.toLowerCase().endsWith('.bmp'));
+        console.log(`📄 Archivos BMP encontrados:`, bmpFiles);
+        for (const f of bmpFiles) {
+          const full = path.join(baseDir, f);
+          try {
+            let hex = null;
+            if (BitmapUtils && typeof BitmapUtils.loadBmpAsHex === 'function') {
+              // ✅ Usa loader oficial del SDK
+              hex = await BitmapUtils.loadBmpAsHex(full);
+            } else {
+              // Fallback: leer fichero y convertir a hex crudo
+              const buffer = await fs.readFile(full);
+              if (buffer.length >= 54 && buffer.toString('ascii', 0, 2) === 'BM') {
+                hex = buffer.toString('hex');
+              }
             }
-            hex = buffer.toString('hex');
-          }
+            if (!hex) continue;
 
-          let ok = !!hex;
-          if (ok && BitmapUtils?.validateBmpHex) {
-            try {
-              const v = await BitmapUtils.validateBmpHex(hex);
-              ok = v && v.isValid !== false;
-              console.log(`🔍 Validación SDK ${f}:`, v);
-            } catch (e) {
-              console.log(`⚠️ Validación SDK falló para ${f}:`, e.message);
+            // Validación SDK si está disponible
+            let isValid = true;
+            if (BitmapUtils && typeof BitmapUtils.validateBmpHex === 'function') {
+              try {
+                const v = await BitmapUtils.validateBmpHex(hex);
+                isValid = v && (v.isValid !== false);
+                console.log(`🔍 Validación SDK ${f}:`, v);
+              } catch (e) {
+                console.log(`⚠️ Validación SDK falló para ${f}:`, e.message);
+              }
             }
-          }
 
-          if (ok) {
-            this._bitmapCache.set(f.toLowerCase(), hex);
-            console.log(`✅ ${f} cacheado`);
-          } else {
-            console.log(`❌ ${f} no válido, omitido`);
+            if (isValid) {
+              this._bitmapCache.set(f.toLowerCase(), hex);
+              console.log(`✅ ${f} añadido al cache`);
+            } else {
+              console.log(`❌ ${f} no válido, omitiendo`);
+            }
+          } catch (e) {
+            console.log(`❌ Error cargando ${f}:`, e.message);
           }
-        } catch (e) {
-          console.log(`❌ Error cargando ${f}:`, e.message);
         }
+        if (this._bitmapCache.size > 0) break;
+      } catch (e) {
+        console.log(`❌ Error explorando ${baseDir}:`, e.message);
       }
-
-      if (this._bitmapCache.size > 0) break;
-    } catch (e) {
-      console.log(`❌ Error explorando ${baseDir}:`, e.message);
     }
-  }
-
-  console.log(`📊 Cache final: ${this._bitmapCache.size} bitmaps`);
-  if (!this._bitmapCache.size) console.warn('⚠️ No BMPs loaded. Tried:', tried);
-  return this._bitmapCache.size > 0;
-}
-
+    console.log(`📊 Cache final: ${this._bitmapCache.size} bitmaps cargados`);
+    console.log(`📋 Claves en cache:`, Array.from(this._bitmapCache.keys()));
+    if (!this._bitmapCache.size) {
+      console.warn('⚠️ No BMPs loaded. Tried:', tried);
+    }
+    return this._bitmapCache.size > 0;
+  };
     
    
     
@@ -866,69 +862,6 @@ class NightscoutMentraApp extends AppServer {
   async _playAlertBitmap(session, sessionId, type, intervalMs, durationMs) {
     try {
       console.log(`🎬 Intentando animación bitmap para ${type}...`);
-      const ok = await this._ensureBitmapsLoaded();
-      if (!ok) return false;
-
-      // Evita superposición con HUD de texto
-      this._stopActiveAnimation(sessionId);
-      try { session.layouts.clearView?.(); } catch(_) {}
-      try { session.layouts.showTextWall(''); } catch(_) {}
-      this._lastShownText.delete(sessionId);
-
-      const pickHex = (...names) => {
-        for (const n of names) { const h = this._getBitmapHex(n); if (h) return h; }
-        return null;
-      };
-      const bell    = pickHex('alert-bell-576x100.bmp','alert-bell-526x100.bmp','alert-bell.bmp');
-      const lowBmp  = pickHex('alert-low-576x100.bmp','alert-low-526x100.bmp','alert-low.bmp');
-      const highBmp = pickHex('alert-high-576x100.bmp','alert-high-526x100.bmp','alert-high.bmp');
-      const pick    = type === 'low' ? lowBmp : highBmp;
-
-      const frames = [];
-      if (bell && pick) frames.push(bell, pick);
-      else if (pick)   frames.push(pick);
-      else if (bell)   frames.push(bell);
-      if (!frames.length) { console.log('❌ Sin frames'); return false; }
-
-      const L = session.layouts;
-      const speed = Math.max(200, intervalMs || 600);
-      const total = Math.max(1000, durationMs || 15000) + 80;
-
-      if (typeof L.showBitmapAnimation === 'function') {
-        const controller = L.showBitmapAnimation(frames, speed, true);
-        this._activeBitmapAnimation.set(sessionId, controller);
-        setTimeout(() => {
-          try { controller?.stop?.(); } catch(_) {}
-          this._activeBitmapAnimation.delete(sessionId);
-          this.hideDisplay(session, sessionId);
-        }, total);
-        return true;
-      }
-
-      const showHex = L.showBitmapHex || L.showBitmap || L.showImageHex;
-      if (typeof showHex !== 'function') {
-        console.log('❌ Layout no soporta bitmaps');
-        return false;
-      }
-      let i = 0;
-      const tick = () => {
-        try { showHex.call(L, frames[i]); } catch (e) { console.log('❌ pintar frame:', e.message); }
-        i = (i + 1) % frames.length;
-      };
-      tick();
-      const handle = setInterval(tick, speed);
-      this._activeBitmapAnimation.set(sessionId, { stop: () => clearInterval(handle) });
-      setTimeout(() => {
-        try { clearInterval(handle); } catch(_) {}
-        this._activeBitmapAnimation.delete(sessionId);
-        this.hideDisplay(session, sessionId);
-      }, total);
-      return true;
-    } catch(e) { 
-      console.log(`❌ Error en animación bitmap:`, e.message);
-      return false; 
-    }
-  }...`);
       const ok = await this._ensureBitmapsLoaded();
       console.log(`📊 Bitmaps cargados: ${ok}`);
       if (!ok) return false;
