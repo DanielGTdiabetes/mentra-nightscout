@@ -15,6 +15,7 @@
 require('dotenv').config();
 const { AppServer } = require('@mentra/sdk');
 const axios = require('axios');
+const BITMAPS = require("./bitmaps");
 
 // Bitmaps externos (no tocar servidor si faltan; fallback a texto)
 let loadAllBitmaps = null, getBitmap = null, hasBitmap = null;
