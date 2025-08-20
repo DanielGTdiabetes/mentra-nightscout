@@ -27,7 +27,6 @@ try {
   hasBitmap = () => false;
 }
 
-
 /* ---------- SHIM: compatibilidad SDK ---------- */
 if (typeof Object.prototype.updateSettingsForTesting !== 'function') {
   Object.defineProperty(Object.prototype, 'updateSettingsForTesting', {
@@ -99,9 +98,10 @@ class NightscoutMentraApp extends AppServer {
   /* ---------- lectura de NS ---------- */
   async getGlucoseData(settings, sessionId) {
     const http = this._getHttp(sessionId);
-    const base = String(settings.nightscoutUrl || '').replace(/\/+$/, '');
+    const base = String(settings.nightscoutUrl || DEFAULTS.nightscoutUrl || '').replace(/\/+$/, '');
     if (!base || !isValidUrl(base)) throw new Error('Nightscout URL inválida');
-    const token = settings.nightscoutToken ? `?token=${encodeURIComponent(settings.nightscoutToken)}` : '';
+    const tokenStr = settings.nightscoutToken || DEFAULTS.nightscoutToken || '';
+    const token = tokenStr ? `?token=${encodeURIComponent(tokenStr)}` : '?';
     const url = `${base}/api/v1/entries.json${token}&count=1`;
     const { data } = await http.get(url);
     if (!Array.isArray(data) || !data[0]) throw new Error('Sin datos NS');
@@ -190,8 +190,8 @@ class NightscoutMentraApp extends AppServer {
         : (this.toBool(kv.show_tir_bar) || this.toBool(kv.show_range_bar));
 
       return {
-        nightscoutUrl: String(kv.nightscout_url || '').trim() || '',
-        nightscoutToken: String(kv.nightscout_token || '').trim() || '',
+        nightscoutUrl: String(kv.nightscout_url || '').trim() || DEFAULTS.nightscoutUrl,
+        nightscoutToken: String(kv.nightscout_token || '').trim() || DEFAULTS.nightscoutToken,
         updateInterval: ui,
         low_alert_mg: this.validateSlicerValue(kv.low_alert_mg, 50, 120, 70),
         high_alert_mg: this.validateSlicerValue(kv.high_alert_mg, 180, 400, 250),
@@ -227,7 +227,7 @@ class NightscoutMentraApp extends AppServer {
     } catch (e) {
       console.error('Error leyendo settings:', e);
       return {
-        nightscoutUrl: '', nightscoutToken: '',
+        nightscoutUrl: DEFAULTS.nightscoutUrl, nightscoutToken: DEFAULTS.nightscoutToken,
         updateInterval: 5,
         low_alert_mg: 70, high_alert_mg: 250,
         low_alert_mmol: 3.9, high_alert_mmol: 13.9,
@@ -267,8 +267,8 @@ class NightscoutMentraApp extends AppServer {
       : (this.toBool(o.show_tir_bar) || this.toBool(o.show_range_bar));
 
     return {
-      nightscoutUrl: String(o.nightscout_url || '').trim() || '',
-      nightscoutToken: String(o.nightscout_token || '').trim() || '',
+      nightscoutUrl: String(o.nightscout_url || '').trim() || DEFAULTS.nightscoutUrl,
+      nightscoutToken: String(o.nightscout_token || '').trim() || DEFAULTS.nightscoutToken,
       updateInterval: ui,
       low_alert_mg: this.validateSlicerValue(o.low_alert_mg, 50, 120, 70),
       high_alert_mg: this.validateSlicerValue(o.high_alert_mg, 180, 400, 250),
@@ -302,7 +302,6 @@ class NightscoutMentraApp extends AppServer {
       debug_boot_bitmap: String(o.debug_boot_bitmap || '').trim()
     };
   }
-
   /* ---------- UI helpers ---------- */
   convertToDisplay(mgdlValue, targetUnit) {
     return targetUnit === UNITS.MMOL ? (mgdlValue / 18).toFixed(1) : Math.round(mgdlValue);
@@ -330,6 +329,7 @@ class NightscoutMentraApp extends AppServer {
     for (let i = 0; i < 20; i++) s += (i < filled ? '█' : '░');
     return s;
   }
+
   async formatForG1(data, settings, sessionId) {
     const display = this.convertToDisplay(data.sgv, settings.units || UNITS.MGDL);
     const trend = this.getTrendArrow(data.direction);
@@ -359,8 +359,7 @@ class NightscoutMentraApp extends AppServer {
       if (!isHigh && !isLow) return base;
 
       const horizonMin = clamp(settings.prediction_horizon_min || 30, 15, 60);
-      // Pred naive: mantiene tendencia (solo demo). Mantener igual que versión estable.
-      const delta = 0; // reemplaza por tu función si la usas en productivo
+      const delta = 0; // placeholder seguro
       const predictedMg = clamp(mg + delta, 40, 400);
       const displayPred = this.convertToDisplay(predictedMg, unit);
       const t = (settings.language || 'en') === 'es'
@@ -486,8 +485,9 @@ class NightscoutMentraApp extends AppServer {
   async getRecentTreatments(settings, sessionId) {
     try {
       const http = this._getHttp(sessionId);
-      const base = String(settings.nightscoutUrl || '').replace(/\/+$/, '');
-      const token = settings.nightscoutToken ? `?token=${encodeURIComponent(settings.nightscoutToken)}` : '';
+      const base = String(settings.nightscoutUrl || DEFAULTS.nightscoutUrl || '').replace(/\/+$/, '');
+      const tokenStr = settings.nightscoutToken || DEFAULTS.nightscoutToken || '';
+      const token = tokenStr ? `?token=${encodeURIComponent(tokenStr)}` : '?';
       const url = `${base}/api/v1/treatments.json${token}&count=60`; // últimas ~60
       const { data } = await http.get(url);
       return Array.isArray(data) ? data : [];
@@ -517,7 +517,6 @@ class NightscoutMentraApp extends AppServer {
       return '';
     }
   }
-
   /* ---------- Loop principal ---------- */
   async showInitialAndHide(session, sessionId, settings) {
       // Debug boot bitmap (optional): low/high/bell for 5s
@@ -541,9 +540,6 @@ class NightscoutMentraApp extends AppServer {
       const formattedData = await this.formatForG1WithPrediction(data, settings, sessionId);
       if (settings.enable_advanced_mode) {
         const tirPct = tirRes.tirPct;
-        const tirLine = tirPct === null
-          ? (settings.language === 'es' ? 'TIR hoy: n/d' : 'TIR: n/a')
-          : (settings.language === 'es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
         const bar = !this.toBool(settings.show_tir_bar) || tirPct === null ? '' : this.buildTirBar(tirPct);
         let tLine = '';
         try { const sum = await this.getRecentTreatments(settings, sessionId); tLine = this.formatTreatmentsLine(sum, settings, sessionId); } catch {}
@@ -643,6 +639,7 @@ class NightscoutMentraApp extends AppServer {
   _markAlertFired(sessionId) {
     this.alertHistory.set(sessionId, { last: Date.now() });
   }
+
   async checkAndAlert(session, sessionId, data, settings) {
     if (!this.toBool(settings.alertsEnabled)) return;
 
@@ -758,18 +755,18 @@ class NightscoutMentraApp extends AppServer {
   /* ---------- Utilidades varias ---------- */
   mgToUnit(mg, unit) { return unit === UNITS.MMOL ? (mg / 18).toFixed(1) : Math.round(mg); }
 }
-
 /* ---------- Arranque servidor ---------- */
 const PORT = Number(process.env.PORT || 3000);
-const app = new NightscoutMentraApp({ packageName: process.env.PACKAGE_NAME || 'com.tucompania.nightscout-glucose' });
+const app = new NightscoutMentraApp({
+  packageName: process.env.PACKAGE_NAME || 'com.tucompania.nightscout-glucose',
+  apiKey: process.env.MENTRAOS_API_KEY || 'demo' // <-- NECESARIO para @mentra/sdk
+});
 
 app.listen(PORT, () => {
   console.log(`Health server listening on ${PORT} (pkg: ${process.env.PACKAGE_NAME || 'com.tucompania.nightscout-glucose'})`);
 });
-/* ---------- A partir de aquí: resto de helpers que ya traías en la versión estable ---------- */
-/* (Se deja intacto el cuerpo original de utilidades para cálculo de min/max, etc. Si tu index
-   traía más funciones auxiliares, permanecen igual; esta sección replica la estable que me pasaste) */
 
+/* ---------- Helpers extra (si tuvieras) ---------- */
 NightscoutMentraApp.prototype.findMinMaxOfDay = function(entries) {
   try {
     if (!Array.isArray(entries) || !entries.length) return null;
@@ -795,7 +792,5 @@ NightscoutMentraApp.prototype.formatMinMaxLine = function(minMax, settings) {
     return isEs ? `Mín/Máx: ${min}/${max} ${u}` : `Min/Max: ${min}/${max} ${u}`;
   } catch { return ''; }
 };
-
-/* (Si en tu código original existían más helpers para compatibilidad con el SDK, colócalos aquí) */
-/* ---------- Export (si fuese necesario en pruebas locales) ---------- */
+/* ---------- Export (opcional para pruebas locales) ---------- */
 module.exports = { NightscoutMentraApp };
