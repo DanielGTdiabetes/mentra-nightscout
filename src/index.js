@@ -21,19 +21,6 @@ const LAST_ICON_AT = new Map();                 // rate limiting por icono
 const MIN_ICON_GAP_MS = 10_000;                 // no repetir el mismo icono en <10s
 const ICON_DURATION_MS = 4_000;                 // ms visible el bitmap
 
-
-
-// Normaliza BMP: acepta HEX o BASE64 y devuelve HEX
-function toHexBitmap(data) {
-  if (!data) return data;
-  if (typeof data === 'string') {
-    // Si ya parece HEX (solo 0-9a-f y longitud par), devolver tal cual
-    if (/^[0-9a-f]+$/i.test(data) && data.length % 2 === 0) return data;
-    try { return Buffer.from(data, 'base64').toString('hex'); } catch (_) { return data; }
-  }
-  if (Buffer.isBuffer(data)) return data.toString('hex');
-  return data;
-}
 function canShowIcon(key) {
   const now = Date.now();
   const last = LAST_ICON_AT.get(key) || 0;
@@ -42,22 +29,9 @@ function canShowIcon(key) {
   return true;
 }
 
-
 async function showBitmapSafe(session, bmpHex, durationMs = ICON_DURATION_MS, fallbackText = null, options = {}) {
   try {
-    // Render en DASHBOARD y MAIN de forma explícita
-    await session.layouts.showBitmapView(toHexBitmap(bmpHex), { durationMs, location: ViewType.DASHBOARD, ...options });
-    await session.layouts.showBitmapView(toHexBitmap(bmpHex), { durationMs, location: ViewType.MAIN, ...options });
-  } catch (err) {
-    console.error("[bitmap] error al mostrar:", err?.message || err);
-    if (fallbackText) {
-      try {
-        await session.layouts.showTextWall(fallbackText, { durationMs });
-      } catch (_) {}
-    }
-  }
-}
-);
+    await session.layouts.showBitmapView(bmpHex, { durationMs, ...options });
   } catch (err) {
     console.error("[bitmap] error al mostrar:", err?.message || err);
     if (fallbackText) {
@@ -66,18 +40,11 @@ async function showBitmapSafe(session, bmpHex, durationMs = ICON_DURATION_MS, fa
   }
 }
 
-
 async function maybeShowAlertIcon(session, state) {
   if (!ICONS) return;
   if (state === "low" && canShowIcon("low")) {
     await showBitmapSafe(session, ICONS.low, ICON_DURATION_MS, "ALERTA LOW [!]");
   } else if (state === "high" && canShowIcon("high")) {
-    await showBitmapSafe(session, ICONS.high, ICON_DURATION_MS, "ALERTA HIGH [!]");
-  } else if ((state === "in" || state === "normal") && canShowIcon("sun") && ICONS.sun) {
-    await showBitmapSafe(session, ICONS.sun, ICON_DURATION_MS);
-  }
-}
-else if (state === "high" && canShowIcon("high")) {
     await showBitmapSafe(session, ICONS.high, ICON_DURATION_MS, "ALERTA HIGH [!]");
   }
 }
@@ -740,9 +707,9 @@ getAlertLimits(settings) {
         const hex = map[key];
         if (hex) {
           try {
-            console.log(`[debug] DEBUG_BOOT_BITMAP=${key} → mostrando 5s en DASHBOARD y MAIN`);
+            console.log(`[debug] DEBUG_BOOT_BITMAP=${key} → mostrando 5s en DASHBOARD`);
             await session.layouts.showBitmapView(hex, { durationMs: 5000, location: ViewType.DASHBOARD });
-            await session.layouts.showBitmapView(hex, { durationMs: 5000, location: ViewType.MAIN });
+            await new Promise(r => setTimeout(r, 5000));
           } catch (e) {
             console.warn('[debug] fallo mostrando DEBUG_BOOT_BITMAP:', e?.message || e);
           }
