@@ -6,20 +6,18 @@
  * Settings en segundos/minutos + toggle barra TIR
  * Mejora: cliente axios por sesión, debounce de settings, animación reforzada
  *
- * Bitmaps:
- *  - MODO POR DEFECTO: render por location (el SDK lee el BMP) → robusto
- *  - Opcional (si sabes que tus BMP son 100% válidos): BMP_MODE=hex para usar BitmapUtils.loadBmpAsHex + validate
- *  - Fallback automático a texto si el bitmap falla
- *  - Overlay de arranque con DEBUG_BOOT_BITMAP (low|high|bell|arrow-up|arrow-down|sun|cloud|rain)
+ * Bitmaps (robusto):
+ *  - Carga BMP leyendo bytes y enviando base64 a showBitmapView (evita errores "missing BM signature")
+ *  - Fallback a texto si falla
  */
 
 require('dotenv').config();
-const { AppServer, ViewType, BitmapUtils } = require('@mentra/sdk');
+const { AppServer, ViewType /*, BitmapUtils*/ } = require('@mentra/sdk');
 const axios = require('axios');
 const path = require('path');
 const fs = require('fs');
 
-/* ---------- BITMAPS: rutas por alias ---------- */
+/* ---------- BITMAPS: rutas por alias (opcionales) ---------- */
 const BITMAPS_DIR = path.join(process.cwd(), 'assets', 'bitmaps');
 const BMP_ALIAS_TO_FILE = {
   low:         'alert-low-526x100.bmp',
@@ -32,7 +30,6 @@ const BMP_ALIAS_TO_FILE = {
   rain:        'weather-rain-526x100.bmp',
 };
 const DEBUG_BOOT_BITMAP = (process.env.DEBUG_BOOT_BITMAP || '').toLowerCase().trim(); // low|high|bell|arrow-up|arrow-down|sun|cloud|rain
-const BITMAP_RENDER_MODE = (process.env.BMP_MODE || 'location').toLowerCase().trim(); // 'location' (default) | 'hex'
 
 function getBitmapLocationByAlias(alias) {
   const file = BMP_ALIAS_TO_FILE[alias];
@@ -53,60 +50,22 @@ function isLikelyBmp(location) {
   }
 }
 
-/** Muestra un bitmap desde ubicación de archivo con la estrategia seleccionada. Robusto y sin tumbar la app. */
+/** Muestra un bitmap leyendo bytes y enviando Base64 al SDK (robusto) */
 async function showBitmapByLocation(session, location, { view = ViewType.DASHBOARD, durationMs = 5000 } = {}) {
-  const mode = BITMAP_RENDER_MODE === 'hex' ? 'hex' : 'location';
-
-  // 0) Validaciones básicas
   if (!location) {
     try { session.layouts.showTextWall('(bitmap missing)', { view, durationMs }); } catch {}
     return false;
   }
-
-  // --- Estrategia 1: por location (DEFAULT) ---
-  if (mode === 'location') {
-    try {
-      session.layouts.showBitmapView("", { view, durationMs, location });
-      return true;
-    } catch (eLoc) {
-      session.logger?.warn?.('Bitmap location mode falló, fallback texto', { msg: eLoc?.message, location });
-      try { session.layouts.showTextWall('(bitmap error)', { view, durationMs }); } catch {}
-      return false;
-    }
-  }
-
-  // --- Estrategia 2: por HEX (opcional, sólo si activas BMP_MODE=hex) ---
   try {
-    if (!isLikelyBmp(location)) throw new Error('firma BM no encontrada');
-    const hex = await BitmapUtils.loadBmpAsHex(location);
-    const validation = BitmapUtils.validateBmpHex(hex);
-    if (validation && validation.isValid === false) {
-      throw new Error(`BMP inválido: ${Array.isArray(validation.errors) ? validation.errors.join(', ') : 'desconocido'}`);
-    }
-    try {
-      session.layouts.showBitmapView(hex, { view, durationMs });
-      return true;
-    } catch (eShow) {
-      session.logger?.debug?.('showBitmapView(hex) lanzó excepción; intento por location', { msg: eShow?.message, location });
-      try {
-        session.layouts.showBitmapView("", { view, durationMs, location });
-        return true;
-      } catch (e2) {
-        try { session.layouts.showTextWall('(bitmap error)', { view, durationMs }); } catch {}
-        session.logger?.warn?.('showBitmapByLocation falló (hex + location)', { eShow: eShow?.message, e2: e2?.message, location });
-        return false;
-      }
-    }
-  } catch (eHex) {
-    session.logger?.debug?.('HEX load/validate falló; intento por location directo', { msg: eHex?.message, location });
-    try {
-      session.layouts.showBitmapView("", { view, durationMs, location });
-      return true;
-    } catch (e2) {
-      try { session.layouts.showTextWall('(bitmap error)', { view, durationMs }); } catch {}
-      session.logger?.warn?.('showBitmapByLocation falló (sin hex, por location)', { e1: eHex?.message, e2: e2?.message, location });
-      return false;
-    }
+    if (!isLikelyBmp(location)) throw new Error('firma BM no encontrada (no es BMP válido)');
+    const buf = fs.readFileSync(location);
+    const b64 = buf.toString('base64');
+    session.layouts.showBitmapView(b64, { view, durationMs });
+    return true;
+  } catch (e) {
+    session.logger?.warn?.('Bitmap base64 mode falló, fallback texto', { msg: e?.message, location });
+    try { session.layouts.showTextWall('(bitmap error)', { view, durationMs }); } catch {}
+    return false;
   }
 }
 
@@ -424,6 +383,7 @@ class NightscoutMentraApp extends AppServer {
     const timeAgo = minutesAgo <= 1 ? (b.lang === 'es' ? 'ahora' : 'now') : (b.lang === 'es' ? `hace ${minutesAgo}m` : `${minutesAgo}m ago`);
     return `${display} ${settings.units || UNITS.MGDL} ${trend}\n${timeStr} (${timeAgo})`;
   }
+
   async formatForG1WithPrediction(data, settings, sessionId) {
     try {
       const base = await this.formatForG1(data, settings, sessionId);
@@ -749,11 +709,11 @@ class NightscoutMentraApp extends AppServer {
       }, 60 * 1000);
       this.dayWatchTimers.set(sessionId, dayWatch);
 
-      /* ---------- BOOT OVERLAY BMP (5s) ---------- */
+      /* ---------- BOOT OVERLAY BMP (5s opcional con DEBUG_BOOT_BITMAP) ---------- */
       if (DEBUG_BOOT_BITMAP) {
         const loc = getBitmapLocationByAlias(DEBUG_BOOT_BITMAP);
         if (loc) {
-          session.logger?.debug?.(`[debug] DEBUG_BOOT_BITMAP=${DEBUG_BOOT_BITMAP} (mode=${BITMAP_RENDER_MODE}) → mostrando 5s en DASHBOARD`);
+          session.logger?.debug?.(`[debug] DEBUG_BOOT_BITMAP=${DEBUG_BOOT_BITMAP} → mostrando 5s en DASHBOARD`);
           try {
             await showBitmapByLocation(session, loc, { view: ViewType.DASHBOARD, durationMs: 5000 });
           } catch (e) {
@@ -859,7 +819,7 @@ class NightscoutMentraApp extends AppServer {
       while (true){
         if (this._renderToken.get(sessionId) !== token) return;
         const t = (Date.now() - tStart) / totalMs;
-        const clamped = Math.max(0, Math.min(1, t));
+        the const clamped = Math.max(0, Math.min(1, t));
         const eased = ease(clamped);
         const filled = Math.min(target, Math.floor(eased * target));
         if (filled !== last){
@@ -909,7 +869,7 @@ class NightscoutMentraApp extends AppServer {
           sd.settings = settings;
           this.activeSessions.set(sessionId, sd);
 
-          // ECO al guardar ajustes
+          // ECO al guardar ajustes (con estado)
           try {
             let dNow = null;
             try { dNow = await this.getGlucoseData(settings, sessionId); await this.checkAlerts(session, sessionId, dNow, settings); } catch(_){}
@@ -1117,7 +1077,7 @@ class NightscoutMentraApp extends AppServer {
     }
   }
 
-  /** Intenta mostrar alerta con BMP (modo location por defecto); si falla, usa texto parpadeante */
+  /** Intenta mostrar alerta con BMP (base64); si falla, usa texto parpadeante */
   async triggerBitmapAlert(session, sessionId, data, settings, type) {
     const displayValue = this.convertToDisplay(data.sgv, settings.units || UNITS.MGDL);
     const unit = settings.units || UNITS.MGDL;
@@ -1129,7 +1089,7 @@ class NightscoutMentraApp extends AppServer {
     const baseText = `${msgs[lang][type]}\n${displayValue} ${unit}`;
     const alertDuration = settings.alert_duration_ms || 15000;
 
-    // 1) Intentar BMP si existe
+    // 1) Intentar BMP si existe alias
     const alias = type === 'low' ? 'low' : 'high';
     const loc = getBitmapLocationByAlias(alias);
     let ok = false;
@@ -1225,7 +1185,7 @@ server.start().catch(err => {
   console.error('⛔ Error iniciando servidor:', err);
   process.exit(1);
 });
-console.log('🚀 Nightscout MentraOS v2.13.1 — Hysteresis + ECO + Pred no-avanzado + Bitmaps (mode=' + (process.env.BMP_MODE || 'location') + ')');
+console.log('🚀 Nightscout MentraOS v2.13.1 — Hysteresis + ECO + Pred no-avanzado + Bitmaps(base64)');
 
 const KEEP_ALIVE_URL = process.env.RENDER_URL || 'https://mentra-nightscout.onrender.com';
 server.app.get('/health', (_, res) => res.json({
