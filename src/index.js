@@ -819,7 +819,7 @@ class NightscoutMentraApp extends AppServer {
       while (true){
         if (this._renderToken.get(sessionId) !== token) return;
         const t = (Date.now() - tStart) / totalMs;
-        the const clamped = Math.max(0, Math.min(1, t));
+        const clamped = Math.max(0, Math.min(1, t));
         const eased = ease(clamped);
         const filled = Math.min(target, Math.floor(eased * target));
         if (filled !== last){
