@@ -739,7 +739,7 @@ class NightscoutMentraApp extends AppServer {
       return;
     }
 
-    const alarmState = this.getAlarmEchoState(sessionId, glucoseData.sgv, settings);
+    let alarmState = this.getAlarmEchoState(sessionId, glucoseData.sgv, settings);
     const forcedAlert = settings.debug_force_alert;
     const isMmol = String(settings.units || '').toLowerCase().includes('mmol');
     const toDisp = (mgdl) => isMmol ? (mgdl/18).toFixed(1) : String(Math.round(mgdl));
@@ -931,4 +931,4 @@ if (process.env.DEBUG === 'true' && DEBUG_BOOT_BITMAP) {
   console.log(`💡 DEBUG: forzando bitmap de arranque con alias '${DEBUG_BOOT_BITMAP}'`);
 }
 
-nightscoutApp.listen();
+nightscoutApp.start();
