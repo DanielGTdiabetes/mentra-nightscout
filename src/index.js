@@ -21,7 +21,7 @@ const fs = require('fs/promises');
 const PACKAGE_NAME = process.env.PACKAGE_NAME || 'com.tucompania.nightscout-glucose';
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const MENTRAOS_API_KEY = process.env.MENTRAOS_API_KEY;
-const DEBUG_BOOT_BITMAP = (process.env.DEBUG_BOOT_BITMAP || '').toLowerCase(); // \"low\" | \"high\" | \"bell\" | \"\"
+const DEBUG_BOOT_BITMAP = (process.env.DEBUG_BOOT_BITMAP || '').toLowerCase(); // "low" | "high" | "bell" | ""
 
 if (!MENTRAOS_API_KEY) {
   console.error('⛔ MENTRAOS_API_KEY environment variable is required');
@@ -60,177 +60,89 @@ class NightscoutMentraApp extends AppServer {
   /* ---------- helpers ---------- */
   __delay(ms) { return new Promise(res => setTimeout(res, ms)); }
   __clamp01(x) { return x < 0 ? 0 : (x > 1 ? 1 : x); }
-  __easeInOutCubic(t) { return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; }
-  __getEasingFunction(type = 'cubic') {
-    if (type === 'smooth') return (t) => t * t * (3 - 2 * t);
-    if (type === 'linear') return (t) => t;
-    return (t) => this.__easeInOutCubic(t);
-  }
-  __barFromRatio(ratio, slots) {
-    const n = Math.round(this.__clamp01(ratio) * slots);
-    const filled = '¦'.repeat(n);
-    const empty = '·'.repeat(Math.max(0, slots - n));
-    return `[${filled}${empty}]`;
-  }
-  _scheduleHide(sessionId, ms) {
-    if (!sessionId) return;
-    if (this.displayTimers.has(sessionId)) clearTimeout(this.displayTimers.get(sessionId));
-    const t = setTimeout(() => this.hideDisplay(this.activeSessions.get(sessionId)?.session, sessionId), ms);
-    this.displayTimers.set(sessionId, t);
+  __easeInOutCubic(t) { return t < 0.5 ?
+    4 * t * t * t :
+    1 - Math.pow(-2 * t + 2, 3) / 2; }
+  __getEasingFunction(name) {
+    const n = (name || '').toLowerCase();
+    if (n.includes('linear')) return (t) => t;
+    if (n.includes('quad')) return (t) => t < 0.5 ? 2*t*t : 1 - Math.pow(-2*t+2,2)/2;
+    return this.__easeInOutCubic.bind(this);
   }
 
-  parseSlicerValue(val, fallback) {
-    const n = (typeof val === 'object' && val !== null) ? parseFloat(val.value) : parseFloat(val);
-    return Number.isFinite(n) ? n : fallback;
+  /* ---------- settings & HTTP ---------- */
+  toBool(v) {
+    if (typeof v === 'boolean') return v;
+    if (v == null) return false;
+    return ['1','true','yes','y','on'].includes(String(v).toLowerCase());
   }
-  validateSlicerValue(val, min, max, fallback) {
-    const v = this.parseSlicerValue(val, fallback);
-    return Number.isFinite(v) ? Math.max(min, Math.min(max, v)) : fallback;
+  parseSlicerValue(v, defVal = null) {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : defVal;
   }
-  toBool(x) { return (x === true || x === 'true' || x === 1 || x === '1'); }
-  normalizeMmol(x) {
-    const v = this.parseSlicerValue(x, null);
-    return (v !== null && Number.isFinite(v)) ? (v >= 30 ? v / 10 : v) : null;
+  validateSlicerValue(v, min, max, defVal) {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return defVal;
+    return Math.min(max, Math.max(min, n));
   }
-
-  /* ---------- alertas / límites ---------- */
-  getAlertLimits(settings) {
-    if (!settings) return { low: 70, high: 250 };
-    const lowMg = this.parseSlicerValue(settings.low_alert_mg, NaN);
-    const highMg = this.parseSlicerValue(settings.high_alert_mg, NaN);
-    if (Number.isFinite(lowMg) && Number.isFinite(highMg)) {
-      return { low: Math.round(lowMg), high: Math.round(highMg) };
+  normalizeMmol(v) {
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.round(n*10)/10 : null;
+  }
+  mgdlToUnit(mgdl, units) {
+    if (!Number.isFinite(mgdl)) return null;
+    if (units === UNITS.MMOL) return Math.round((mgdl / 18) * 10) / 10;
+    return mgdl;
+  }
+  formatRangeByUnits(lowMg, highMg, units) {
+    if (units === UNITS.MMOL) {
+      return `${(lowMg/18).toFixed(1)}–${(highMg/18).toFixed(1)} mmol/L`;
     }
-    const lowM = this.normalizeMmol(settings.low_alert_mmol) ?? 3.9;
-    const highM = this.normalizeMmol(settings.high_alert_mmol) ?? 13.9;
-    return { low: Math.round(lowM * 18), high: Math.round(highM * 18) };
+    return `${lowMg}–${highMg} mg/dL`;
   }
 
-  getHysteresisMg(settings) {
-    if (!settings) return 5;
-    const mg = this.validateSlicerValue(settings.alert_hysteresis_mg, 0, 50, NaN);
-    if (Number.isFinite(mg)) return mg;
-    const mmol = this.normalizeMmol(settings.alert_hysteresis_mmol);
-    if (Number.isFinite(mmol)) return Math.round(mmol * 18);
-    return 5; // por defecto ±5 mg/dL
+  _getLocaleBundle(sessionId, settingsOrNull) {
+    const cached = this._sessionLocale.get(sessionId);
+    if (cached) return cached;
+    const lang = (settingsOrNull && settingsOrNull.language) || 'en';
+    const tz = (settingsOrNull && settingsOrNull.timezone) || 'Europe/Madrid';
+    const locale = lang === 'es' ? 'es-ES' : 'en-GB';
+    const bundle = { tz, locale, lang };
+    this._sessionLocale.set(sessionId, bundle);
+    return bundle;
   }
 
-  /* ---------- lectura de settings ---------- */
+  _ensureHttp(sessionId, settings) {
+    if (!settings || !settings.nightscoutUrl) return null;
+    const key = `${sessionId}`;
+    let client = this._http.get(key);
+    if (!client) {
+      client = axios.create({
+        baseURL: settings.nightscoutUrl.replace(/\/+$/,''),
+        timeout: 8000,
+        headers: settings.nightscoutToken ? { 'API-SECRET': settings.nightscoutToken } : {}
+      });
+      this._http.set(key, client);
+    }
+    return client;
+  }
+
   async getUserSettings(session) {
-    try {
-      const keys = [
-        'nightscout_url', 'nightscout_token', 'update_interval',
-        'low_alert_mg', 'high_alert_mg', 'low_alert_mmol', 'high_alert_mmol',
-        'alerts_enabled', 'language', 'timezone', 'units',
-        'enable_head_up_display',
-        'display_duration_s', 'alert_duration_s', 'alert_cooldown_min',
-        'show_tir_bar', 'show_range_bar',
-        'display_duration_ms', 'alert_duration_ms', 'alert_cooldown_ms',
-        'enable_advanced_mode', 'advanced_mode_enabled',
-        'alert_hysteresis_mg', 'alert_hysteresis_mmol',
-        'tir_low_mg', 'tir_high_mg', 'tir_low_mmol', 'tir_high_mmol',
-        'time_in_range_low_mg', 'time_in_range_high_mg', 'time_in_range_low_mmol', 'time_in_range_high_mmol',
-        'prediction_horizon_min', 'prediction_horizon_mins',
-        'prediction_enable_robust', 'prediction_window_points',
-        'prediction_max_gap_min', 'prediction_min_slope_mg_per_min', 'prediction_min_r2',
-        'debug_force_alert'
-      ];
-      const vals = await Promise.all(keys.map(k => session.settings.get(k).catch(() => null)));
-      const kv = Object.fromEntries(keys.map((k, i) => [k, vals[i]]));
+    const all = await session.getAppSettings();
+    const o = Array.isArray(all) ? all.reduce((acc, it) => {
+      acc[it.key] = it.value;
+      return acc;
+    }, {}) : (all || {});
 
-      const uiMin = parseInt(kv.update_interval, 10);
-      const ui = Number.isFinite(uiMin) ? uiMin : 5;
+    const units = (o.units === 'mmol' || o.units === 'mmol/L') ? UNITS.MMOL : UNITS.MGDL;
+    const ui = this.validateSlicerValue(o.update_interval_min || o.update_interval_mins || o.update_interval, 1, 30, 5);
+    const displayMs = this.validateSlicerValue(o.display_duration_ms || o.headup_duration_ms, 1000, 15000, 5000);
+    const alertMs = this.validateSlicerValue(o.alert_duration_ms, 1000, 300000, 20000);
+    const coolMs  = this.validateSlicerValue(o.alert_cooldown_ms, 10000, 7200000, 600000);
 
-      const displayMs = Number.isFinite(this.parseSlicerValue(kv.display_duration_s, NaN))
-        ? Math.min(15, Math.max(1, this.parseSlicerValue(kv.display_duration_s))) * 1000
-        : this.validateSlicerValue(kv.display_duration_ms, 1000, 15000, 5000);
-
-      const alertMs = Number.isFinite(this.parseSlicerValue(kv.alert_duration_s, NaN))
-        ? Math.min(60, Math.max(2, this.parseSlicerValue(kv.alert_duration_s))) * 1000
-        : this.validateSlicerValue(kv.alert_duration_ms, 2000, 60000, 15000);
-
-      const coolMs = Number.isFinite(this.parseSlicerValue(kv.alert_cooldown_min, NaN))
-        ? Math.min(60, Math.max(1, this.parseSlicerValue(kv.alert_cooldown_min))) * 60 * 1000
-        : this.validateSlicerValue(kv.alert_cooldown_ms, 60000, 3600000, 600000);
-
-      const showTirBar = (kv.show_tir_bar == null && kv.show_range_bar == null)
-        ? true
-        : (this.toBool(kv.show_tir_bar) || this.toBool(kv.show_range_bar));
-
-      return {
-        nightscoutUrl: String(kv.nightscout_url || '').trim() || '',
-        nightscoutToken: String(kv.nightscout_token || '').trim() || '',
-        updateInterval: ui,
-        low_alert_mg: this.validateSlicerValue(kv.low_alert_mg, 50, 120, 70),
-        high_alert_mg: this.validateSlicerValue(kv.high_alert_mg, 180, 400, 250),
-        low_alert_mmol: this.normalizeMmol(kv.low_alert_mmol) ?? 3.9,
-        high_alert_mmol: this.normalizeMmol(kv.high_alert_mmol) ?? 13.9,
-        alertsEnabled: this.toBool(kv.alerts_enabled),
-        language: kv.language || 'en',
-        timezone: kv.timezone || null,
-        units: kv.units || UNITS.MGDL,
-        enable_head_up_display: this.toBool(kv.enable_head_up_display),
-        display_duration_ms: displayMs,
-        alert_duration_ms: alertMs,
-        alert_cooldown_ms: coolMs,
-        show_tir_bar: showTirBar,
-        enable_advanced_mode: this.toBool(kv.enable_advanced_mode) || this.toBool(kv.advanced_mode_enabled),
-        alert_hysteresis_mg: this.validateSlicerValue(kv.alert_hysteresis_mg, 0, 50, 5),
-        alert_hysteresis_mmol: this.normalizeMmol(kv.alert_hysteresis_mmol) ?? 0.3,
-        tir_low_mg: this.parseSlicerValue(kv.tir_low_mg, null),
-        tir_high_mg: this.parseSlicerValue(kv.tir_high_mg, null),
-        tir_low_mmol: this.normalizeMmol(kv.tir_low_mmol),
-        tir_high_mmol: this.normalizeMmol(kv.tir_high_mmol),
-        time_in_range_low_mg: this.parseSlicerValue(kv.time_in_range_low_mg, null),
-        time_in_range_high_mg: this.parseSlicerValue(kv.time_in_range_high_mg, null),
-        time_in_range_low_mmol: this.normalizeMmol(kv.time_in_range_low_mmol),
-        time_in_range_high_mmol: this.normalizeMmol(kv.time_in_range_high_mmol),
-        prediction_horizon_min: [15, 30, 60].includes(Number(kv.prediction_horizon_min || kv.prediction_horizon_mins))
-          ? Number(kv.prediction_horizon_min || kv.prediction_horizon_mins) : 30,
-        prediction_enable_robust: this.toBool(kv.prediction_enable_robust) !== false,
-        prediction_window_points: this.validateSlicerValue(kv.prediction_window_points, 4, 20, 12),
-        prediction_max_gap_min: this.validateSlicerValue(kv.prediction_max_gap_min, 2, 15, 10),
-        prediction_min_slope_mg_per_min: this.validateSlicerValue(kv.prediction_min_slope_mg_per_min, 0, 5, 0.25),
-        prediction_min_r2: this.validateSlicerValue(kv.prediction_min_r2, 0, 1, 0.35),
-        debug_force_alert: (typeof kv.debug_force_alert === 'string' ? kv.debug_force_alert : null),
-      };
-    } catch (e) {
-      console.error('Error leyendo settings:', e);
-      return {
-        nightscoutUrl: '', nightscoutToken: '',
-        updateInterval: 5,
-        low_alert_mg: 70, high_alert_mg: 250,
-        low_alert_mmol: 3.9, high_alert_mmol: 13.9,
-        alertsEnabled: true, language: 'en', timezone: null, units: UNITS.MGDL,
-        enable_head_up_display: false,
-        display_duration_ms: 5000, alert_duration_ms: 15000, alert_cooldown_ms: 600000,
-        show_tir_bar: true,
-        enable_advanced_mode: false,
-        alert_hysteresis_mg: 5, alert_hysteresis_mmol: 0.3,
-        prediction_horizon_min: 30,
-        debug_force_alert: null
-      };
-    }
-  }
-
-  parseSettingsFromArray(arr) {
-    const o = {};
-    (arr || []).forEach(s => (o[s.key] = s.value));
-    const units = o.units || UNITS.MGDL;
-    const uiMin = parseInt(o.update_interval, 10);
-    const ui = Number.isFinite(uiMin) ? uiMin : 5;
-
-    const displayMs = Number.isFinite(this.parseSlicerValue(o.display_duration_s, NaN))
-      ? Math.min(15, Math.max(1, this.parseSlicerValue(o.display_duration_s))) * 1000
-      : this.validateSlicerValue(o.display_duration_ms, 1000, 15000, 5000);
-
-    const alertMs = Number.isFinite(this.parseSlicerValue(o.alert_duration_s, NaN))
-      ? Math.min(60, Math.max(2, this.parseSlicerValue(o.alert_duration_s))) * 1000
-      : this.validateSlicerValue(o.alert_duration_ms, 2000, 60000, 15000);
-
-    const coolMs = Number.isFinite(this.parseSlicerValue(o.alert_cooldown_min, NaN))
-      ? Math.min(60, Math.max(1, this.parseSlicerValue(o.alert_cooldown_min))) * 60 * 1000
-      : this.validateSlicerValue(o.alert_cooldown_ms, 60000, 3600000, 600000);
+    // 🔧 Por defecto, si no llega el toggle, lo dejamos ACTIVADO para evitar pantalla en negro.
+    const rawHeadUp = o.enable_head_up_display;
+    const headUpEnabled = (rawHeadUp == null) ? true : this.toBool(rawHeadUp);
 
     const showTirBar = (o.show_tir_bar == null && o.show_range_bar == null)
       ? true
@@ -248,7 +160,7 @@ class NightscoutMentraApp extends AppServer {
       language: o.language || 'en',
       timezone: o.timezone || null,
       units,
-      enable_head_up_display: this.toBool(o.enable_head_up_display),
+      enable_head_up_display: headUpEnabled,
       display_duration_ms: displayMs,
       alert_duration_ms: alertMs,
       alert_cooldown_ms: coolMs,
@@ -278,304 +190,142 @@ class NightscoutMentraApp extends AppServer {
   /* ---------- UI helpers ---------- */
   convertToDisplay(mgdlValue, targetUnit) {
     if (!Number.isFinite(mgdlValue)) return 'N/A';
-    return targetUnit === UNITS.MMOL ? (mgdlValue / 18).toFixed(1) : Math.round(mgdlValue);
+    return targetUnit === UNITS.MMOL ?
+      (Math.round((mgdlValue/18)*10)/10).toFixed(1) :
+      String(Math.round(mgdlValue));
   }
-  formatRangeByUnits(lowMgdl, highMgdl, units) {
-    if (!Number.isFinite(lowMgdl) || !Number.isFinite(highMgdl)) return 'N/A';
-    const isMmol = String(units || '').toLowerCase().includes('mmol');
-    if (isMmol) {
-      const low = (lowMgdl / 18).toFixed(1);
-      const high = (highMgdl / 18).toFixed(1);
-      return `${low}-${high} mmol/L`;
-    }
-    return `${Math.round(lowMgdl)}-${Math.round(highMgdl)} mg/dL`;
-  }
-  getTrendArrow(dir) {
-    const map = {
-      DoubleUp: '↑↑', SingleUp: '↑', FortyFiveUp: '↗',
-      Flat: '→',
-      FortyFiveDown: '↘', SingleDown: '↓', DoubleDown: '↓↓',
-      NONE: '-', 'NOT COMPUTABLE': '?'
-    };
-    return map[dir] || '?';
-  }
-  getLanguageSettings(settings) {
-    const langMap = {
-      es: { locale: 'es-ES', timezone: 'Europe/Madrid' },
-      en: { locale: 'en-US', timezone: 'America/New_York' }
-    };
-    return langMap[settings.language] || langMap.en;
-  }
-  validateTimezone(tz) {
-    const valid = [
-      'Europe/Madrid', 'Atlantic/Canary', 'Europe/London', 'Europe/Paris',
-      'Europe/Berlin', 'Europe/Rome', 'America/New_York', 'America/Chicago',
-      'America/Los_Angeles', 'America/Mexico_City', 'America/Argentina/Buenos_Aires',
-      'America/Sao_Paulo', 'Asia/Tokyo', 'Australia/Sydney', 'UTC'
-    ];
-    return valid.includes(tz) ? tz : 'UTC';
-  }
-  _getLocaleBundle(sessionId, settings) {
-    if (!sessionId || !settings) return { lang: 'en', locale: 'en-US', tz: 'UTC' };
-    const cached = this._sessionLocale.get(sessionId);
-    if (cached && cached.lang === settings.language && cached.tz === (settings.timezone || null)) return cached;
-    const langSettings = this.getLanguageSettings(settings);
-    const tz = settings.timezone ? this.validateTimezone(settings.timezone) : langSettings.timezone;
-    const b = { lang: settings.language || 'en', locale: langSettings.locale, tz };
-    this._sessionLocale.set(sessionId, b);
-    return b;
+  trendToArrow(dir) {
+    const d = String(dir||'').toUpperCase();
+    if (['DOUBLEUP','UPUP'].includes(d)) return '↑↑';
+    if (['SINGLEUP','UP'].includes(d)) return '↑';
+    if (['FORTYFIVEUP'].includes(d)) return '↗';
+    if (['FLAT','NONE'].includes(d)) return '→';
+    if (['FORTYFIVEDOWN'].includes(d)) return '↘';
+    if (['SINGLEDOWN','DOWN'].includes(d)) return '↓';
+    if (['DOUBLEDOWN','DOWNDOWN'].includes(d)) return '↓↓';
+    return '·';
   }
 
-  async formatForG1(data, settings, sessionId) {
-    if (!data || !settings || !sessionId) return 'Error: datos incompletos';
-    const display = this.convertToDisplay(data.sgv, settings.units || UNITS.MGDL);
-    const trend = this.getTrendArrow(data.direction);
-    const b = this._getLocaleBundle(sessionId, settings);
-    const readingTime = new Date(data.date);
-    const timeStr = readingTime.toLocaleTimeString(b.locale, { timeZone: b.tz, hour: '2-digit', minute: '2-digit', hour12: false });
-    const minutesAgo = Math.max(0, Math.floor((Date.now() - data.date) / 60000));
-    const timeAgo = minutesAgo <= 1 ? (b.lang === 'es' ? 'ahora' : 'now') : (b.lang === 'es' ? `hace ${minutesAgo}m` : `${minutesAgo}m ago`);
-    return `${display} ${settings.units || UNITS.MGDL} ${trend}\n${timeStr} (${timeAgo})`;
-  }
-
-  async formatForG1WithPrediction(data, settings, sessionId) {
-    try {
-      const base = await this.formatForG1(data, settings, sessionId);
-      const predShort = settings.enable_advanced_mode
-        ? await this.buildPredictionShort(settings, sessionId, null, null)
-        : await this.buildPredictionShort(settings, sessionId, 60, 180);
-      if (!predShort) return base;
-      const parts = base.split('\n');
-      const l1 = parts[0] || '';
-      const l2 = (parts.length > 1 ? parts[1] : '');
-      const sep = ' · ';
-      const rest = parts.slice(2);
-      return `${l1}\n${l2}${sep}${predShort}${rest.length ? `\n${rest.join('\n')}` : ''}`;
-    } catch (error) {
-      console.error('Error in formatForG1WithPrediction, falling back:', error);
-      return await this.formatForG1(data, settings, sessionId);
-    }
-  }
-
-  /* ---------- Cliente HTTP por sesión ---------- */
-  _ensureHttp(sessionId, settings) {
-    if (!sessionId || !settings) return null;
-    let cli = this._http.get(sessionId);
-    const baseRaw = (settings.nightscoutUrl || '').trim();
-    if (!baseRaw) return null;
-    const base = /^https?:\/\//i.test(baseRaw) ? baseRaw : ('https://' + baseRaw);
-    const baseURL = base.replace(/\/$/, '');
-    if (!cli || cli.defaults.baseURL !== baseURL || cli.defaults.params?.token !== settings.nightscoutToken) {
-      cli = axios.create({
-        baseURL,
-        headers: { 'User-Agent': 'MentraOS-Nightscout/2.13.1' },
-        timeout: 10000,
-        params: settings.nightscoutToken ? { token: settings.nightscoutToken } : {}
-      });
-      this._http.set(sessionId, cli);
-    }
-    return cli;
-  }
-
-  async buildPredictionShort(settings, sessionId = 'default', lowOverrideMg = null, highOverrideMg = null) {
-    if (!settings || !sessionId) return null;
-    const lim = this.getAlertLimits(settings);
-    const lowThreshold = Number.isFinite(lowOverrideMg) ? lowOverrideMg : lim.low;
-    const highThreshold = Number.isFinite(highOverrideMg) ? highOverrideMg : lim.high;
-    const horizon = Number(settings.prediction_horizon_min || 30);
-    const maxSteps = Math.max(3, Math.min(12, Math.round(horizon / 5)));
-    const isMmol = String(settings.units || '').toLowerCase().includes('mmol');
-    const toDisp = (mgdl) => isMmol ? (mgdl / 18).toFixed(1) : String(Math.round(mgdl));
+  /* ---------- predicción simplificada ---------- */
+  async getRecentEntriesForPrediction(settings, sessionId, points=12) {
     const http = this._ensureHttp(sessionId, settings);
-    if (!http) return null;
-
-    try {
-      const { data } = await http.get(`/api/v1/devicestatus.json?count=1`).catch(() => ({ data: null }));
-      const ds = Array.isArray(data) ? data[0] : data;
-      const predBGs = ds && (ds.predBGs || ds?.openaps?.suggested?.predBGs || ds?.ar2?.predBGs);
-      if (predBGs) {
-        let series = predBGs.IOB || predBGs.COB || predBGs.UAM || predBGs.ZT || (Array.isArray(predBGs) ? predBGs : null);
-        if (Array.isArray(series) && series.length > 1) {
-          series = series.slice(0, maxSteps + 1);
-          const currentSgv = Number(series[0]);
-          if (Number.isFinite(currentSgv)) {
-            if (currentSgv > lowThreshold) {
-              for (let i = 1; i < series.length; i++) {
-                if (Number(series[i]) <= lowThreshold) return `↓${toDisp(lowThreshold)} @${i * 5}m`;
-              }
-            }
-            if (currentSgv < highThreshold) {
-              for (let i = 1; i < series.length; i++) {
-                if (Number(series[i]) >= highThreshold) return `↑${toDisp(highThreshold)} @${i * 5}m`;
-              }
-            }
-          }
-        }
-      }
-    } catch (_) {}
-
-    try {
-      const maxPoints = Number(settings.prediction_window_points || 12);
-      const maxGapMin = Number(settings.prediction_max_gap_min || 10);
-      const minSlopeCfg = Number(settings.prediction_min_slope_mg_per_min || 0.25);
-      const minR2Cfg = Number(settings.prediction_min_r2 || 0.35);
-      const robustEnabled = settings.prediction_enable_robust !== false;
-
-      const { data } = await http.get(`/api/v1/entries.json?count=${Math.max(4, Math.min(20, maxPoints * 2))}`).catch(() => ({ data: [] }));
-      const arr = Array.isArray(data) ? data : (data ? [data] : []);
-      const raw = arr
-        .map(r => ({
-          mgdl: Number(r.sgv ?? r.glucose),
-          ts: new Date(r.date || r.dateString).getTime()
-        }))
-        .filter(p => Number.isFinite(p.mgdl) && Number.isFinite(p.ts))
-        .sort((a, b) => a.ts - b.ts);
-
-      let seg = [];
-      for (let i = raw.length - 1; i >= 0; i--) {
-        if (seg.length === 0) { seg.unshift(raw[i]); continue; }
-        const head = seg[0];
-        const gapMin = (head.ts - raw[i].ts) / 60000;
-        if (gapMin <= maxGapMin) { seg.unshift(raw[i]); } else { break; }
-      }
-      if (seg.length > maxPoints) seg = seg.slice(seg.length - maxPoints);
-      if (seg.length >= 4) {
-        const last = seg[seg.length - 1];
-        const t0 = last.ts;
-        let xs = seg.map(p => (p.ts - t0) / 60000);
-        let ys = seg.map(p => p.mgdl);
-
-        const regress = (xv, yv) => {
-          const n = xv.length;
-          const meanX = xv.reduce((a, b) => a + b, 0) / n;
-          const meanY = yv.reduce((a, b) => a + b, 0) / n;
-          let num = 0, den = 0;
-          for (let i = 0; i < n; i++) {
-            const dx = xv[i] - meanX;
-            const dy = yv[i] - meanY;
-            num += dx * dy;
-            den += dx * dx;
-          }
-          const slope = den > 0 ? (num / den) : 0;
-          const intercept = meanY - slope * meanX;
-          let sse = 0, sst = 0;
-          for (let i = 0; i < n; i++) {
-            const pred = intercept + slope * xv[i];
-            const err = yv[i] - pred;
-            sse += err * err;
-            const dev = yv[i] - meanY;
-            sst += dev * dev;
-          }
-          const r2 = sst > 0 ? (1 - sse / sst) : 0;
-          const residuals = xv.map((x, i) => yv[i] - (intercept + slope * x));
-          const absRes = residuals.map(Math.abs).sort((a, b) => a - b);
-          const mid = Math.floor(absRes.length / 2);
-          const mad = absRes.length % 2 ? absRes[mid] : (absRes[mid - 1] + absRes[mid]) / 2;
-          return { slope, intercept, r2, residuals, mad, meanY };
-        };
-
-        let { slope, intercept, r2, residuals, mad } = regress(xs, ys);
-        const resThresh = Math.max(12, 2.5 * (mad || 0));
-        if (robustEnabled && resThresh > 0) {
-          const kept = [];
-          for (let i = 0; i < xs.length; i++) {
-            if (Math.abs(residuals[i]) <= resThresh) kept.push(i);
-          }
-          if (kept.length >= 4 && kept.length < xs.length) {
-            xs = kept.map(i => xs[i]);
-            ys = kept.map(i => ys[i]);
-            ({ slope, intercept, r2 } = regress(xs, ys));
-          }
-        }
-
-        const mgNow = last.mgdl;
-        const minSlope = minSlopeCfg;
-        const minR2 = minR2Cfg;
-        if (Math.abs(slope) >= minSlope && r2 >= minR2) {
-          if (slope < 0 && mgNow > lowThreshold) {
-            const minutes = (lowThreshold - mgNow) / slope;
-            if (minutes > 0 && minutes <= horizon) return `↓${toDisp(lowThreshold)} @${Math.round(minutes)}m`;
-          }
-          if (slope > 0 && mgNow < highThreshold) {
-            const minutes = (highThreshold - mgNow) / slope;
-            if (minutes > 0 && minutes <= horizon) return `↑${toDisp(highThreshold)} @${Math.round(minutes)}m`;
-          }
-        }
-      }
-    } catch (_) {}
-
-    try {
-      const { data } = await http.get(`/api/v1/entries.json?count=2`).catch(() => ({ data: [] }));
-      if (data && data.length >= 2) {
-        const last = data[0], prev = data[1];
-        const mgNow = Number(last.sgv ?? last.glucose);
-        const tNow = new Date(last.date || last.dateString).getTime();
-        const mgPrev = Number(prev.sgv ?? prev.glucose);
-        const tPrev = new Date(prev.date || prev.dateString).getTime();
-
-        if (Number.isFinite(mgNow) && Number.isFinite(mgPrev) && tNow > tPrev) {
-          const deltaMinutes = (tNow - tPrev) / 60000;
-          if (deltaMinutes > 0) {
-            const ratePerMin = (mgNow - mgPrev) / deltaMinutes;
-
-            if (ratePerMin < -0.4) {
-              const timeToLow = (lowThreshold - mgNow) / ratePerMin;
-              if (timeToLow > 0 && timeToLow <= horizon) return `↓${toDisp(lowThreshold)} @${Math.round(timeToLow)}m`;
-            }
-            if (ratePerMin > 0.4) {
-              const timeToHigh = (highThreshold - mgNow) / ratePerMin;
-              if (timeToHigh > 0 && timeToHigh <= horizon) return `↑${toDisp(highThreshold)} @${Math.round(timeToHigh)}m`;
-            }
-          }
-        }
-      }
-    } catch (_) {}
-
-    return null;
+    if (!http) throw new Error('URL no configurada');
+    const count = Math.max(4, Math.min(40, points));
+    const { data } = await http.get(`/api/v1/entries/sgv.json?count=${count}`).catch(()=>({data:[]}));
+    const arr = Array.isArray(data) ? data : (data ? [data] : []);
+    const pts = arr
+      .map(r => ({ v: Number(r.sgv ?? r.glucose), t: (typeof r.date === 'string' ? Date.parse(r.date) : r.date) }))
+      .filter(p => Number.isFinite(p.v) && p.t);
+    return pts.reverse(); // de más antiguo a más nuevo
   }
 
-  /* ---------- día local + TIR + tratamientos ---------- */
-  getLocalDayStr(ts, settings, sessionId = 'default') {
-    if (!ts || !settings) return '';
+  simpleLinearPrediction(pts, horizonMin=30, minSlope=0.25, minR2=0.35) {
+    if (!Array.isArray(pts) || pts.length < 4) return null;
+    const xs = [], ys = [];
+    const t0 = pts[0].t;
+    for (const p of pts) { xs.push((p.t - t0) / 60000); ys.push(p.v); }
+    const n = xs.length;
+    const sx = xs.reduce((a,b)=>a+b,0), sy = ys.reduce((a,b)=>a+b,0);
+    const sxx = xs.reduce((a,b)=>a+b*b,0), sxy = xs.reduce((a,b,i)=>a+xs[i]*ys[i],0);
+    const denom = (n*sxx - sx*sx);
+    if (Math.abs(denom) < 1e-6) return null;
+    const m = (n*sxy - sx*sy) / denom;
+    const b = (sy - m*sx) / n;
+
+    // R^2
+    const ymean = sy/n;
+    const ssTot = ys.reduce((a,y)=>a+(y-ymean)**2,0);
+    const ssRes = ys.reduce((a,y,i)=>a+(y-(m*xs[i]+b))**2,0);
+    const r2 = (ssTot <= 1e-6) ? 1 : 1 - ssRes/ssTot;
+
+    if (Math.abs(m) < minSlope || r2 < minR2) return null;
+
+    const yH = m * (xs[xs.length-1] + horizonMin) + b;
+    return { m, b, r2, yH };
+  }
+
+  async formatForG1WithPrediction(data, settings, sessionId='default') {
+    const { lang, tz } = this._getLocaleBundle(sessionId, settings);
+    const units = settings.units;
+    const vDisp = this.convertToDisplay(data.sgv, units);
+    const arrow = this.trendToArrow(data.direction);
+    const t = new Date(data.date).toLocaleTimeString(lang==='es'?'es-ES':'en-GB', {
+      timeZone: tz, hour:'2-digit', minute:'2-digit', hour12:false
+    });
+
+    let line1 = `${vDisp} ${units} ${arrow} @ ${t}`;
+
+    // predicción no-avanzada: sólo si cruza límites (≤60/≥180 mg/dL) o si hay modelo válido
+    let predStr = '';
+    try {
+      const pts = await this.getRecentEntriesForPrediction(settings, sessionId, settings.prediction_window_points);
+      const model = this.simpleLinearPrediction(pts, settings.prediction_horizon_min, settings.prediction_min_slope_mg_per_min, settings.prediction_min_r2);
+      if (model) {
+        const yH = model.yH;
+        const yDisp = this.convertToDisplay(yH, units);
+        predStr = lang === 'es' ? `Pred: ${yDisp} ${units} @${settings.prediction_horizon_min}m`
+                                : `Pred: ${yDisp} ${units} @${settings.prediction_horizon_min}m`;
+      } else {
+        const mg = data.sgv;
+        if (mg <= 60 || mg >= 180) {
+          const yDisp = this.convertToDisplay(mg, units);
+          predStr = lang === 'es' ? `Pred: ${yDisp} ${units} @${settings.prediction_horizon_min}m`
+                                  : `Pred: ${yDisp} ${units} @${settings.prediction_horizon_min}m`;
+        }
+      }
+    } catch (_) {}
+
+    return predStr ? `${line1}\n${predStr}` : line1;
+  }
+
+  /* ---------- TIR ---------- */
+  getAlertLimits(settings) {
+    if (!settings) return { low: 70, high: 180 };
+    if (settings.units === UNITS.MMOL) {
+      return {
+        low: Math.round((settings.low_alert_mmol ?? 3.9) * 18),
+        high: Math.round((settings.high_alert_mmol ?? 10) * 18)
+      };
+    }
+    return { low: settings.low_alert_mg ?? 70, high: settings.high_alert_mg ?? 180 };
+  }
+  getHysteresisMg(settings) {
+    if (!settings) return 5;
+    return settings.units === UNITS.MMOL
+      ? Math.round((settings.alert_hysteresis_mmol ?? 0.3) * 18)
+      : (settings.alert_hysteresis_mg ?? 5);
+  }
+
+  getLocalDayStr(ts, settings, sessionId='default') {
     const b = this._getLocaleBundle(sessionId, settings);
     return new Date(ts).toLocaleDateString(b.locale, { timeZone: b.tz });
   }
-  buildTirBar(tirPct) {
-    if (tirPct === null || !Number.isFinite(tirPct)) return '';
-    const blocks = Math.max(0, Math.min(20, Math.floor(tirPct / 5)));
-    return '¦'.repeat(blocks);
-  }
-  composeTirLines(settings, tirLine, bar, tLine) {
-    if (!settings || !tirLine) return '';
-    const labelBar = `${tirLine}${bar ? ' ' + bar : ''}`;
-    try {
-      let clean = (tLine || '')
-        .replace(/^CH\/Ins hoy: /, '')
-        .replace(/^Carbs\/Ins today: /, '')
-        .replace(/\s*[·•]\s*(Last|Últ):[\s\S]*$/i, '')
-        .replace(/\s*Last:[\s\S]*$/i, '')
-        .replace(/\s*Últ:[\s\S]*$/i, '')
-        .replace(/\s*\/\s*/g, '/')
-        .replace(/\s+/g, ' ')
-        .trim();
-      return clean ? `${labelBar}\n${clean}` : labelBar;
-    } catch { return labelBar; }
-  }
 
-  updateDailyTirState(sessionId, readingMgdl, readingTs, settings) {
-    if (!sessionId || !settings || !Number.isFinite(readingMgdl) || !readingTs) {
-      return { tirPct: null, total: 0 };
-    }
-    const range = this.getAlertLimits(settings);
-    const dayStr = this.getLocalDayStr(readingTs, settings, sessionId);
-    let st = this.dailyTirState.get(sessionId);
-    if (!st || st.dayStr !== dayStr) st = { dayStr, total: 0, inRange: 0 };
+  updateDailyTirState(sessionId, mgdl, ts, settings) {
+    const st = this.dailyTirState.get(sessionId) || { dayStr: this.getLocalDayStr(ts, settings, sessionId), total: 0, inRange: 0 };
+    const day = this.getLocalDayStr(ts, settings, sessionId);
+    if (st.dayStr !== day) { st.dayStr = day; st.total = 0; st.inRange = 0; }
     st.total += 1;
-    if (readingMgdl >= range.low && readingMgdl <= range.high) st.inRange += 1;
+    const lim = this.getAlertLimits(settings);
+    if (Number.isFinite(mgdl) && mgdl >= lim.low && mgdl <= lim.high) st.inRange += 1;
     this.dailyTirState.set(sessionId, st);
-    return { tirPct: st.total > 0 ? Math.round((st.inRange / st.total) * 100) : null, total: st.total };
+    const tirPct = (st.total > 0) ? Math.round((st.inRange / st.total) * 100) : null;
+    return { ...st, tirPct };
   }
 
+  __barFromRatio(r, slots=20) {
+    const n = Math.max(0, Math.min(slots, Math.round(r*slots)));
+    const filled = '█'.repeat(n);
+    const empty = '░'.repeat(slots-n);
+    return `[${filled}${empty}]`;
+  }
+
+  buildTirBar(pct) {
+    const p = Math.max(0, Math.min(100, Math.round(pct)));
+    return this.__barFromRatio(p/100, 20);
+  }
+
+  /* ---------- obtención de tratamientos ---------- */
   async getRecentTreatments(settings, hours = 'day', sessionId = 'default') {
     if (!settings || !sessionId) return null;
     try {
@@ -624,7 +374,8 @@ class NightscoutMentraApp extends AppServer {
       const parts = [];
       if (Number.isFinite(last.carbs)) parts.push(`${round1(last.carbs)}g`);
       if (Number.isFinite(last.insulin)) parts.push(`${round1(last.insulin)}U`);
-      lastStr = parts.length ? (lang === 'es' ? ` · Últ: ${parts.join(', ')} ${t}` : ` · Last: ${parts.join(', ')} ${t}`) : '';
+      lastStr = parts.length ?
+        (lang === 'es' ? ` · Últ: ${parts.join(', ')} ${t}` : ` · Last: ${parts.join(', ')} ${t}`) : '';
     }
     return lang === 'es'
       ? (label === 'hoy' ? `CH/Ins hoy: ${c}g / ${i}U${lastStr}` : `CH/Ins ${label}: ${c}g / ${i}U${lastStr}`)
@@ -810,18 +561,18 @@ class NightscoutMentraApp extends AppServer {
       };
 
       const bell = pickHex(
-  'alert-bell-576x100.bmp','alert-bell-526x100.bmp','alert-bell.bmp',
-  'alert_bell-576x100.bmp','alert_bell-526x100.bmp','alert_bell.bmp','bell.bmp'
-);
-const lowBmp = pickHex(
-  'alert-low-576x100.bmp','alert-low-526x100.bmp','alert-low.bmp',
-  'alert_low-576x100.bmp','alert_low-526x100.bmp','alert_low.bmp','low.bmp'
-);
-const highBmp = pickHex(
-  'alert-high-576x100.bmp','alert-high-526x100.bmp','alert-high.bmp',
-  'alert_high-576x100.bmp','alert_high-526x100.bmp','alert_high.bmp','high.bmp'
-);
-const pick = type === 'low' ? lowBmp : highBmp;
+        'alert-bell-576x100.bmp','alert-bell-526x100.bmp','alert-bell.bmp',
+        'alert_bell-576x100.bmp','alert_bell-526x100.bmp','alert_bell.bmp','bell.bmp'
+      );
+      const lowBmp = pickHex(
+        'alert-low-576x100.bmp','alert-low-526x100.bmp','alert-low.bmp',
+        'alert_low-576x100.bmp','alert_low-526x100.bmp','alert_low.bmp','low.bmp'
+      );
+      const highBmp = pickHex(
+        'alert-high-576x100.bmp','alert-high-526x100.bmp','alert-high.bmp',
+        'alert_high-576x100.bmp','alert_high-526x100.bmp','alert_high.bmp','high.bmp'
+      );
+      const pick = type === 'low' ? lowBmp : highBmp;
 
       const frames = [];
       if (bell && pick) frames.push(bell, pick);
@@ -900,6 +651,7 @@ const pick = type === 'low' ? lowBmp : highBmp;
 
       this.setupEventHandlers(session, sessionId, userId);
 
+      // Semilla TIR + watcher de cambio de día
       try {
         const entries = await this.getTodayEntries(settings, sessionId);
         const dayStr = this.getLocalDayStr(Date.now(), settings, sessionId);
@@ -979,6 +731,71 @@ const pick = type === 'low' ? lowBmp : highBmp;
     }
   }
 
+  _scheduleHide(sessionId, ms) {
+    if (this.displayTimers.has(sessionId)) clearTimeout(this.displayTimers.get(sessionId));
+    const t = setTimeout(() => {
+      const sd = this.activeSessions.get(sessionId);
+      if (!sd) return;
+      this.hideDisplay(sd.session, sessionId);
+    }, Math.max(500, ms|0));
+    this.displayTimers.set(sessionId, t);
+  }
+
+  async triggerAnimatedAlert(session, sessionId, data, settings, type) {
+    if (!session || !sessionId || !data || !settings || !type) return;
+    const baseText = await this.formatForG1WithPrediction(data, settings, sessionId);
+    const blinkInterval = 550;
+    const alertDuration = settings.alert_duration_ms || 20000;
+
+    try {
+      const shown = await this._playAlertBitmap(session, sessionId, type, blinkInterval, alertDuration);
+      if (shown) return;
+    } catch (_) {}
+
+    if (this.displayTimers.has(sessionId)) clearTimeout(this.displayTimers.get(sessionId));
+    const startTime = Date.now();
+    let isVisible = true;
+    const blinker = setInterval(() => {
+      if (Date.now() - startTime > alertDuration) {
+        clearInterval(blinker);
+        this.hideDisplay(session, sessionId);
+        return;
+      }
+      const symbol = isVisible ? '[!]' : '[ ]';
+      this.showClamped(session, sessionId, `${symbol} ${baseText}`);
+      isVisible = !isVisible;
+    }, blinkInterval);
+
+    this.displayTimers.set(sessionId, setTimeout(() => {
+      clearInterval(blinker);
+      this.hideDisplay(session, sessionId);
+    }, alertDuration));
+  }
+
+  /* ---------- util: estado eco de alarma (para ECO de ajustes) ---------- */
+  getAlarmEchoState(sessionId, mgdl, settings) {
+    try {
+      if (!settings) return null;
+      const latch = this.alertLatch.get(sessionId) || null;
+      if (latch) return latch;
+      if (!Number.isFinite(mgdl)) return null;
+      const lim = this.getAlertLimits(settings);
+      if (mgdl <= lim.low) return 'low';
+      if (mgdl >= lim.high) return 'high';
+      return null;
+    } catch (_) { return null; }
+  }
+
+  /* ---------- util: detectar cambio en límites de alerta ---------- */
+  alertLimitsChanged(oldSettings, newSettings) {
+    if (!oldSettings) return true;
+    const ol = this.getAlertLimits(oldSettings || {});
+    const nl = this.getAlertLimits(newSettings || {});
+    const oh = this.getHysteresisMg(oldSettings || {});
+    const nh = this.getHysteresisMg(newSettings || {});
+    return ol.low !== nl.low || ol.high !== nl.high || oh !== nh;
+  }
+
   async animateTIRFill(session, sessionId, s, headerText, tirPct, tLine = '', extraLine = '') {
     if (!session || !sessionId || !s || !headerText) return;
     try {
@@ -1037,7 +854,7 @@ const pick = type === 'low' ? lowBmp : highBmp;
       try {
         const bar = this.__barFromRatio((tirPct || 0) / 100, 20);
         const tirLine = tirPct == null ? (s.language === 'es' ? 'TIR hoy: n/d' : 'TIR: n/a') : (s.language === 'es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
-        const line2 = `${tirLine} ${bar}` + (tLine ? `\n${tLine}` : '');
+        const line2 = `${tirLine}${bar}` + (tLine ? `\n${tLine}` : '');
         const out = extraLine ? `${headerText}\n${line2}\n${extraLine}` : `${headerText}\n${line2}`;
         this.showClamped(session, sessionId, out);
       } catch {}
@@ -1078,20 +895,19 @@ const pick = type === 'low' ? lowBmp : highBmp;
           sd.settings = settings;
           this.activeSessions.set(sessionId, sd);
 
-// Forzado de alerta para pruebas: independiente de Nightscout
-try {
-  const dbg = String(settings.debug_force_alert || '').toLowerCase();
-  if (dbg === 'low' || dbg === 'high') {
-    let data;
-    try { data = await this.getGlucoseData(settings, sessionId); } catch (_) {
-      const lim = this.getAlertLimits(settings);
-      const fake = (dbg === 'low') ? (lim.low - 1) : (lim.high + 1);
-      data = { sgv: fake, date: Date.now(), direction: 'Flat' };
-    }
-    await this.triggerAnimatedAlert(session, sessionId, data, settings, dbg);
-  }
-} catch (_) {}
-
+          // Forzado de alerta para pruebas: independiente de Nightscout
+          try {
+            const dbg = String(settings.debug_force_alert || '').toLowerCase();
+            if (dbg === 'low' || dbg === 'high') {
+              let data;
+              try { data = await this.getGlucoseData(settings, sessionId); } catch (_) {
+                const lim = this.getAlertLimits(settings);
+                const fake = (dbg === 'low') ? (lim.low - 1) : (lim.high + 1);
+                data = { sgv: fake, date: Date.now(), direction: 'Flat' };
+              }
+              await this.triggerAnimatedAlert(session, sessionId, data, settings, dbg);
+            }
+          } catch (_) {}
 
           try {
             let dNow = null;
@@ -1150,6 +966,7 @@ try {
             const entries = await this.getTodayEntries(s, sessionId);
             const vals = entries.map(e => e.mgdl).filter(Number.isFinite);
             if (vals.length) {
+              // 🔧 FIX: .vals -> ...vals
               const min = Math.min(...vals), max = Math.max(...vals);
               const minDisp = this.convertToDisplay(min, s.units);
               const maxDisp = this.convertToDisplay(max, s.units);
@@ -1275,79 +1092,29 @@ try {
 
     const dbg = (settings.debug_force_alert || '').toLowerCase();
     let alertType = null;
-
-    if (mgdl <= limits.low || dbg === 'low') {
-      alertType = 'low';
-    } else if (mgdl >= limits.high || dbg === 'high') {
-      alertType = 'high';
+    if (dbg === 'low') alertType = 'low';
+    else if (dbg === 'high') alertType = 'high';
+    else {
+      if (mgdl <= limits.low) alertType = 'low';
+      else if (mgdl >= limits.high) alertType = 'high';
     }
 
-    if (alertType) {
-      this.alertHistory.set(sessionId, Date.now());
-      this.alertLatch.set(sessionId, alertType);
-      await this.triggerAnimatedAlert(session, sessionId, data, settings, alertType);
-      session.logger?.warn('Alert sent', { type: alertType, value: mgdl });
-    }
+    if (!alertType) return;
+
+    this.alertHistory.set(sessionId, Date.now());
+    this.alertLatch.set(sessionId, alertType);
+
+    await this.triggerAnimatedAlert(session, sessionId, data, settings, alertType);
   }
 
-  async triggerAnimatedAlert(session, sessionId, data, settings, type) {
-  if (!session || !sessionId || !data || !settings || !type) return;
-  const displayValue = this.convertToDisplay(data.sgv, settings.units || UNITS.MGDL);
-  const unit = settings.units || UNITS.MGDL;
-  const lang = settings.language || 'en';
-  const msgs = { en: { low: `LOW GLUCOSE!`, high: `HIGH GLUCOSE!` }, es: { low: `¡GLUCOSA BAJA!`, high: `¡GLUCOSA ALTA!` } };
-  const baseText = `${msgs[lang][type]}
-${displayValue} ${unit}`;
-  const alertDuration = settings.alert_duration_ms || 15000;
-  const blinkInterval = 600;
-
-  try {
-    const shown = await this._playAlertBitmap(session, sessionId, type, blinkInterval, alertDuration);
-    if (shown) return;
-  } catch (_) {}
-
-  if (this.displayTimers.has(sessionId)) clearTimeout(this.displayTimers.get(sessionId));
-  const startTime = Date.now();
-  let isVisible = true;
-  const blinker = setInterval(() => {
-    if (Date.now() - startTime > alertDuration) {
-      clearInterval(blinker);
-      this.hideDisplay(session, sessionId);
-      return;
+  parseSettingsFromArray(arr) {
+    if (!Array.isArray(arr)) return {};
+    const out = {};
+    for (const s of arr) {
+      if (!s || typeof s.key !== 'string') continue;
+      out[s.key] = s.value;
     }
-    const symbol = isVisible ? '[!]' : '[ ]';
-    this.showClamped(session, sessionId, `${symbol} ${baseText}`);
-    isVisible = !isVisible;
-  }, blinkInterval);
-
-  this.displayTimers.set(sessionId, setTimeout(() => {
-    clearInterval(blinker);
-    this.hideDisplay(session, sessionId);
-  }, alertDuration));
-}
-
-  /* ---------- util: estado eco de alarma (para ECO de ajustes) ---------- */
-  getAlarmEchoState(sessionId, mgdl, settings) {
-    try {
-      if (!settings) return null;
-      const latch = this.alertLatch.get(sessionId) || null;
-      if (latch) return latch;
-      if (!Number.isFinite(mgdl)) return null;
-      const lim = this.getAlertLimits(settings);
-      if (mgdl <= lim.low) return 'low';
-      if (mgdl >= lim.high) return 'high';
-      return null;
-    } catch (_) { return null; }
-  }
-
-  /* ---------- util: detectar cambio en límites de alerta ---------- */
-  alertLimitsChanged(oldSettings, newSettings) {
-    if (!oldSettings) return true;
-    const ol = this.getAlertLimits(oldSettings || {});
-    const nl = this.getAlertLimits(newSettings || {});
-    const oh = this.getHysteresisMg(oldSettings || {});
-    const nh = this.getHysteresisMg(newSettings || {});
-    return ol.low !== nl.low || ol.high !== nl.high || oh !== nh;
+    return this.getUserSettings({ getAppSettings: async () => Object.entries(out).map(([key, value]) => ({ key, value })) });
   }
 } // <-- cierre de la clase NightscoutMentraApp
 
