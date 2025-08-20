@@ -1,30 +1,27 @@
 "use strict";
 /**
  * Nightscout MentraOS v2.13.1 (Hysteresis + ECO con estado de alarma + Pred no-avanzado)
- * HUD texto + TIR-bar ¦ CH/Ins día + Min/Max sólo gesto ¦ reset diario
+ * HUD texto + TIR-bar ¦ CH/Ins día + Min/Max ¦ reset diario
  * ES/EN + mg/dL/mmol ¦ 5 líneas max ¦ cache last-good-entry
  * Settings en segundos/minutos + toggle barra TIR
- * Mejora: cliente axios por sesión, debounce de settings, animación reforzada
  * NUEVO:
  *  - Histeresis de alarmas (alert_hysteresis_mg / alert_hysteresis_mmol) con latch
- *  - En NO avanzado, predicción sólo si cruza ≤60 o ≥180 mg/dL (fijos)
- *  - ECO al guardar ajustes incluye estado de alarmas (BAJA/ALTA/Sin) en ES/EN, compacto
+ *  - ECO al guardar ajustes incluye rango TIR con unidades correctas
+ *  - Bitmaps LOW/HIGH: fijos arriba + texto parpadea
  *
- * NOTA: NO usamos DEFAULT_NIGHTSCOUT_URL ni DEFAULT_TOKEN de entorno.
- *       La URL/token se configuran SIEMPRE desde la app (por usuario).
+ * NOTA: La URL/token de Nightscout se configuran SIEMPRE desde Ajustes (no de env).
  */
 
 require('dotenv').config();
 const { AppServer } = require('@mentra/sdk');
 const axios = require('axios');
 
-// Optional bitmap support (G1B 576x100)
+// Bitmaps externos (no tocar servidor si faltan; fallback a texto)
 let loadAllBitmaps = null, getBitmap = null, hasBitmap = null;
 try {
   ({ loadAllBitmaps, getBitmap, hasBitmap } = require('./bitmaps'));
   try { if (typeof loadAllBitmaps === 'function') loadAllBitmaps(); } catch (_) {}
 } catch (_) {
-  // Fallback: modo texto
   loadAllBitmaps = () => {};
   getBitmap = () => null;
   hasBitmap = () => false;
@@ -42,7 +39,7 @@ if (typeof Object.prototype.updateSettingsForTesting !== 'function') {
 
 /* ---------- CONFIG ---------- */
 const UNITS = { MGDL: 'mg/dL', MMOL: 'mmol/L' };
-// Defaults SOLO para timings/visual; NO para NS url/token
+// Defaults solo para timings/visual; NO para NS url/token
 const DEFAULTS = {
   updateInterval: 5,
   low_alert_mg: 70, high_alert_mg: 250,
@@ -161,7 +158,6 @@ class NightscoutMentraApp extends AppServer {
         'show_tir_bar','show_range_bar',
         'display_duration_ms','alert_duration_ms','alert_cooldown_ms',
         'enable_advanced_mode','advanced_mode_enabled',
-        // NUEVO:
         'alert_hysteresis_mg','alert_hysteresis_mmol',
         // legacy tolerados
         'tir_low_mg','tir_high_mg','tir_low_mmol','tir_high_mmol',
@@ -212,7 +208,6 @@ class NightscoutMentraApp extends AppServer {
         alert_cooldown_ms: coolMs,
         show_tir_bar: showTirBar,
         enable_advanced_mode: this.toBool(kv.enable_advanced_mode) || this.toBool(kv.advanced_mode_enabled) || DEFAULTS.enable_advanced_mode,
-        // NEW: histeresis (defaults)
         alert_hysteresis_mg: this.validateSlicerValue(kv.alert_hysteresis_mg, 0, 50, DEFAULTS.alert_hysteresis_mg),
         alert_hysteresis_mmol: this.normalizeMmol(kv.alert_hysteresis_mmol) ?? DEFAULTS.alert_hysteresis_mmol,
         // legacy tolerados
@@ -289,7 +284,6 @@ class NightscoutMentraApp extends AppServer {
       alert_cooldown_ms: coolMs,
       show_tir_bar: showTirBar,
       enable_advanced_mode: this.toBool(o.enable_advanced_mode) || this.toBool(o.advanced_mode_enabled) || DEFAULTS.enable_advanced_mode,
-      // NEW: histeresis
       alert_hysteresis_mg: this.validateSlicerValue(o.alert_hysteresis_mg, 0, 50, DEFAULTS.alert_hysteresis_mg),
       alert_hysteresis_mmol: this.normalizeMmol(o.alert_hysteresis_mmol) ?? DEFAULTS.alert_hysteresis_mmol,
       // legacy tolerados
@@ -354,7 +348,6 @@ class NightscoutMentraApp extends AppServer {
 
     const base = await this.formatForG1(data, settings, sessionId);
 
-    // Placeholder seguro: sin agresividad
     try {
       const mg = data.sgv;
       if (!Number.isFinite(mg)) return base;
@@ -363,7 +356,7 @@ class NightscoutMentraApp extends AppServer {
       if (!isHigh && !isLow) return base;
 
       const horizonMin = clamp(settings.prediction_horizon_min || DEFAULTS.prediction_horizon_min, 15, 60);
-      const delta = 0;
+      const delta = 0; // placeholder seguro
       const predictedMg = clamp(mg + delta, 40, 400);
       const displayPred = this.convertToDisplay(predictedMg, unit);
       const t = (settings.language || 'en') === 'es'
@@ -527,19 +520,18 @@ class NightscoutMentraApp extends AppServer {
 
   /* ---------- Loop principal ---------- */
   async showInitialAndHide(session, sessionId, settings) {
-      // Debug boot bitmap (optional): low/high/bell for 5s
-      try {
-        const bootBmp = String(settings.debug_boot_bitmap || '').toLowerCase();
-        const bootMap = { low: 'alert-low-526x100', high: 'alert-high-526x100', bell: 'alert-bell-526x100' };
-        if (bootBmp && bootMap[bootBmp] && hasBitmap(bootMap[bootBmp]) && session && session.layouts) {
-          const bmp = getBitmap(bootMap[bootBmp]);
-          if (bmp && typeof session.layouts.showBitmap === 'function') {
-            session.layouts.showBitmap(bmp.dataRGBA, bmp.width, bmp.height);
-            await this.__delay(5000);
-            this.hideDisplay(session, sessionId);
-          }
+    // Bitmap de arranque opcional (si lo usas en el futuro via settings.debug_boot_bitmap)
+    try {
+      const bootBmp = String(settings.debug_boot_bitmap || '').toLowerCase();
+      const bootMap = { low: 'alert-low-526x100', high: 'alert-high-526x100' };
+      if (bootBmp && bootMap[bootBmp] && hasBitmap(bootMap[bootBmp]) && session && session.layouts) {
+        const bmp = getBitmap(bootMap[bootBmp]);
+        if (bmp && typeof session.layouts.showBitmap === 'function') {
+          session.layouts.showBitmap(bmp.dataRGBA, bmp.width, bmp.height);
+          await this.__delay(2000);
         }
-      } catch (_) {}
+      }
+    } catch (_) {}
 
     try {
       const data = await this.getGlucoseData(settings, sessionId);
@@ -552,7 +544,6 @@ class NightscoutMentraApp extends AppServer {
         try { const sum = await this.getRecentTreatments(settings, sessionId); tLine = this.formatTreatmentsLine(sum, settings, sessionId); } catch {}
         await this.animateTIRFill(session, sessionId, settings, formattedData, tirPct, tLine);
       } else {
-        // No avanzado
         this.showClamped(session, sessionId, formattedData);
       }
       this._scheduleHide(sessionId, settings);
@@ -585,8 +576,7 @@ class NightscoutMentraApp extends AppServer {
     }, settings.display_duration_ms || DEFAULTS.display_duration_ms);
     this.displayTimers.set(sessionId, t);
   }
-
-  /* ---------- Alertas visuales ---------- */
+  /* ---------- Alertas visuales (bitmap fijo + texto parpadea) ---------- */
   triggerAnimatedAlert(session, sessionId, data, settings, type) {
     const displayValue = this.convertToDisplay(data.sgv, settings.units || UNITS.MGDL);
     const unit = settings.units || UNITS.MGDL;
@@ -603,29 +593,29 @@ class NightscoutMentraApp extends AppServer {
 
     const startTime = Date.now();
 
-    // Decide si podemos mostrar bitmap
-    const bmpKey = type === 'low' ? 'alert-low-526x100'
-                  : type === 'high' ? 'alert-high-526x100'
-                  : null;
-    const canShowBmp = !!(bmpKey && hasBitmap(bmpKey) && session && session.layouts && typeof session.layouts.showBitmap === 'function');
-
-    const showFrame = (on) => {
-      if (canShowBmp && on) {
-        try {
-          const bmp = getBitmap(bmpKey);
-          if (bmp) session.layouts.showBitmap(bmp.dataRGBA, bmp.width, bmp.height);
-          else this.showClamped(session, sessionId, `[!] ${baseText}`);
-        } catch (_) {
-          this.showClamped(session, sessionId, `[!] ${baseText}`);
+    // 1) Mostrar BITMAP una sola vez (fijo) si existe soporte
+    try {
+      const bmpKey = type === 'low' ? 'alert-low-526x100'
+                    : type === 'high' ? 'alert-high-526x100'
+                    : null;
+      if (bmpKey && hasBitmap(bmpKey) && session && session.layouts && typeof session.layouts.showBitmap === 'function') {
+        const bmp = getBitmap(bmpKey);
+        if (bmp) {
+          session.layouts.showBitmap(bmp.dataRGBA, bmp.width, bmp.height);
         }
-      } else {
-        const symbol = on ? '[!]' : '[ ]';
-        this.showClamped(session, sessionId, `${symbol} ${baseText}`);
       }
+    } catch (_) {
+      // si falla, seguiremos con texto normal
+    }
+
+    // 2) Parpadeo SOLO del texto (bitmap permanece si el SDK lo soporta)
+    const showTextFrame = (on) => {
+      const symbol = on ? '[!]' : '[ ]';
+      this.showClamped(session, sessionId, `${symbol} ${baseText}`);
     };
 
     let isVisible = true;
-    showFrame(true);
+    showTextFrame(true);
     const blinker = setInterval(() => {
       if (Date.now() - startTime > alertDuration) {
         clearInterval(blinker);
@@ -633,7 +623,7 @@ class NightscoutMentraApp extends AppServer {
         return;
       }
       isVisible = !isVisible;
-      showFrame(isVisible);
+      showTextFrame(isVisible);
     }, blinkInterval);
 
     this.displayTimers.set(sessionId, setTimeout(() => {
@@ -669,9 +659,8 @@ class NightscoutMentraApp extends AppServer {
   _shouldShowHeadUp(sessionId, settings) {
     if (!this.toBool(settings.enable_head_up_display)) return false;
     const last = this.headUpLastShown.get(sessionId) || 0;
-    const now = Date.now();
-    if (now - last < 3000) return false; // anti-spam
-    this.headUpLastShown.set(sessionId, now);
+    if (Date.now() - last < 3000) return false; // anti-spam
+    this.headUpLastShown.set(sessionId, Date.now());
     return true;
   }
 
@@ -692,6 +681,7 @@ class NightscoutMentraApp extends AppServer {
       setTimeout(() => this.updateLoop(sessionId), ui * 1000);
     }
   }
+
   /* ---------- Eventos de sesión ---------- */
   async onSessionStarted(session) {
     const sessionId = session.sessionId;
@@ -765,7 +755,7 @@ class NightscoutMentraApp extends AppServer {
   mgToUnit(mg, unit) { return unit === UNITS.MMOL ? (mg / 18).toFixed(1) : Math.round(mg); }
 }
 
-/* ---------- Arranque servidor (SDK usa start()) ---------- */
+/* ---------- Arranque servidor ---------- */
 const PORT = Number(process.env.PORT || 3000);
 const app = new NightscoutMentraApp({
   packageName: process.env.PACKAGE_NAME || 'com.tucompania.nightscout-glucose',
@@ -776,27 +766,11 @@ const app = new NightscoutMentraApp({
 app.start()
   .then(() => {
     console.log(`Server started on ${PORT} (pkg: ${process.env.PACKAGE_NAME || 'com.tucompania.nightscout-glucose'})`);
-    // Ruta /health opcional para Render
-    try {
-      app.app?.get?.('/health', (_req, res) => res.json({
-        status: 'alive',
-        timestamp: new Date().toISOString(),
-        version: '2.13.1',
-        activeSessions: app.activeSessions?.size ?? 0
-      }));
-    } catch {}
   })
   .catch(err => {
     console.error('⛔ Error iniciando servidor:', err);
     process.exit(1);
   });
-
-app.start().then(() => {
-  console.log(`✅ Nightscout MentraOS app iniciada en puerto ${PORT}`);
-}).catch(err => {
-  console.error("❌ Error al iniciar la app:", err);
-});
-
 /* ---------- Helpers extra opcionales ---------- */
 NightscoutMentraApp.prototype.findMinMaxOfDay = function(entries) {
   try {
@@ -823,5 +797,6 @@ NightscoutMentraApp.prototype.formatMinMaxLine = function(minMax, settings) {
     return isEs ? `Mín/Máx: ${min}/${max} ${u}` : `Min/Max: ${min}/${max} ${u}`;
   } catch { return ''; }
 };
-/* ---------- Export (opcional para pruebas locales) ---------- */
+
+/* ---------- Export (opcional pruebas locales) ---------- */
 module.exports = { NightscoutMentraApp };
