@@ -12,18 +12,14 @@
  */
 
 require('dotenv').config();
-const { AppServer } = require('@mentra/sdk');
+const { AppServer, BitmapUtils } = require('@mentra/sdk');
 const axios = require('axios');
+const path = require('path');
+const fs = require('fs/promises');
 
 /* ---------- SHIM: compatibilidad SDK ---------- */
-if (typeof Object.prototype.updateSettingsForTesting !== 'function') {
-  Object.defineProperty(Object.prototype, 'updateSettingsForTesting', {
-    value: async () => {},
-    writable: true,
-    configurable: true,
-    enumerable: false
-  });
-}
+// (El shim global ha sido eliminado para evitar tocar Object.prototype)
+// Se aplica un shim local por sesión en onSession().
 
 /* ---------- CONFIG ---------- */
 const PACKAGE_NAME = process.env.PACKAGE_NAME || 'com.tucompania.nightscout-glucose';
@@ -36,6 +32,12 @@ if (!MENTRAOS_API_KEY) {
 }
 
 const UNITS = { MGDL: 'mg/dL', MMOL: 'mmol/L' };
+// --- helper BMP (fuera de la clase) ---
+function validateBmpBasic(buffer) {
+  return Buffer.isBuffer(buffer)
+    && buffer.length >= 54
+    && buffer.toString('ascii', 0, 2) === 'BM';
+}
 
 class NightscoutMentraApp extends AppServer {
   constructor(opts) {
@@ -53,7 +55,13 @@ class NightscoutMentraApp extends AppServer {
     this._http = new Map();             // cliente axios por sesión
     this._settingsDebounce = new Map(); // debounce settings
     this._sessionLocale = new Map();    // cache locale/tz por sesión
-  }
+    this._bitmapCache = new Map();      // nombre.bmp (lowercase) -> hex
+    this._activeBitmapAnimation = new Map(); // sessionId -> controller
+  
+    this._bitmapCache = this._bitmapCache || new Map();
+
+    this._activeBitmapAnimation = this._activeBitmapAnimation || new Map();
+}
 
   /* ---------- helpers ---------- */
   __delay(ms) { return new Promise(res => setTimeout(res, ms)); }
@@ -129,6 +137,12 @@ class NightscoutMentraApp extends AppServer {
         'tir_low_mg','tir_high_mg','tir_low_mmol','tir_high_mmol',
         'time_in_range_low_mg','time_in_range_high_mg','time_in_range_low_mmol','time_in_range_high_mmol',
         'prediction_horizon_min','prediction_horizon_mins',
+        // tuning predicción
+        'prediction_enable_robust',
+        'prediction_window_points',
+        'prediction_max_gap_min',
+        'prediction_min_slope_mg_per_min',
+        'prediction_min_r2',
         'debug_force_alert'
       ];
       const vals = await Promise.all(keys.map(k => session.settings.get(k)));
@@ -185,6 +199,12 @@ class NightscoutMentraApp extends AppServer {
         time_in_range_high_mmol: this.normalizeMmol(kv.time_in_range_high_mmol),
         prediction_horizon_min: [15,30,60].includes(Number(kv.prediction_horizon_min || kv.prediction_horizon_mins))
           ? Number(kv.prediction_horizon_min || kv.prediction_horizon_mins) : 30,
+        // tuning predicción (defaults seguros)
+        prediction_enable_robust: this.toBool(kv.prediction_enable_robust) !== false,
+        prediction_window_points: this.validateSlicerValue(kv.prediction_window_points, 4, 20, 12),
+        prediction_max_gap_min: this.validateSlicerValue(kv.prediction_max_gap_min, 2, 15, 10),
+        prediction_min_slope_mg_per_min: this.validateSlicerValue(kv.prediction_min_slope_mg_per_min, 0, 5, 0.25),
+        prediction_min_r2: this.validateSlicerValue(kv.prediction_min_r2, 0, 1, 0.35),
         debug_force_alert: (typeof kv.debug_force_alert === 'string' ? kv.debug_force_alert : null),
       };
     } catch (e) {
@@ -261,6 +281,12 @@ class NightscoutMentraApp extends AppServer {
       time_in_range_high_mmol: this.normalizeMmol(o.time_in_range_high_mmol),
       prediction_horizon_min: [15,30,60].includes(Number(o.prediction_horizon_min || o.prediction_horizon_mins))
         ? Number(o.prediction_horizon_min || o.prediction_horizon_mins) : 30,
+      // tuning predicción (defaults seguros)
+      prediction_enable_robust: this.toBool(o.prediction_enable_robust) !== false,
+      prediction_window_points: this.validateSlicerValue(o.prediction_window_points, 4, 20, 12),
+      prediction_max_gap_min: this.validateSlicerValue(o.prediction_max_gap_min, 2, 15, 10),
+      prediction_min_slope_mg_per_min: this.validateSlicerValue(o.prediction_min_slope_mg_per_min, 0, 5, 0.25),
+      prediction_min_r2: this.validateSlicerValue(o.prediction_min_r2, 0, 1, 0.35),
       debug_force_alert: (typeof o.debug_force_alert === 'string' ? o.debug_force_alert : null)
     };
   }
@@ -268,6 +294,15 @@ class NightscoutMentraApp extends AppServer {
   /* ---------- UI helpers ---------- */
   convertToDisplay(mgdlValue, targetUnit) {
     return targetUnit === UNITS.MMOL ? (mgdlValue / 18).toFixed(1) : Math.round(mgdlValue);
+  }
+  formatRangeByUnits(lowMgdl, highMgdl, units) {
+    const isMmol = String(units || '').toLowerCase().includes('mmol');
+    if (isMmol) {
+      const low = (lowMgdl / 18).toFixed(1);
+      const high = (highMgdl / 18).toFixed(1);
+      return `${low}-${high} mmol/L`;
+    }
+    return `${Math.round(lowMgdl)}-${Math.round(highMgdl)} mg/dL`;
   }
   getTrendArrow(dir) {
     const map = {
@@ -307,7 +342,7 @@ class NightscoutMentraApp extends AppServer {
     const b = this._getLocaleBundle(sessionId || 'default', settings);
     const readingTime = new Date(data.date);
     const timeStr = readingTime.toLocaleTimeString(b.locale, { timeZone: b.tz, hour: '2-digit', minute: '2-digit', hour12: false });
-    const minutesAgo = Math.floor((Date.now() - data.date) / 60000);
+    const minutesAgo = Math.max(0, Math.floor((Date.now() - data.date) / 60000));
     const timeAgo = minutesAgo <= 1 ? (b.lang === 'es' ? 'ahora' : 'now') : (b.lang === 'es' ? `hace ${minutesAgo}m` : `${minutesAgo}m ago`);
     return `${display} ${settings.units || UNITS.MGDL} ${trend}\n${timeStr} (${timeAgo})`;
   }
@@ -337,7 +372,7 @@ class NightscoutMentraApp extends AppServer {
     let cli = this._http.get(sessionId);
     const baseRaw = (settings.nightscoutUrl || '').trim();
     if (!baseRaw) return null;
-    const base = baseRaw.startsWith('http') ? baseRaw : ('https://' + baseRaw);
+    const base = /^https?:\/\//i.test(baseRaw) ? baseRaw : ('https://' + baseRaw);
     const baseURL = base.replace(/\/$/, '');
     if (!cli || cli.defaults.baseURL !== baseURL || cli.defaults.params?.token !== settings.nightscoutToken){
       cli = axios.create({
@@ -394,7 +429,105 @@ class NightscoutMentraApp extends AppServer {
       }
     } catch (_) {}
 
-    // 2) Fallback lineal
+    // 2) Fallback por regresión lineal con múltiples puntos y robustez (segmento contiguo, outliers, R²)
+    try {
+      const maxPoints = Number(settings.prediction_window_points || 12);
+      const maxGapMin = Number(settings.prediction_max_gap_min || 10);
+      const minSlopeCfg = Number(settings.prediction_min_slope_mg_per_min || 0.25);
+      const minR2Cfg = Number(settings.prediction_min_r2 || 0.35);
+      const robustEnabled = settings.prediction_enable_robust !== false;
+
+      const { data } = await http.get(`/api/v1/entries.json?count=${Math.max(4, Math.min(20, maxPoints * 2))}`);
+      const arr = Array.isArray(data) ? data : (data ? [data] : []);
+      const raw = arr
+        .map(r => ({
+          mgdl: Number(r.sgv ?? r.glucose),
+          ts: new Date(r.date || r.dateString).getTime()
+        }))
+        .filter(p => Number.isFinite(p.mgdl) && Number.isFinite(p.ts))
+        .sort((a, b) => a.ts - b.ts);
+
+      // Segmento contiguo reciente: desde el final hacia atrás mientras los gaps <= 10min
+      let seg = [];
+      for (let i = raw.length - 1; i >= 0; i--) {
+        if (seg.length === 0) { seg.unshift(raw[i]); continue; }
+        const head = seg[0];
+        const gapMin = (head.ts - raw[i].ts) / 60000;
+        if (gapMin <= maxGapMin) { seg.unshift(raw[i]); } else { break; }
+      }
+      // Limitar a máximo 12 puntos para estabilidad
+      if (seg.length > maxPoints) seg = seg.slice(seg.length - maxPoints);
+      if (seg.length >= 4) {
+        const last = seg[seg.length - 1];
+        const t0 = last.ts;
+        let xs = seg.map(p => (p.ts - t0) / 60000);
+        let ys = seg.map(p => p.mgdl);
+
+        const regress = (xv, yv) => {
+          const n = xv.length;
+          const meanX = xv.reduce((a, b) => a + b, 0) / n;
+          const meanY = yv.reduce((a, b) => a + b, 0) / n;
+          let num = 0, den = 0;
+          for (let i = 0; i < n; i++) {
+            const dx = xv[i] - meanX;
+            const dy = yv[i] - meanY;
+            num += dx * dy;
+            den += dx * dx;
+          }
+          const slope = den > 0 ? (num / den) : 0;
+          const intercept = meanY - slope * meanX;
+          // R²
+          let sse = 0, sst = 0;
+          for (let i = 0; i < n; i++) {
+            const pred = intercept + slope * xv[i];
+            const err = yv[i] - pred;
+            sse += err * err;
+            const dev = yv[i] - meanY;
+            sst += dev * dev;
+          }
+          const r2 = sst > 0 ? (1 - sse / sst) : 0;
+          // residuales para MAD
+          const residuals = xv.map((x, i) => yv[i] - (intercept + slope * x));
+          const absRes = residuals.map(Math.abs).sort((a,b)=>a-b);
+          const mid = Math.floor(absRes.length / 2);
+          const mad = absRes.length % 2 ? absRes[mid] : (absRes[mid-1] + absRes[mid]) / 2;
+          return { slope, intercept, r2, residuals, mad, meanY };
+        };
+
+        // Primera pasada
+        let { slope, intercept, r2, residuals, mad } = regress(xs, ys);
+
+        // Filtra outliers por residuales (umbral dinámico con suelo)
+        const resThresh = Math.max(12, 2.5 * (mad || 0));
+        if (robustEnabled && resThresh > 0) {
+          const kept = [];
+          for (let i = 0; i < xs.length; i++) {
+            if (Math.abs(residuals[i]) <= resThresh) kept.push(i);
+          }
+          if (kept.length >= 4 && kept.length < xs.length) {
+            xs = kept.map(i => xs[i]);
+            ys = kept.map(i => ys[i]);
+            ({ slope, intercept, r2 } = regress(xs, ys));
+          }
+        }
+
+        const mgNow = last.mgdl;
+        const minSlope = minSlopeCfg; // mg/dL/min
+        const minR2 = minR2Cfg;
+        if (Math.abs(slope) >= minSlope && r2 >= minR2) {
+          if (slope < 0 && mgNow > lowThreshold) {
+            const minutes = (lowThreshold - mgNow) / slope;
+            if (minutes > 0 && minutes <= horizon) return `↓${toDisp(lowThreshold)} @${Math.round(minutes)}m`;
+          }
+          if (slope > 0 && mgNow < highThreshold) {
+            const minutes = (highThreshold - mgNow) / slope;
+            if (minutes > 0 && minutes <= horizon) return `↑${toDisp(highThreshold)} @${Math.round(minutes)}m`;
+          }
+        }
+      }
+    } catch (_) {}
+
+    // 3) Fallback lineal básico 2 puntos
     try {
       const { data } = await http.get(`/api/v1/entries.json?count=2`);
       if (data && data.length >= 2) {
@@ -573,19 +706,177 @@ class NightscoutMentraApp extends AppServer {
     } catch (_) {}
   }
   hideDisplay(session, sessionId) {
-    try { session.layouts.showTextWall(''); this._lastShownText.delete(sessionId); } catch {}
+    try {
+      const anim = this._activeBitmapAnimation.get(sessionId);
+      if (anim && typeof anim.stop === 'function') { try { anim.stop(); } catch(_){} }
+      this._activeBitmapAnimation.delete(sessionId);
+      try { session.layouts.clearView?.(); } catch(_) {}
+      session.layouts.showTextWall('');
+      this._lastShownText.delete(sessionId);
+    } catch {}
   }
 
-  /* ---------- helpers ECO ---------- */
-  getAlarmEchoState(sessionId, mgdl, settings) {
-    const lim = this.getAlertLimits(settings);
-    const latched = this.alertLatch.get(sessionId) || null;
-    if (latched === 'low' || latched === 'high') return latched; // ya activa
-    if (!Number.isFinite(mgdl)) return 'none';
-    if (mgdl <= lim.low) return 'low';
-    if (mgdl >= lim.high) return 'high';
-    return 'none';
+ 
+  /* ---------- bitmap helpers ---------- */
+async _ensureBitmapsLoaded() {
+  if (this._bitmapCache?.size) return true;
+
+  this._bitmapCache = this._bitmapCache || new Map();
+  const tried = [];
+  const candidates = [
+    path.resolve(process.cwd(), 'assets', 'bitmaps'),
+    path.resolve(__dirname, 'assets', 'bitmaps'),
+    path.resolve(__dirname, '.', 'assets', 'bitmaps'),
+    path.resolve(__dirname, '..', 'assets', 'bitmaps'),
+  ];
+  console.log('📁 Directorios candidatos:', candidates);
+
+  for (const baseDir of candidates) {
+    tried.push(baseDir);
+    try {
+      console.log(`🔍 Explorando: ${baseDir}`);
+      const entries = await fs.readdir(baseDir);
+      const bmpFiles = entries.filter(f => f.toLowerCase().endsWith('.bmp'));
+      console.log(`📄 Archivos BMP encontrados:`, bmpFiles);
+
+      for (const f of bmpFiles) {
+        const full = path.join(baseDir, f);
+        try {
+          let hex = null;
+          if (BitmapUtils?.loadBmpAsHex) {
+            hex = await BitmapUtils.loadBmpAsHex(full);
+          } else {
+            const buffer = await fs.readFile(full);
+            if (!validateBmpBasic(buffer)) {
+              console.log(`❌ ${f} no es un BMP válido (signature/header)`);
+              continue;
+            }
+            hex = buffer.toString('hex');
+          }
+
+          if (hex && BitmapUtils?.validateBmpHex) {
+            try {
+              const v = await BitmapUtils.validateBmpHex(hex);
+              if (!v || v.isValid === false) {
+                console.log(`❌ ${f} inválido según SDK`);
+                continue;
+              }
+            } catch (e) {
+              console.log(`⚠️ Validación SDK falló en ${f}:`, e.message);
+            }
+          }
+
+          this._bitmapCache.set(f.toLowerCase(), hex);
+          console.log(`✅ ${f} cacheado`);
+        } catch (e) {
+          console.log(`❌ Error cargando ${f}:`, e.message);
+        }
+      }
+
+      if (this._bitmapCache.size > 0) break;
+    } catch (e) {
+      console.log(`❌ Error explorando ${baseDir}:`, e.message);
+    }
   }
+
+  console.log(`📊 Cache final: ${this._bitmapCache.size} bitmaps`);
+  if (!this._bitmapCache.size) console.warn('⚠️ No BMPs cargados. Probados:', tried);
+  return this._bitmapCache.size > 0;
+}
+
+_getBitmapHex(name) {
+  if (!name) return null;
+  const key = String(name).toLowerCase();
+  return this._bitmapCache.get(key) || null;
+}
+
+_stopActiveAnimation(sessionId) {
+  const anim = this._activeBitmapAnimation.get(sessionId);
+  if (anim && typeof anim.stop === 'function') { try { anim.stop(); } catch(_){} }
+  this._activeBitmapAnimation.delete(sessionId);
+}
+
+async _playAlertBitmap(session, sessionId, type, intervalMs, durationMs) {
+  try {
+    const ok = await this._ensureBitmapsLoaded();
+    if (!ok) return false;
+
+    // Evita solapar con HUD de texto
+    this._stopActiveAnimation(sessionId);
+    try { session.layouts.clearView?.(); } catch(_) {}
+    try { session.layouts.showTextWall(''); } catch(_) {}
+    this._lastShownText.delete(sessionId);
+
+    const pickHex = (...names) => {
+      for (const n of names) {
+        const h = this._getBitmapHex(n);
+        if (h) return h;
+      }
+      return null;
+    };
+
+    // Intenta tamaños específicos (576x100 / 526x100) y genéricos
+    const bell    = pickHex('alert-bell-576x100.bmp','alert-bell-526x100.bmp','alert-bell.bmp');
+    const lowBmp  = pickHex('alert-low-576x100.bmp','alert-low-526x100.bmp','alert-low.bmp');
+    const highBmp = pickHex('alert-high-576x100.bmp','alert-high-526x100.bmp','alert-high.bmp');
+    const pick    = type === 'low' ? lowBmp : highBmp;
+
+    const frames = [];
+    if (bell && pick) frames.push(bell, pick);
+    else if (pick)   frames.push(pick);
+    else if (bell)   frames.push(bell);
+
+    if (!frames.length) {
+      console.log('❌ Sin frames bitmap disponibles');
+      return false;
+    }
+
+    const L = session.layouts;
+    const speed = Math.max(200, intervalMs || 600);
+    const total = Math.max(1000, durationMs || 15000) + 80;
+
+    if (typeof L.showBitmapAnimation === 'function') {
+      console.log(`▶️ Animación con API nativa`);
+      const controller = L.showBitmapAnimation(frames, speed, true);
+      this._activeBitmapAnimation.set(sessionId, controller);
+      setTimeout(() => {
+        try { controller?.stop?.(); } catch(_){}
+        this._activeBitmapAnimation.delete(sessionId);
+        this.hideDisplay(session, sessionId);
+        console.log(`⏹️ Animación bitmap detenida`);
+      }, total);
+      return true;
+    }
+
+    // Polyfill a fotogramas
+    const showHex = L.showBitmapHex || L.showBitmap || L.showImageHex;
+    if (typeof showHex !== 'function') {
+      console.log('❌ Runtime sin soporte de bitmaps');
+      return false;
+    }
+    console.log(`▶️ Animación con polyfill`);
+    let i = 0;
+    const tick = () => {
+      try { showHex.call(L, frames[i]); } catch (e) { console.log('❌ pintar frame:', e.message); }
+      i = (i + 1) % frames.length;
+    };
+    tick();
+    const handle = setInterval(tick, speed);
+    this._activeBitmapAnimation.set(sessionId, { stop: () => clearInterval(handle) });
+    setTimeout(() => {
+      try { clearInterval(handle); } catch(_) {}
+      this._activeBitmapAnimation.delete(sessionId);
+      this.hideDisplay(session, sessionId);
+      console.log(`⏹️ Animación bitmap detenida (polyfill)`);
+    }, total);
+    return true;
+
+  } catch (e) {
+    console.log(`❌ Error en animación bitmap:`, e.message);
+    return false;
+  }
+}
+
 
   /* ---------- ciclo de vida ---------- */
   async onSession(session, sessionId, userId) {
@@ -778,6 +1069,12 @@ class NightscoutMentraApp extends AppServer {
             this.alertLatch.delete(sessionId); // reinicia latch al cambiar límites
           }
 
+          // Si cambia debug_force_alert, resetea cooldown/latch para pruebas inmediatas
+          const dbgChanged = (old.debug_force_alert || '') !== (settings.debug_force_alert || '');
+          if (dbgChanged) {
+            this.alertHistory.delete(sessionId);
+            this.alertLatch.delete(sessionId);
+          }
           sd.settings = settings;
           this.activeSessions.set(sessionId, sd);
 
@@ -797,7 +1094,7 @@ class NightscoutMentraApp extends AppServer {
 
             const line1 = isEs ? 'Ajustes guardados' : 'Settings saved';
             const line2 = `Units: ${settings.units} · HeadUp: ${settings.enable_head_up_display ? 'ON' : 'OFF'}`;
-            const line3 = (isEs ? 'TIR' : 'TIR') + `: ${limits.low}-${limits.high} mg/dL`;
+            const line3 = (isEs ? 'TIR' : 'TIR') + `: ${this.formatRangeByUnits(limits.low, limits.high, settings.units)}`;
             const line4 = `${isEs ? 'Avanzado' : 'Advanced'}: ${settings.enable_advanced_mode ? 'ON' : 'OFF'}`;
             const line5 = (isEs ? 'Alarmas' : 'Alerts') + `: ${settings.alertsEnabled ? 'ON' : 'OFF'} · Hyst: ±${hystMg} mg/dL (±${hystMmol} mmol/L) · ${stateStr}`;
 
@@ -969,37 +1266,38 @@ class NightscoutMentraApp extends AppServer {
   }
 
   async triggerAnimatedAlert(session, sessionId, data, settings, type) {
-    const displayValue = this.convertToDisplay(data.sgv, settings.units || UNITS.MGDL);
-    const unit = settings.units || UNITS.MGDL;
-    const lang = settings.language || 'en';
-    const msgs = {
-      en: { low: `LOW GLUCOSE!`, high: `HIGH GLUCOSE!` },
-      es: { low: `¡GLUCOSA BAJA!`, high: `¡GLUCOSA ALTA!` }
-    };
-    const baseText = `${msgs[lang][type]}\n${displayValue} ${unit}`;
-    const alertDuration = settings.alert_duration_ms || 15000;
-    const blinkInterval = 600;
+  const displayValue = this.convertToDisplay(data.sgv, settings.units || UNITS.MGDL);
+  const unit = settings.units || UNITS.MGDL;
+  const lang = settings.language || 'en';
+  const msgs = { en: { low: `LOW GLUCOSE!`, high: `HIGH GLUCOSE!` }, es: { low: `¡GLUCOSA BAJA!`, high: `¡GLUCOSA ALTA!` } };
+  const baseText = `${msgs[lang][type]}\n${displayValue} ${unit}`;
+  const alertDuration = settings.alert_duration_ms || 15000;
+  const blinkInterval = 600;
 
-    if (this.displayTimers.has(sessionId)) clearTimeout(this.displayTimers.get(sessionId));
+  try {
+    const shown = await this._playAlertBitmap(session, sessionId, type, blinkInterval, alertDuration);
+    if (shown) return;
+  } catch (_) {}
 
-    const startTime = Date.now();
-    let isVisible = true;
-    const blinker = setInterval(() => {
-      if (Date.now() - startTime > alertDuration) {
-        clearInterval(blinker);
-        this.hideDisplay(session, sessionId);
-        return;
-      }
-      const symbol = isVisible ? '[!]' : '[ ]';
-      this.showClamped(session, sessionId, `${symbol} ${baseText}`);
-      isVisible = !isVisible;
-    }, blinkInterval);
-
-    this.displayTimers.set(sessionId, setTimeout(() => {
+  if (this.displayTimers.has(sessionId)) clearTimeout(this.displayTimers.get(sessionId));
+  const startTime = Date.now();
+  let isVisible = true;
+  const blinker = setInterval(() => {
+    if (Date.now() - startTime > alertDuration) {
       clearInterval(blinker);
       this.hideDisplay(session, sessionId);
-    }, alertDuration + 120));
-  }
+      return;
+    }
+    const symbol = isVisible ? '[!]' : '[ ]';
+    this.showClamped(session, sessionId, `${symbol} ${baseText}`);
+    isVisible = !isVisible;
+  }, blinkInterval);
+
+  this.displayTimers.set(sessionId, setTimeout(() => {
+    clearInterval(blinker);
+    this.hideDisplay(session, sessionId);
+  }, alertDuration + 120));
+}
 
   alertLimitsChanged(oldSettings, newSettings) {
     if (!oldSettings) return false;
