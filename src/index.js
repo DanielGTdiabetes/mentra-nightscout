@@ -5,17 +5,65 @@
  * ES/EN + mg/dL/mmol ¦ 5 líneas max ¦ cache last-good-entry
  * Settings en segundos/minutos + toggle barra TIR
  * Mejora: cliente axios por sesión, debounce de settings, animación reforzada
- * NUEVO:
- *  - Histeresis de alarmas (alert_hysteresis_mg / alert_hysteresis_mmol) con latch
- *  - En NO avanzado, predicción sólo si cruza ≤60 o ≥180 mg/dL (fijos)
- *  - ECO al guardar ajustes incluye estado de alarmas (BAJA/ALTA/Sin) en ES/EN, compacto
+ *
+ * Bitmaps:
+ *  - Carga segura de BMP con BitmapUtils.loadBmpAsHex(location) + validateBmpHex
+ *  - showBitmapView(hex, { view, durationMs })
+ *  - Fallback: showBitmapView("", { view, durationMs, location }) si tu SDK soporta options.location
+ *  - ClearView tras overlays/alertas
+ *  - NO usamos helpers legacy (ni bitmaps.js)
  */
 
 require('dotenv').config();
-const { AppServer } = require('@mentra/sdk');
+const { AppServer, ViewType, BitmapUtils } = require('@mentra/sdk');
 const axios = require('axios');
+const path = require('path');
 
-/* ---------- SHIM: compatibilidad SDK ---------- */
+/* ---------- BITMAPS: rutas por alias ---------- */
+const BITMAPS_DIR = path.join(process.cwd(), 'assets', 'bitmaps');
+const BMP_ALIAS_TO_FILE = {
+  low:   'alert-low-526x100.bmp',
+  high:  'alert-high-526x100.bmp',
+  sun:   'weather-sun-526x100.bmp',
+  cloud: 'weather-cloud-526x100.bmp',
+  rain:  'weather-rain-526x100.bmp',
+};
+const DEBUG_BOOT_BITMAP = (process.env.DEBUG_BOOT_BITMAP || '').toLowerCase().trim(); // low|high|sun|cloud|rain
+
+function getBitmapLocationByAlias(alias) {
+  const file = BMP_ALIAS_TO_FILE[alias];
+  if (!file) return null;
+  return path.join(BITMAPS_DIR, file);
+}
+
+/** Muestra un bitmap desde ubicación de archivo; robusto y sin bloquear la app */
+async function showBitmapByLocation(session, location, { view = ViewType.DASHBOARD, durationMs = 5000 } = {}) {
+  // 1) Vía segura: hex desde disco con util oficial
+  try {
+    if (!location) throw new Error('location vacío');
+    const hex = await BitmapUtils.loadBmpAsHex(location);
+    const validation = BitmapUtils.validateBmpHex(hex);
+    if (validation && validation.isValid === false) {
+      throw new Error(`BMP inválido: ${Array.isArray(validation.errors) ? validation.errors.join(', ') : 'desconocido'}`);
+    }
+    session.layouts.showBitmapView(hex, { view, durationMs });
+    return true;
+  } catch (e1) {
+    session.logger?.debug?.('showBitmapByLocation(hex) falló, probando fallback location', { msg: e1?.message, location });
+    // 2) Fallback: algunas builds soportan pasar location en options
+    try {
+      session.layouts.showBitmapView("", { view, durationMs, location });
+      return true;
+    } catch (e2) {
+      // 3) Fallback final: texto
+      try { session.layouts.showTextWall('(bitmap error)', { view, durationMs }); } catch {}
+      session.logger?.warn?.('showBitmapByLocation falló', { e1: e1?.message, e2: e2?.message, location });
+      return false;
+    }
+  }
+}
+
+/* ---------- SHIM: compatibilidad SDK menor ---------- */
 if (typeof Object.prototype.updateSettingsForTesting !== 'function') {
   Object.defineProperty(Object.prototype, 'updateSettingsForTesting', {
     value: async () => {},
@@ -92,79 +140,50 @@ class NightscoutMentraApp extends AppServer {
   }
 
   /* ---------- alertas / límites ---------- */
-  // PRIORIDAD POR UNIDAD: si units=mmol/L usa primero low/high en mmol (x10), si no, usa mg/dL.
-// Siempre devuelve límites en mg/dL para el resto del código.
-getAlertLimits(settings) {
-  const units = String(settings.units || '').toLowerCase();
+  getAlertLimits(settings) {
+    const units = String(settings.units || '').toLowerCase();
+    const lowMg  = this.parseSlicerValue(settings.low_alert_mg, NaN);
+    const highMg = this.parseSlicerValue(settings.high_alert_mg, NaN);
+    const lowM = this.normalizeMmol(settings.low_alert_mmol);
+    const highM = this.normalizeMmol(settings.high_alert_mmol);
 
-  // Candidatos en mg/dL (tal cual)
-  const lowMgRaw  = this.parseSlicerValue(settings.low_alert_mg,  NaN);
-  const highMgRaw = this.parseSlicerValue(settings.high_alert_mg, NaN);
-  const lowMgOK   = Number.isFinite(lowMgRaw)  ? Math.round(lowMgRaw)  : NaN;
-  const highMgOK  = Number.isFinite(highMgRaw) ? Math.round(highMgRaw) : NaN;
+    const mgOK  = Number.isFinite(lowMg)  && Number.isFinite(highMg);
+    const mmOK  = Number.isFinite(lowM)   && Number.isFinite(highM);
 
-  // Candidatos en mmol (pueden venir como 39=>3.9). normalizeMmol ya maneja x10.
-  const lowMmol   = this.normalizeMmol(settings.low_alert_mmol);
-  const highMmol  = this.normalizeMmol(settings.high_alert_mmol);
-  const lowFromMmolMg  = Number.isFinite(lowMmol)  ? Math.round(lowMmol  * 18) : NaN;
-  const highFromMmolMg = Number.isFinite(highMmol) ? Math.round(highMmol * 18) : NaN;
-
-  if (units.includes('mmol')) {
-    // mmol/L tiene prioridad
-    if (Number.isFinite(lowFromMmolMg) && Number.isFinite(highFromMmolMg)) {
-      return { low: lowFromMmolMg, high: highFromMmolMg };
+    if (units.includes('mmol')) {
+      if (mmOK)  return { low: Math.round(lowM*18),  high: Math.round(highM*18) };
+      if (mgOK)  return { low: Math.round(lowMg),    high: Math.round(highMg)   };
+      return { low: Math.round(3.9*18), high: Math.round(13.9*18) };
+    } else {
+      if (mgOK)  return { low: Math.round(lowMg),    high: Math.round(highMg)   };
+      if (mmOK)  return { low: Math.round(lowM*18),  high: Math.round(highM*18) };
+      return { low: 70, high: 250 };
     }
-    if (Number.isFinite(lowMgOK) && Number.isFinite(highMgOK)) {
-      return { low: lowMgOK, high: highMgOK };
-    }
-    // Fallback por defecto típico mmol (3.9/13.9)
-    return { low: Math.round(3.9 * 18), high: Math.round(13.9 * 18) };
-  } else {
-    // mg/dL tiene prioridad (o unidad desconocida)
-    if (Number.isFinite(lowMgOK) && Number.isFinite(highMgOK)) {
-      return { low: lowMgOK, high: highMgOK };
-    }
-    if (Number.isFinite(lowFromMmolMg) && Number.isFinite(highFromMmolMg)) {
-      return { low: lowFromMmolMg, high: highFromMmolMg };
-    }
-    // Fallback por defecto típico mg/dL
-    return { low: 70, high: 250 };
   }
-}
 
   getHysteresisMg(settings) {
-  // Lee candidatos
-  const mg = this.validateSlicerValue(settings.alert_hysteresis_mg, 0, 50, NaN);
-
-  // mmol puede venir sin decimales (x10) o con decimales según UI
-  const raw = this.parseSlicerValue(settings.alert_hysteresis_mmol, NaN);
-  let mmol = NaN;
-  if (Number.isFinite(raw)) {
-    if (Number.isInteger(raw)) {
-      // Consola sin decimales: 0..10 => 0.0..1.0  (p.ej. 3 => 0.3 mmol)
-      if (raw >= 0 && raw <= 10) mmol = raw / 10;
-      // Compatibilidad con “x10 grande” (39 => 3.9) si alguien lo usa aquí
-      else if (raw >= 30) mmol = raw / 10;
-      else mmol = raw; // enteros raros: tratamos como mmol real
+    const mg = this.validateSlicerValue(settings.alert_hysteresis_mg, 0, 50, NaN);
+    const raw = this.parseSlicerValue(settings.alert_hysteresis_mmol, NaN);
+    let mmol = NaN;
+    if (Number.isFinite(raw)) {
+      if (Number.isInteger(raw)) {
+        if (raw >= 0 && raw <= 10) mmol = raw / 10;
+        else if (raw >= 30) mmol = raw / 10;
+        else mmol = raw;
+      } else mmol = raw;
+    }
+    const mmolAsMg = Number.isFinite(mmol) ? Math.round(mmol * 18) : NaN;
+    const units = String(settings.units || '').toLowerCase();
+    if (units.includes('mmol')) {
+      if (Number.isFinite(mmolAsMg)) return mmolAsMg;
+      if (Number.isFinite(mg)) return mg;
+      return 5;
     } else {
-      mmol = raw; // ya decimal (si alguna UI lo permite)
+      if (Number.isFinite(mg)) return mg;
+      if (Number.isFinite(mmolAsMg)) return mmolAsMg;
+      return 5;
     }
   }
-  const mmolAsMg = Number.isFinite(mmol) ? Math.round(mmol * 18) : NaN;
-
-  const units = String(settings.units || '').toLowerCase();
-
-  // PRIORIDAD POR UNIDAD SELECCIONADA
-  if (units.includes('mmol')) {        // mmol/L => usa mmol primero
-    if (Number.isFinite(mmolAsMg)) return mmolAsMg;
-    if (Number.isFinite(mg))        return mg;
-    return 5; // fallback
-  } else {                            // mg/dL (o desconocida) => usa mg primero
-    if (Number.isFinite(mg))        return mg;
-    if (Number.isFinite(mmolAsMg))  return mmolAsMg;
-    return 5; // fallback
-  }
-}
 
   /* ---------- lectura de settings ---------- */
   async getUserSettings(session) {
@@ -178,9 +197,7 @@ getAlertLimits(settings) {
         'show_tir_bar','show_range_bar',
         'display_duration_ms','alert_duration_ms','alert_cooldown_ms',
         'enable_advanced_mode','advanced_mode_enabled',
-        // NUEVO:
         'alert_hysteresis_mg','alert_hysteresis_mmol',
-        // legacy tolerados
         'tir_low_mg','tir_high_mg','tir_low_mmol','tir_high_mmol',
         'time_in_range_low_mg','time_in_range_high_mg','time_in_range_low_mmol','time_in_range_high_mmol',
         'prediction_horizon_min','prediction_horizon_mins',
@@ -205,8 +222,7 @@ getAlertLimits(settings) {
         : this.validateSlicerValue(kv.alert_cooldown_ms, 60000, 3600000, 600000);
 
       const showTirBar = (kv.show_tir_bar == null && kv.show_range_bar == null)
-        ? true
-        : (this.toBool(kv.show_tir_bar) || this.toBool(kv.show_range_bar));
+        ? true : (this.toBool(kv.show_tir_bar) || this.toBool(kv.show_range_bar));
 
       return {
         nightscoutUrl: String(kv.nightscout_url || '').trim() || '',
@@ -226,10 +242,8 @@ getAlertLimits(settings) {
         alert_cooldown_ms: coolMs,
         show_tir_bar: showTirBar,
         enable_advanced_mode: this.toBool(kv.enable_advanced_mode) || this.toBool(kv.advanced_mode_enabled),
-        // NEW: histeresis (defaults)
         alert_hysteresis_mg: this.validateSlicerValue(kv.alert_hysteresis_mg, 0, 50, 5),
         alert_hysteresis_mmol: this.normalizeMmol(kv.alert_hysteresis_mmol) ?? 0.3,
-        // legacy tolerados
         tir_low_mg: this.parseSlicerValue(kv.tir_low_mg, null),
         tir_high_mg: this.parseSlicerValue(kv.tir_high_mg, null),
         tir_low_mmol: this.normalizeMmol(kv.tir_low_mmol),
@@ -281,8 +295,7 @@ getAlertLimits(settings) {
       : this.validateSlicerValue(o.alert_cooldown_ms, 60000, 3600000, 600000);
 
     const showTirBar = (o.show_tir_bar == null && o.show_range_bar == null)
-      ? true
-      : (this.toBool(o.show_tir_bar) || this.toBool(o.show_range_bar));
+      ? true : (this.toBool(o.show_tir_bar) || this.toBool(o.show_range_bar));
 
     return {
       nightscoutUrl: String(o.nightscout_url || '').trim() || '',
@@ -302,10 +315,8 @@ getAlertLimits(settings) {
       alert_cooldown_ms: coolMs,
       show_tir_bar: showTirBar,
       enable_advanced_mode: this.toBool(o.enable_advanced_mode) || this.toBool(o.advanced_mode_enabled),
-      // NEW: histeresis
       alert_hysteresis_mg: this.validateSlicerValue(o.alert_hysteresis_mg, 0, 50, 5),
       alert_hysteresis_mmol: this.normalizeMmol(o.alert_hysteresis_mmol) ?? 0.3,
-      // legacy tolerados
       tir_low_mg: this.parseSlicerValue(o.tir_low_mg, null),
       tir_high_mg: this.parseSlicerValue(o.tir_high_mg, null),
       tir_low_mmol: this.normalizeMmol(o.tir_low_mmol),
@@ -370,7 +381,6 @@ getAlertLimits(settings) {
   async formatForG1WithPrediction(data, settings, sessionId) {
     try {
       const base = await this.formatForG1(data, settings, sessionId);
-      // NO avanzado: pred solo si cruza 60/180 mg/dL
       const predShort = settings.enable_advanced_mode
         ? await this.buildPredictionShort(settings, sessionId, null, null)
         : await this.buildPredictionShort(settings, sessionId, 60, 180);
@@ -406,24 +416,17 @@ getAlertLimits(settings) {
     return cli;
   }
 
-  /**
-   * Predicción breve hasta cruce de límites.
-   * - lowOverrideMg/highOverrideMg: si números ⇒ usar (p.ej. 60/180 para no avanzado)
-   * - si null ⇒ usa límites configurados
-   * Devuelve null si no se prevé cruce dentro del horizonte.
-   */
   async buildPredictionShort(settings, sessionId='default', lowOverrideMg=null, highOverrideMg=null) {
     const lim = this.getAlertLimits(settings);
     const lowThreshold = Number.isFinite(lowOverrideMg) ? lowOverrideMg : lim.low;
     const highThreshold = Number.isFinite(highOverrideMg) ? highOverrideMg : lim.high;
     const horizon = Number(settings.prediction_horizon_min || 30);
-    const maxSteps = Math.max(3, Math.min(12, Math.round(horizon / 5))); // 15..60 → 3..12 pasos
+    const maxSteps = Math.max(3, Math.min(12, Math.round(horizon / 5)));
     const isMmol = String(settings.units || '').toLowerCase().includes('mmol');
     const toDisp = (mgdl) => isMmol ? (mgdl/18).toFixed(1) : String(Math.round(mgdl));
     const http = this._ensureHttp(sessionId, settings);
     if (!http) return null;
 
-    // 1) Método exacto devicestatus
     try {
       const { data } = await http.get(`/api/v1/devicestatus.json?count=1`);
       const ds = Array.isArray(data) ? data[0] : data;
@@ -449,7 +452,6 @@ getAlertLimits(settings) {
       }
     } catch (_) {}
 
-    // 2) Fallback lineal
     try {
       const { data } = await http.get(`/api/v1/entries.json?count=2`);
       if (data && data.length >= 2) {
@@ -628,14 +630,18 @@ getAlertLimits(settings) {
     } catch (_) {}
   }
   hideDisplay(session, sessionId) {
-    try { session.layouts.showTextWall(''); this._lastShownText.delete(sessionId); } catch {}
+    try {
+      session.layouts.clearView();
+      session.layouts.clearView({ view: ViewType.DASHBOARD });
+      this._lastShownText.delete(sessionId);
+    } catch {}
   }
 
   /* ---------- helpers ECO ---------- */
   getAlarmEchoState(sessionId, mgdl, settings) {
     const lim = this.getAlertLimits(settings);
     const latched = this.alertLatch.get(sessionId) || null;
-    if (latched === 'low' || latched === 'high') return latched; // ya activa
+    if (latched === 'low' || latched === 'high') return latched;
     if (!Number.isFinite(mgdl)) return 'none';
     if (mgdl <= lim.low) return 'low';
     if (mgdl >= lim.high) return 'high';
@@ -679,7 +685,7 @@ getAlertLimits(settings) {
         session.logger?.debug?.('Seed TIR failed', { err: e?.message });
       }
 
-      // Reloj de cambio de día
+      // Cambio de día
       const dayWatch = setInterval(() => {
         const sd = this.activeSessions.get(sessionId);
         if (!sd) return;
@@ -691,6 +697,23 @@ getAlertLimits(settings) {
         }
       }, 60 * 1000);
       this.dayWatchTimers.set(sessionId, dayWatch);
+
+      /* ---------- BOOT OVERLAY BMP (5s) con captura de errores ---------- */
+      if (DEBUG_BOOT_BITMAP) {
+        const loc = getBitmapLocationByAlias(DEBUG_BOOT_BITMAP);
+        if (loc) {
+          session.logger?.debug?.(`[debug] DEBUG_BOOT_BITMAP=${DEBUG_BOOT_BITMAP} → mostrando 5s en DASHBOARD`);
+          try {
+            await showBitmapByLocation(session, loc, { view: ViewType.DASHBOARD, durationMs: 5000 });
+          } catch (e) {
+            session.logger?.warn?.('Boot bitmap falló', { msg: e?.message });
+          } finally {
+            setTimeout(() => this.hideDisplay(session, sessionId), 5100);
+          }
+        } else {
+          console.warn(`[debug] DEBUG_BOOT_BITMAP="${DEBUG_BOOT_BITMAP}" no encontrado en assets/bitmaps`);
+        }
+      }
 
       await this.showInitialAndHide(session, sessionId, settings);
       await this.startNormalOperation(session, sessionId, userId, settings);
@@ -719,7 +742,6 @@ getAlertLimits(settings) {
         try { const sum = await this.getRecentTreatments(settings, 'day', sessionId); tLine = this.formatTreatmentsLine(sum, settings, sessionId); } catch {}
         await this.animateTIRFill(session, sessionId, settings, formattedData, tirPct, tLine);
       } else {
-        // No avanzado: base + pred condicionada (60/180)
         this.showClamped(session, sessionId, formattedData);
       }
       this._scheduleHide(sessionId, settings.display_duration_ms || 5000);
@@ -747,7 +769,7 @@ getAlertLimits(settings) {
   async animateTIRFill(session, sessionId, s, headerText, tirPct, tLine='', extraLine='') {
     try {
       const showBar = !!s.show_tir_bar;
-      const anims   = s.enable_animations !== false; // ON por defecto
+      const anims   = s.enable_animations !== false;
       if (!showBar || !anims || tirPct == null || !Number.isFinite(tirPct)){
         const bar = showBar && tirPct != null ? ' ' + this.__barFromRatio(tirPct/100, 20) : '';
         const tirLine = tirPct == null ? (s.language==='es' ? 'TIR hoy: n/d' : 'TIR: n/a') : (s.language==='es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
@@ -830,13 +852,12 @@ getAlertLimits(settings) {
           }
           if (this.alertLimitsChanged(old, settings)) {
             this.alertHistory.delete(sessionId);
-            this.alertLatch.delete(sessionId); // reinicia latch al cambiar límites
+            this.alertLatch.delete(sessionId);
           }
 
           sd.settings = settings;
           this.activeSessions.set(sessionId, sd);
 
-          // ECO: incluye estado de alarma actual
           try {
             let dNow = null;
             try { dNow = await this.getGlucoseData(settings, sessionId); await this.checkAlerts(session, sessionId, dNow, settings); } catch(_){}
@@ -848,15 +869,16 @@ getAlertLimits(settings) {
             const alarmState = this.getAlarmEchoState(sessionId, dNow?.sgv, settings);
             const stateStr = isEs
               ? (alarmState==='low' ? 'Activa: BAJA' : alarmState==='high' ? 'Activa: ALTA' : 'Sin alarma')
-              : (alarmState==='low' ? 'Active: LOW' : alarmState==='high' ? 'Active: HIGH' : 'No alarm');
+              : (alarmState==='low' ? 'Active: LOW' : 'Active: HIGH' : 'No alarm');
 
-            const line1 = isEs ? 'Ajustes guardados' : 'Settings saved';
-            const line2 = `Units: ${settings.units} · HeadUp: ${settings.enable_head_up_display ? 'ON' : 'OFF'}`;
             const unitIsMmol = String(settings.units||'').toLowerCase().includes('mmol');
             const limitsEcho = unitIsMmol
               ? `${(limits.low/18).toFixed(1)}-${(limits.high/18).toFixed(1)} mmol/L`
               : `${limits.low}-${limits.high} mg/dL`;
-            const line3 = `${isEs ? 'TIR hoy' : 'TIR'}: ${limitsEcho}`;
+
+            const line1 = isEs ? 'Ajustes guardados' : 'Settings saved';
+            const line2 = `Units: ${settings.units} · HeadUp: ${settings.enable_head_up_display ? 'ON' : 'OFF'}`;
+            const line3 = `${isEs ? 'Rango' : 'Range'}: ${limitsEcho}`;
             const line4 = `${isEs ? 'Avanzado' : 'Advanced'}: ${settings.enable_advanced_mode ? 'ON' : 'OFF'}`;
             const line5 = (isEs ? 'Alarmas' : 'Alerts') + `: ${settings.alertsEnabled ? 'ON' : 'OFF'} · Hyst: ±${hystMg} mg/dL (±${hystMmol} mmol/L) · ${stateStr}`;
 
@@ -885,6 +907,7 @@ getAlertLimits(settings) {
           const s = sd?.settings; if (!s) return; if (!s.enable_head_up_display) return;
           const now = Date.now(); const last = this.headUpLastShown.get(sessionId) || 0;
           if (now - last < 10000) return; this.headUpLastShown.set(sessionId, now);
+
           const reading = await this.getGlucoseData(s, sessionId);
           const baseLine = await this.formatForG1WithPrediction(reading, s, sessionId);
           if (!s.enable_advanced_mode) {
@@ -996,38 +1019,30 @@ getAlertLimits(settings) {
     const latch = this.alertLatch.get(sessionId) || null;
     const h = this.getHysteresisMg(settings);
 
-    // Rearme por histeresis
     if (latch === 'low' && mgdl >= (limits.low + h)) {
       this.alertLatch.set(sessionId, null);
     } else if (latch === 'high' && mgdl <= (limits.high - h)) {
       this.alertLatch.set(sessionId, null);
     }
 
-    // Si sigue latcheado, no relanzar
     if (this.alertLatch.get(sessionId)) return;
-
-    // Cooldown general
     if (lastAlertTs && Date.now() - lastAlertTs < cooldown) return;
 
-    // Forzado debug
     const dbg = (settings.debug_force_alert || '').toLowerCase();
     let alertType = null;
 
-    if (mgdl <= limits.low || dbg === 'low') {
-      alertType = 'low';
-    } else if (mgdl >= limits.high || dbg === 'high') {
-      alertType = 'high';
-    }
+    if (mgdl <= limits.low || dbg === 'low') alertType = 'low';
+    else if (mgdl >= limits.high || dbg === 'high') alertType = 'high';
 
     if (alertType) {
       this.alertHistory.set(sessionId, Date.now());
       this.alertLatch.set(sessionId, alertType);
-      await this.triggerAnimatedAlert(session, sessionId, data, settings, alertType);
+      await this.triggerBitmapAlert(session, sessionId, data, settings, alertType);
       session.logger?.warn('Alert sent', { type: alertType, value: mgdl });
     }
   }
 
-  async triggerAnimatedAlert(session, sessionId, data, settings, type) {
+  async triggerBitmapAlert(session, sessionId, data, settings, type) {
     const displayValue = this.convertToDisplay(data.sgv, settings.units || UNITS.MGDL);
     const unit = settings.units || UNITS.MGDL;
     const lang = settings.language || 'en';
@@ -1037,10 +1052,21 @@ getAlertLimits(settings) {
     };
     const baseText = `${msgs[lang][type]}\n${displayValue} ${unit}`;
     const alertDuration = settings.alert_duration_ms || 15000;
-    const blinkInterval = 600;
 
+    const loc = getBitmapLocationByAlias(type === 'low' ? 'low' : 'high');
+    try {
+      if (loc) {
+        await showBitmapByLocation(session, loc, { view: ViewType.DASHBOARD, durationMs: alertDuration });
+        setTimeout(() => this.hideDisplay(session, sessionId), alertDuration + 120);
+        return;
+      }
+    } catch (e) {
+      session.logger?.warn?.('Bitmap alert (location) falló, usando texto', { msg: e?.message });
+    }
+
+    // Fallback texto si no hay BMP o falla la carga
     if (this.displayTimers.has(sessionId)) clearTimeout(this.displayTimers.get(sessionId));
-
+    const blinkInterval = 600;
     const startTime = Date.now();
     let isVisible = true;
     const blinker = setInterval(() => {
