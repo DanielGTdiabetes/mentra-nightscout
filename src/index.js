@@ -9,25 +9,11 @@
  *  - Histeresis de alarmas (alert_hysteresis_mg / alert_hysteresis_mmol) con latch
  *  - En NO avanzado, predicción sólo si cruza ≤60 o ≥180 mg/dL (fijos)
  *  - ECO al guardar ajustes incluye estado de alarmas (BAJA/ALTA/Sin) en ES/EN, compacto
- *  - Soporte opcional para bitmaps (si están disponibles)
  */
 
 require('dotenv').config();
 const { AppServer } = require('@mentra/sdk');
 const axios = require('axios');
-const BITMAPS = require("./bitmaps");
-
-// Bitmaps externos (no tocar servidor si faltan; fallback a texto)
-let loadAllBitmaps = null, getBitmap = null, hasBitmap = null;
-try {
-  ({ loadAllBitmaps, getBitmap, hasBitmap } = require('./bitmaps'));
-  try { if (typeof loadAllBitmaps === 'function') loadAllBitmaps(); } catch (_) {}
-} catch (_) {
-  // Si no hay módulo de bitmaps, crear funciones vacías
-  loadAllBitmaps = () => {};
-  getBitmap = () => null;
-  hasBitmap = () => false;
-}
 
 /* ---------- SHIM: compatibilidad SDK ---------- */
 if (typeof Object.prototype.updateSettingsForTesting !== 'function') {
@@ -106,77 +92,79 @@ class NightscoutMentraApp extends AppServer {
   }
 
   /* ---------- alertas / límites ---------- */
-  getAlertLimits(settings) {
-    const units = String(settings.units || '').toLowerCase();
+  // PRIORIDAD POR UNIDAD: si units=mmol/L usa primero low/high en mmol (x10), si no, usa mg/dL.
+// Siempre devuelve límites en mg/dL para el resto del código.
+getAlertLimits(settings) {
+  const units = String(settings.units || '').toLowerCase();
 
-    // Candidatos en mg/dL (tal cual)
-    const lowMgRaw  = this.parseSlicerValue(settings.low_alert_mg,  NaN);
-    const highMgRaw = this.parseSlicerValue(settings.high_alert_mg, NaN);
-    const lowMgOK   = Number.isFinite(lowMgRaw)  ? Math.round(lowMgRaw)  : NaN;
-    const highMgOK  = Number.isFinite(highMgRaw) ? Math.round(highMgRaw) : NaN;
+  // Candidatos en mg/dL (tal cual)
+  const lowMgRaw  = this.parseSlicerValue(settings.low_alert_mg,  NaN);
+  const highMgRaw = this.parseSlicerValue(settings.high_alert_mg, NaN);
+  const lowMgOK   = Number.isFinite(lowMgRaw)  ? Math.round(lowMgRaw)  : NaN;
+  const highMgOK  = Number.isFinite(highMgRaw) ? Math.round(highMgRaw) : NaN;
 
-    // Candidatos en mmol (pueden venir como 39=>3.9). normalizeMmol ya maneja x10.
-    const lowMmol   = this.normalizeMmol(settings.low_alert_mmol);
-    const highMmol  = this.normalizeMmol(settings.high_alert_mmol);
-    const lowFromMmolMg  = Number.isFinite(lowMmol)  ? Math.round(lowMmol  * 18) : NaN;
-    const highFromMmolMg = Number.isFinite(highMmol) ? Math.round(highMmol * 18) : NaN;
+  // Candidatos en mmol (pueden venir como 39=>3.9). normalizeMmol ya maneja x10.
+  const lowMmol   = this.normalizeMmol(settings.low_alert_mmol);
+  const highMmol  = this.normalizeMmol(settings.high_alert_mmol);
+  const lowFromMmolMg  = Number.isFinite(lowMmol)  ? Math.round(lowMmol  * 18) : NaN;
+  const highFromMmolMg = Number.isFinite(highMmol) ? Math.round(highMmol * 18) : NaN;
 
-    if (units.includes('mmol')) {
-      // mmol/L tiene prioridad
-      if (Number.isFinite(lowFromMmolMg) && Number.isFinite(highFromMmolMg)) {
-        return { low: lowFromMmolMg, high: highFromMmolMg };
-      }
-      if (Number.isFinite(lowMgOK) && Number.isFinite(highMgOK)) {
-        return { low: lowMgOK, high: highMgOK };
-      }
-      // Fallback por defecto típico mmol (3.9/13.9)
-      return { low: Math.round(3.9 * 18), high: Math.round(13.9 * 18) };
-    } else {
-      // mg/dL tiene prioridad (o unidad desconocida)
-      if (Number.isFinite(lowMgOK) && Number.isFinite(highMgOK)) {
-        return { low: lowMgOK, high: highMgOK };
-      }
-      if (Number.isFinite(lowFromMmolMg) && Number.isFinite(highFromMmolMg)) {
-        return { low: lowFromMmolMg, high: highFromMmolMg };
-      }
-      // Fallback por defecto típico mg/dL
-      return { low: 70, high: 250 };
+  if (units.includes('mmol')) {
+    // mmol/L tiene prioridad
+    if (Number.isFinite(lowFromMmolMg) && Number.isFinite(highFromMmolMg)) {
+      return { low: lowFromMmolMg, high: highFromMmolMg };
     }
+    if (Number.isFinite(lowMgOK) && Number.isFinite(highMgOK)) {
+      return { low: lowMgOK, high: highMgOK };
+    }
+    // Fallback por defecto típico mmol (3.9/13.9)
+    return { low: Math.round(3.9 * 18), high: Math.round(13.9 * 18) };
+  } else {
+    // mg/dL tiene prioridad (o unidad desconocida)
+    if (Number.isFinite(lowMgOK) && Number.isFinite(highMgOK)) {
+      return { low: lowMgOK, high: highMgOK };
+    }
+    if (Number.isFinite(lowFromMmolMg) && Number.isFinite(highFromMmolMg)) {
+      return { low: lowFromMmolMg, high: highFromMmolMg };
+    }
+    // Fallback por defecto típico mg/dL
+    return { low: 70, high: 250 };
   }
+}
 
   getHysteresisMg(settings) {
-    // Lee candidatos
-    const mg = this.validateSlicerValue(settings.alert_hysteresis_mg, 0, 50, NaN);
+  // Lee candidatos
+  const mg = this.validateSlicerValue(settings.alert_hysteresis_mg, 0, 50, NaN);
 
-    // mmol puede venir sin decimales (x10) o con decimales según UI
-    const raw = this.parseSlicerValue(settings.alert_hysteresis_mmol, NaN);
-    let mmol = NaN;
-    if (Number.isFinite(raw)) {
-      if (Number.isInteger(raw)) {
-        // Consola sin decimales: 0..10 => 0.0..1.0  (p.ej. 3 => 0.3 mmol)
-        if (raw >= 0 && raw <= 10) mmol = raw / 10;
-        // Compatibilidad con "x10 grande" (39 => 3.9) si alguien lo usa aquí
-        else if (raw >= 30) mmol = raw / 10;
-        else mmol = raw; // enteros raros: tratamos como mmol real
-      } else {
-        mmol = raw; // ya decimal (si alguna UI lo permite)
-      }
-    }
-    const mmolAsMg = Number.isFinite(mmol) ? Math.round(mmol * 18) : NaN;
-
-    const units = String(settings.units || '').toLowerCase();
-
-    // PRIORIDAD POR UNIDAD SELECCIONADA
-    if (units.includes('mmol')) {        // mmol/L => usa mmol primero
-      if (Number.isFinite(mmolAsMg)) return mmolAsMg;
-      if (Number.isFinite(mg))        return mg;
-      return 5; // fallback
-    } else {                            // mg/dL (o desconocida) => usa mg primero
-      if (Number.isFinite(mg))        return mg;
-      if (Number.isFinite(mmolAsMg))  return mmolAsMg;
-      return 5; // fallback
+  // mmol puede venir sin decimales (x10) o con decimales según UI
+  const raw = this.parseSlicerValue(settings.alert_hysteresis_mmol, NaN);
+  let mmol = NaN;
+  if (Number.isFinite(raw)) {
+    if (Number.isInteger(raw)) {
+      // Consola sin decimales: 0..10 => 0.0..1.0  (p.ej. 3 => 0.3 mmol)
+      if (raw >= 0 && raw <= 10) mmol = raw / 10;
+      // Compatibilidad con “x10 grande” (39 => 3.9) si alguien lo usa aquí
+      else if (raw >= 30) mmol = raw / 10;
+      else mmol = raw; // enteros raros: tratamos como mmol real
+    } else {
+      mmol = raw; // ya decimal (si alguna UI lo permite)
     }
   }
+  const mmolAsMg = Number.isFinite(mmol) ? Math.round(mmol * 18) : NaN;
+
+  const units = String(settings.units || '').toLowerCase();
+
+  // PRIORIDAD POR UNIDAD SELECCIONADA
+  if (units.includes('mmol')) {        // mmol/L => usa mmol primero
+    if (Number.isFinite(mmolAsMg)) return mmolAsMg;
+    if (Number.isFinite(mg))        return mg;
+    return 5; // fallback
+  } else {                            // mg/dL (o desconocida) => usa mg primero
+    if (Number.isFinite(mg))        return mg;
+    if (Number.isFinite(mmolAsMg))  return mmolAsMg;
+    return 5; // fallback
+  }
+}
 
   /* ---------- lectura de settings ---------- */
   async getUserSettings(session) {
@@ -1053,46 +1041,23 @@ class NightscoutMentraApp extends AppServer {
 
     if (this.displayTimers.has(sessionId)) clearTimeout(this.displayTimers.get(sessionId));
 
-    // Intentar mostrar bitmap si está disponible
-    let bitmapShown = false;
-    try {
-      const bmpKey = type === 'low' ? 'alert-low-526x100' : 'alert-high-526x100';
-      if (hasBitmap && hasBitmap(bmpKey) && getBitmap) {
-        const bmp = getBitmap(bmpKey);
-        if (bmp && session && session.layouts && typeof session.layouts.showBitmap === 'function') {
-          session.layouts.showBitmap(bmp.dataRGBA, bmp.width, bmp.height);
-          bitmapShown = true;
-        }
-      }
-    } catch (e) {
-      console.error('Error mostrando bitmap:', e);
-    }
-
-    // Si no se pudo mostrar bitmap, usar texto parpadeante normal
-    if (!bitmapShown) {
-      const startTime = Date.now();
-      let isVisible = true;
-      const blinker = setInterval(() => {
-        if (Date.now() - startTime > alertDuration) {
-          clearInterval(blinker);
-          this.hideDisplay(session, sessionId);
-          return;
-        }
-        const symbol = isVisible ? '[!]' : '[ ]';
-        this.showClamped(session, sessionId, `${symbol} ${baseText}`);
-        isVisible = !isVisible;
-      }, blinkInterval);
-
-      this.displayTimers.set(sessionId, setTimeout(() => {
+    const startTime = Date.now();
+    let isVisible = true;
+    const blinker = setInterval(() => {
+      if (Date.now() - startTime > alertDuration) {
         clearInterval(blinker);
         this.hideDisplay(session, sessionId);
-      }, alertDuration + 120));
-    } else {
-      // Si se mostró bitmap, mantenerlo durante el tiempo de alerta
-      this.displayTimers.set(sessionId, setTimeout(() => {
-        this.hideDisplay(session, sessionId);
-      }, alertDuration));
-    }
+        return;
+      }
+      const symbol = isVisible ? '[!]' : '[ ]';
+      this.showClamped(session, sessionId, `${symbol} ${baseText}`);
+      isVisible = !isVisible;
+    }, blinkInterval);
+
+    this.displayTimers.set(sessionId, setTimeout(() => {
+      clearInterval(blinker);
+      this.hideDisplay(session, sessionId);
+    }, alertDuration + 120));
   }
 
   alertLimitsChanged(oldSettings, newSettings) {
@@ -1166,7 +1131,7 @@ server.start().catch(err => {
   console.error('⛔ Error iniciando servidor:', err);
   process.exit(1);
 });
-console.log('🚀 Nightscout MentraOS v2.13.1 — Hysteresis + ECO + Pred no-avanzado + Bitmaps opcionales');
+console.log('🚀 Nightscout MentraOS v2.13.1 — Hysteresis + ECO + Pred no-avanzado');
 
 const KEEP_ALIVE_URL = process.env.RENDER_URL || 'https://mentra-nightscout.onrender.com';
 server.app.get('/health', (_, res) => res.json({
