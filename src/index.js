@@ -51,20 +51,21 @@ function isLikelyBmp(location) {
 }
 
 /** Muestra un bitmap leyendo bytes y enviando Base64 al SDK (robusto) */
-async function showBitmapByLocation(session, location, { view = ViewType.DASHBOARD, durationMs = 5000 } = {}) {
+async function showBitmapByLocation(session, location, { durationMs = 5000 } = {}) {
   if (!location) {
-    try { session.layouts.showTextWall('(bitmap missing)', { view, durationMs }); } catch {}
+    try { session.layouts.showTextWall('(bitmap missing)', { durationMs }); } catch {}
     return false;
   }
   try {
     if (!isLikelyBmp(location)) throw new Error('firma BM no encontrada (no es BMP válido)');
     const buf = fs.readFileSync(location);
     const b64 = buf.toString('base64');
-    session.layouts.showBitmapView(b64, { view, durationMs });
+    // Importante: no pasamos 'view' → se usa la vista visible de la app (no el dashboard del sistema)
+    session.layouts.showBitmapView(b64, { durationMs });
     return true;
   } catch (e) {
     session.logger?.warn?.('Bitmap base64 mode falló, fallback texto', { msg: e?.message, location });
-    try { session.layouts.showTextWall('(bitmap error)', { view, durationMs }); } catch {}
+    try { session.layouts.showTextWall('(bitmap error)', { durationMs }); } catch {}
     return false;
   }
 }
@@ -715,7 +716,7 @@ class NightscoutMentraApp extends AppServer {
         if (loc) {
           session.logger?.debug?.(`[debug] DEBUG_BOOT_BITMAP=${DEBUG_BOOT_BITMAP} → mostrando 5s en DASHBOARD`);
           try {
-            await showBitmapByLocation(session, loc, { view: ViewType.DASHBOARD, durationMs: 5000 });
+            await showBitmapByLocation(session, loc, { durationMs: 5000 });
           } catch (e) {
             session.logger?.warn?.('Boot bitmap falló', { msg: e?.message });
           } finally {
@@ -1095,7 +1096,7 @@ class NightscoutMentraApp extends AppServer {
     let ok = false;
     if (loc) {
       try {
-        ok = await showBitmapByLocation(session, loc, { view: ViewType.DASHBOARD, durationMs: alertDuration });
+        ok = await showBitmapByLocation(session, loc, { durationMs: alertDuration });
       } catch (_) { ok = false; }
     }
 
