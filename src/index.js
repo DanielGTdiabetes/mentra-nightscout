@@ -21,6 +21,7 @@ const fs = require('fs/promises');
 const PACKAGE_NAME = process.env.PACKAGE_NAME || 'com.tucompania.nightscout-glucose';
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const MENTRAOS_API_KEY = process.env.MENTRAOS_API_KEY;
+const DEBUG_BOOT_BITMAP = (process.env.DEBUG_BOOT_BITMAP || '').toLowerCase(); // \"low\" | \"high\" | \"bell\" | \"\"
 
 if (!MENTRAOS_API_KEY) {
   console.error('⛔ MENTRAOS_API_KEY environment variable is required');
@@ -717,6 +718,8 @@ class NightscoutMentraApp extends AppServer {
       path.resolve(__dirname, 'assets', 'bitmaps'),
       path.resolve(__dirname, '.', 'assets', 'bitmaps'),
       path.resolve(__dirname, '..', 'assets', 'bitmaps'),
+      path.resolve(process.cwd(), 'public', 'assets', 'bitmaps'),
+      path.resolve(process.cwd(), 'src', 'assets', 'bitmaps'),
     ];
     console.log('📁 Directorios candidatos:', candidates);
 
@@ -806,10 +809,19 @@ class NightscoutMentraApp extends AppServer {
         return null;
       };
 
-      const bell = pickHex('alert-bell-576x100.bmp', 'alert-bell-526x100.bmp', 'alert-bell.bmp');
-      const lowBmp = pickHex('alert-low-576x100.bmp', 'alert-low-526x100.bmp', 'alert-low.bmp');
-      const highBmp = pickHex('alert-high-576x100.bmp', 'alert-high-526x100.bmp', 'alert-high.bmp');
-      const pick = type === 'low' ? lowBmp : highBmp;
+      const bell = pickHex(
+  'alert-bell-576x100.bmp','alert-bell-526x100.bmp','alert-bell.bmp',
+  'alert_bell-576x100.bmp','alert_bell-526x100.bmp','alert_bell.bmp','bell.bmp'
+);
+const lowBmp = pickHex(
+  'alert-low-576x100.bmp','alert-low-526x100.bmp','alert-low.bmp',
+  'alert_low-576x100.bmp','alert_low-526x100.bmp','alert_low.bmp','low.bmp'
+);
+const highBmp = pickHex(
+  'alert-high-576x100.bmp','alert-high-526x100.bmp','alert-high.bmp',
+  'alert_high-576x100.bmp','alert_high-526x100.bmp','alert_high.bmp','high.bmp'
+);
+const pick = type === 'low' ? lowBmp : highBmp;
 
       const frames = [];
       if (bell && pick) frames.push(bell, pick);
@@ -884,6 +896,8 @@ class NightscoutMentraApp extends AppServer {
       }
 
       this.activeSessions.set(sessionId, { session, userId, settings, updateInterval: null });
+      if (DEBUG_BOOT_BITMAP === 'low' || DEBUG_BOOT_BITMAP === 'high' || DEBUG_BOOT_BITMAP === 'bell') { try { await this._playAlertBitmap(session, sessionId, DEBUG_BOOT_BITMAP, 500, 5000); } catch (_) {} }
+
       this.setupEventHandlers(session, sessionId, userId);
 
       try {
@@ -1063,6 +1077,21 @@ class NightscoutMentraApp extends AppServer {
           }
           sd.settings = settings;
           this.activeSessions.set(sessionId, sd);
+
+// Forzado de alerta para pruebas: independiente de Nightscout
+try {
+  const dbg = String(settings.debug_force_alert || '').toLowerCase();
+  if (dbg === 'low' || dbg === 'high') {
+    let data;
+    try { data = await this.getGlucoseData(settings, sessionId); } catch (_) {
+      const lim = this.getAlertLimits(settings);
+      const fake = (dbg === 'low') ? (lim.low - 1) : (lim.high + 1);
+      data = { sgv: fake, date: Date.now(), direction: 'Flat' };
+    }
+    await this.triggerAnimatedAlert(session, sessionId, data, settings, dbg);
+  }
+} catch (_) {}
+
 
           try {
             let dNow = null;
@@ -1267,7 +1296,8 @@ class NightscoutMentraApp extends AppServer {
   const unit = settings.units || UNITS.MGDL;
   const lang = settings.language || 'en';
   const msgs = { en: { low: `LOW GLUCOSE!`, high: `HIGH GLUCOSE!` }, es: { low: `¡GLUCOSA BAJA!`, high: `¡GLUCOSA ALTA!` } };
-  const baseText = `${msgs[lang][type]}\n${displayValue} ${unit}`;
+  const baseText = `${msgs[lang][type]}
+${displayValue} ${unit}`;
   const alertDuration = settings.alert_duration_ms || 15000;
   const blinkInterval = 600;
 
