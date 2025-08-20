@@ -6,15 +6,15 @@
  * Settings en segundos/minutos + toggle barra TIR
  * Mejora: cliente axios por sesión, debounce de settings, animación reforzada
  * NUEVO:
- *  - Histeresis de alarmas (alert_hysteresis_mg / alert_hysteresis_mmol) con latch
- *  - En NO avanzado, predicción sólo si cruza ≤60 o ≥180 mg/dL (fijos)
- *  - ECO al guardar ajustes incluye estado de alarmas (BAJA/ALTA/Sin) en ES/EN, compacto
+ * - Histeresis de alarmas (alert_hysteresis_mg / alert_hysteresis_mmol) con latch
+ * - En NO avanzado, predicción sólo si cruza ≤60 o ≥180 mg/dL (fijos)
+ * - ECO al guardar ajustes incluye estado de alarmas (BAJA/ALTA/Sin) en ES/EN, compacto
  *
  * Actualización:
- *  - Bitmaps usando session.layouts.showBitmapView **con location:** (sin helpers legacy)
- *  - ClearView tras mostrar bitmaps
- *  - Aliases para “low”, “high”, “sun”, “cloud”, “rain”
- *  - DEBUG_BOOT_BITMAP=low|high|sun|cloud|rain (overlay 5s en DASHBOARD)
+ * - Bitmaps usando session.layouts.showBitmapView **con location:** (sin helpers legacy)
+ * - ClearView tras mostrar bitmaps
+ * - Aliases para “low”, “high”, “sun”, “cloud”, “rain”
+ * - DEBUG_BOOT_BITMAP=low|high|sun|cloud|rain (overlay 5s en DASHBOARD)
  */
 
 require('dotenv').config();
@@ -47,8 +47,8 @@ function showBitmapByLocation(session, location, { view = ViewType.DASHBOARD, du
       return;
     }
     // Forma con location (sin hex/base64, sin helpers):
-    // Pasamos el objeto con la ubicación y opciones separadas (view/duration).
-    session.layouts.showBitmapView({ location }, { view, durationMs });
+    // Pasamos el objeto con la ubicación y opciones en un único objeto.
+    session.layouts.showBitmapView({ location, view, durationMs });
   } catch (e) {
     try {
       session.layouts.showTextWall('(error bitmap)', { view, durationMs });
