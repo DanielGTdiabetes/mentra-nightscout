@@ -14,7 +14,7 @@
 require('dotenv').config();
 const { AppServer } = require('@mentra/sdk');
 const axios = require('axios');
-
+const { AVAILABLE_KEYS, loadBitmaps, getBitmapHex } = require('./bitmaps');
 /* ---------- SHIM: compatibilidad SDK ---------- */
 if (typeof Object.prototype.updateSettingsForTesting !== 'function') {
   Object.defineProperty(Object.prototype, 'updateSettingsForTesting', {
@@ -641,7 +641,34 @@ getAlertLimits(settings) {
     if (mgdl >= lim.high) return 'high';
     return 'none';
   }
+/* ---------- Bitmaps: helpers ---------- */
+  async showBitmapSafe(session, hexData, durationMs = 5000) {
+    if (!hexData || typeof session?.layouts?.showBitmapView !== 'function') return false;
+    try {
+      // La API correcta del SDK es showBitmapView(hexString, { durationMs })
+      await session.layouts.showBitmapView(hexData, { durationMs: Math.max(1, durationMs|0) });
+      return true;
+    } catch (e) {
+      session?.logger?.debug?.('showBitmapView failed', { err: e?.message });
+      return false;
+    }
+  }
 
+  /**
+   * Enseña un bitmap por clave (p.ej. 'alert-low-526x100') con fallback a texto si falla.
+   * @returns {boolean} true si mostró bitmap; false si hizo fallback o no pudo.
+   */
+  async tryShowBitmapByKey(session, key, durationMs, fallbackText = '') {
+    try {
+      const hex = await getBitmapHex(key);
+      if (hex) {
+        const ok = await this.showBitmapSafe(session, hex, durationMs);
+        if (ok) return true;
+      }
+    } catch (_) {}
+    if (fallbackText) this.showClamped(session, 'default', fallbackText);
+    return false;
+  }
   /* ---------- ciclo de vida ---------- */
   async onSession(session, sessionId, userId) {
     console.log(`✅ Nueva sesión: ${sessionId} para ${userId}`);
@@ -658,7 +685,25 @@ getAlertLimits(settings) {
         this.showClamped(session, sessionId, msg[settings.language || 'en']);
         return;
       }
+      // Carga previa (no bloqueante) de bitmaps para calentar caché
+      loadBitmaps().then(res => {
+        const loaded = Object.entries(res).filter(([,hex]) => !!hex).map(([k]) => k);
+        session.logger?.info?.(`Bitmaps precargados: ${loaded.length}/${AVAILABLE_KEYS.length}`, { loaded });
+      }).catch(()=>{});
 
+      // Test visual opcional al arrancar (debug)
+      const dbgKey = String(process.env.DEBUG_BOOT_BITMAP || '').toLowerCase();
+      const dbgMap = { low: 'alert-low-526x100', high: 'alert-high-526x100', sun:'weather-sun-526x100', cloud:'weather-cloud-526x100', rain:'weather-rain-526x100' };
+      const dbgSel = dbgMap[dbgKey] || null;
+      if (dbgSel && AVAILABLE_KEYS.includes(dbgSel)) {
+        try {
+          const shown = await this.tryShowBitmapByKey(session, dbgSel, 5000, '');
+          if (shown) {
+            // Si mostramos el bitmap, esperamos un poco para que se vea y luego continuamos
+            await this.__delay(5200);
+          }
+        } catch (_) {}
+      }
       this.activeSessions.set(sessionId, { session, userId, settings, updateInterval: null });
       this.setupEventHandlers(session, sessionId, userId);
 
@@ -1037,10 +1082,29 @@ getAlertLimits(settings) {
     };
     const baseText = `${msgs[lang][type]}\n${displayValue} ${unit}`;
     const alertDuration = settings.alert_duration_ms || 15000;
-    const blinkInterval = 600;
 
+    // 1) Intento con BITMAP según tipo
+    const key = (type === 'low') ? 'alert-low-526x100' : 'alert-high-526x100';
+    let shownBitmap = false;
+    if (AVAILABLE_KEYS.includes(key)) {
+      try {
+        const hex = await getBitmapHex(key);
+        if (hex) {
+          shownBitmap = await this.showBitmapSafe(session, hex, alertDuration);
+        }
+      } catch (_) {}
+    }
+if (shownBitmap) {
+      // Ya se mostró el bitmap; programamos ocultar y salimos
+      if (this.displayTimers.has(sessionId)) clearTimeout(this.displayTimers.get(sessionId));
+      this.displayTimers.set(sessionId, setTimeout(() => this.hideDisplay(session, sessionId), alertDuration + 120));
+      return;
+    }
+
+    // 2) Fallback: blinking de texto si bitmap no está disponible
     if (this.displayTimers.has(sessionId)) clearTimeout(this.displayTimers.get(sessionId));
 
+    const blinkInterval = 600;
     const startTime = Date.now();
     let isVisible = true;
     const blinker = setInterval(() => {
@@ -1059,7 +1123,6 @@ getAlertLimits(settings) {
       this.hideDisplay(session, sessionId);
     }, alertDuration + 120));
   }
-
   alertLimitsChanged(oldSettings, newSettings) {
     if (!oldSettings) return false;
     return (
