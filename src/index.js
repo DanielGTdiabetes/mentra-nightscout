@@ -9,12 +9,69 @@
  *  - Histeresis de alarmas (alert_hysteresis_mg / alert_hysteresis_mmol) con latch
  *  - En NO avanzado, predicción sólo si cruza ≤60 o ≥180 mg/dL (fijos)
  *  - ECO al guardar ajustes incluye estado de alarmas (BAJA/ALTA/Sin) en ES/EN, compacto
+ *  - BMPs: carga/validación/padding → boot overlay por DEBUG_BOOT_BITMAP y alertas con bitmaps
  */
 
 require('dotenv').config();
 const { AppServer } = require('@mentra/sdk');
 const axios = require('axios');
-const { AVAILABLE_KEYS, loadBitmaps, getBitmapHex } = require('./bitmaps');
+const path = require('path');
+
+/* ---------- BMPs (carga/validación/padding 576 px) ---------- */
+const { loadBitmapsFromDir } = require('./bitmaps');
+const BITMAPS_DIR = path.join(process.cwd(), 'assets', 'bitmaps');
+const DEBUG_BOOT_BITMAP = (process.env.DEBUG_BOOT_BITMAP || '').toLowerCase().trim(); // 'low'|'high'|'sun'|'cloud'|'rain'
+const BITMAPS = loadBitmapsFromDir(BITMAPS_DIR);
+
+// Aliases que usábamos cuando “sol y low” funcionaban
+const BOOT_ALIAS = {
+  low:   'alert-low-526x100',
+  high:  'alert-high-526x100',
+  sun:   'weather-sun-526x100',
+  cloud: 'weather-cloud-526x100',
+  rain:  'weather-rain-526x100',
+};
+function getBitmapByAlias(name) {
+  const key = BOOT_ALIAS[name];
+  return key ? BITMAPS[key] || null : null;
+}
+
+// Función robusta para mostrar un bitmap (prueba varias APIs del SDK y hace fallback a texto)
+async function showBitmapCompat(session, { bitmap, width = 576, durationMs = 5000, fallbackText = '(bitmap)' }) {
+  if (!bitmap || !Buffer.isBuffer(bitmap)) {
+    // Nada que mostrar; fallback
+    try { session.layouts?.showTextWall?.(fallbackText); } catch {}
+    if (durationMs > 0) await new Promise(r => setTimeout(r, durationMs));
+    try { session.layouts?.showTextWall?.(''); } catch {}
+    return;
+  }
+
+  // Intento 1: API directa si existe
+  try {
+    if (typeof session.showBitmap === 'function') {
+      await session.showBitmap({ view: 'DASHBOARD', bitmap, width, durationMs });
+      return;
+    }
+  } catch (e) {
+    session.logger?.debug?.('showBitmap (direct) falló, probando alternativas', { msg: e?.message });
+  }
+
+  // Intento 2: layouts.showBitmap (algunas builds lo exponen)
+  try {
+    if (session.layouts && typeof session.layouts.showBitmap === 'function') {
+      await session.layouts.showBitmap(bitmap, width, durationMs);
+      return;
+    }
+  } catch (e) {
+    session.logger?.debug?.('layouts.showBitmap falló, haciendo fallback a texto', { msg: e?.message });
+  }
+
+  // Fallback final: texto
+  try { session.layouts?.showTextWall?.(fallbackText); } catch {}
+  if (durationMs > 0) await new Promise(r => setTimeout(r, durationMs));
+  try { session.layouts?.showTextWall?.(''); } catch {}
+}
+
 /* ---------- SHIM: compatibilidad SDK ---------- */
 if (typeof Object.prototype.updateSettingsForTesting !== 'function') {
   Object.defineProperty(Object.prototype, 'updateSettingsForTesting', {
@@ -92,79 +149,24 @@ class NightscoutMentraApp extends AppServer {
   }
 
   /* ---------- alertas / límites ---------- */
-  // PRIORIDAD POR UNIDAD: si units=mmol/L usa primero low/high en mmol (x10), si no, usa mg/dL.
-// Siempre devuelve límites en mg/dL para el resto del código.
-getAlertLimits(settings) {
-  const units = String(settings.units || '').toLowerCase();
-
-  // Candidatos en mg/dL (tal cual)
-  const lowMgRaw  = this.parseSlicerValue(settings.low_alert_mg,  NaN);
-  const highMgRaw = this.parseSlicerValue(settings.high_alert_mg, NaN);
-  const lowMgOK   = Number.isFinite(lowMgRaw)  ? Math.round(lowMgRaw)  : NaN;
-  const highMgOK  = Number.isFinite(highMgRaw) ? Math.round(highMgRaw) : NaN;
-
-  // Candidatos en mmol (pueden venir como 39=>3.9). normalizeMmol ya maneja x10.
-  const lowMmol   = this.normalizeMmol(settings.low_alert_mmol);
-  const highMmol  = this.normalizeMmol(settings.high_alert_mmol);
-  const lowFromMmolMg  = Number.isFinite(lowMmol)  ? Math.round(lowMmol  * 18) : NaN;
-  const highFromMmolMg = Number.isFinite(highMmol) ? Math.round(highMmol * 18) : NaN;
-
-  if (units.includes('mmol')) {
-    // mmol/L tiene prioridad
-    if (Number.isFinite(lowFromMmolMg) && Number.isFinite(highFromMmolMg)) {
-      return { low: lowFromMmolMg, high: highFromMmolMg };
+  getAlertLimits(settings) { // devuelve mg/dL
+    const lowMg  = this.parseSlicerValue(settings.low_alert_mg, NaN);
+    const highMg = this.parseSlicerValue(settings.high_alert_mg, NaN);
+    if (Number.isFinite(lowMg) && Number.isFinite(highMg)) {
+      return { low: Math.round(lowMg), high: Math.round(highMg) };
     }
-    if (Number.isFinite(lowMgOK) && Number.isFinite(highMgOK)) {
-      return { low: lowMgOK, high: highMgOK };
-    }
-    // Fallback por defecto típico mmol (3.9/13.9)
-    return { low: Math.round(3.9 * 18), high: Math.round(13.9 * 18) };
-  } else {
-    // mg/dL tiene prioridad (o unidad desconocida)
-    if (Number.isFinite(lowMgOK) && Number.isFinite(highMgOK)) {
-      return { low: lowMgOK, high: highMgOK };
-    }
-    if (Number.isFinite(lowFromMmolMg) && Number.isFinite(highFromMmolMg)) {
-      return { low: lowFromMmolMg, high: highFromMmolMg };
-    }
-    // Fallback por defecto típico mg/dL
-    return { low: 70, high: 250 };
+    const lowM = this.normalizeMmol(settings.low_alert_mmol) ?? 3.9;
+    const highM = this.normalizeMmol(settings.high_alert_mmol) ?? 13.9;
+    return { low: Math.round(lowM * 18), high: Math.round(highM * 18) };
   }
-}
 
-  getHysteresisMg(settings) {
-  // Lee candidatos
-  const mg = this.validateSlicerValue(settings.alert_hysteresis_mg, 0, 50, NaN);
-
-  // mmol puede venir sin decimales (x10) o con decimales según UI
-  const raw = this.parseSlicerValue(settings.alert_hysteresis_mmol, NaN);
-  let mmol = NaN;
-  if (Number.isFinite(raw)) {
-    if (Number.isInteger(raw)) {
-      // Consola sin decimales: 0..10 => 0.0..1.0  (p.ej. 3 => 0.3 mmol)
-      if (raw >= 0 && raw <= 10) mmol = raw / 10;
-      // Compatibilidad con “x10 grande” (39 => 3.9) si alguien lo usa aquí
-      else if (raw >= 30) mmol = raw / 10;
-      else mmol = raw; // enteros raros: tratamos como mmol real
-    } else {
-      mmol = raw; // ya decimal (si alguna UI lo permite)
-    }
+  getHysteresisMg(settings) { // mg/dL
+    const mg = this.validateSlicerValue(settings.alert_hysteresis_mg, 0, 50, NaN);
+    if (Number.isFinite(mg)) return mg;
+    const mmol = this.normalizeMmol(settings.alert_hysteresis_mmol);
+    if (Number.isFinite(mmol)) return Math.round(mmol * 18);
+    return 5; // por defecto ±5 mg/dL
   }
-  const mmolAsMg = Number.isFinite(mmol) ? Math.round(mmol * 18) : NaN;
-
-  const units = String(settings.units || '').toLowerCase();
-
-  // PRIORIDAD POR UNIDAD SELECCIONADA
-  if (units.includes('mmol')) {        // mmol/L => usa mmol primero
-    if (Number.isFinite(mmolAsMg)) return mmolAsMg;
-    if (Number.isFinite(mg))        return mg;
-    return 5; // fallback
-  } else {                            // mg/dL (o desconocida) => usa mg primero
-    if (Number.isFinite(mg))        return mg;
-    if (Number.isFinite(mmolAsMg))  return mmolAsMg;
-    return 5; // fallback
-  }
-}
 
   /* ---------- lectura de settings ---------- */
   async getUserSettings(session) {
@@ -408,9 +410,6 @@ getAlertLimits(settings) {
 
   /**
    * Predicción breve hasta cruce de límites.
-   * - lowOverrideMg/highOverrideMg: si números ⇒ usar (p.ej. 60/180 para no avanzado)
-   * - si null ⇒ usa límites configurados
-   * Devuelve null si no se prevé cruce dentro del horizonte.
    */
   async buildPredictionShort(settings, sessionId='default', lowOverrideMg=null, highOverrideMg=null) {
     const lim = this.getAlertLimits(settings);
@@ -641,34 +640,7 @@ getAlertLimits(settings) {
     if (mgdl >= lim.high) return 'high';
     return 'none';
   }
-/* ---------- Bitmaps: helpers ---------- */
-  async showBitmapSafe(session, hexData, durationMs = 5000) {
-    if (!hexData || typeof session?.layouts?.showBitmapView !== 'function') return false;
-    try {
-      // La API correcta del SDK es showBitmapView(hexString, { durationMs })
-      await session.layouts.showBitmapView(hexData, { durationMs: Math.max(1, durationMs|0) });
-      return true;
-    } catch (e) {
-      session?.logger?.debug?.('showBitmapView failed', { err: e?.message });
-      return false;
-    }
-  }
 
-  /**
-   * Enseña un bitmap por clave (p.ej. 'alert-low-526x100') con fallback a texto si falla.
-   * @returns {boolean} true si mostró bitmap; false si hizo fallback o no pudo.
-   */
-  async tryShowBitmapByKey(session, key, durationMs, fallbackText = '') {
-    try {
-      const hex = await getBitmapHex(key);
-      if (hex) {
-        const ok = await this.showBitmapSafe(session, hex, durationMs);
-        if (ok) return true;
-      }
-    } catch (_) {}
-    if (fallbackText) this.showClamped(session, 'default', fallbackText);
-    return false;
-  }
   /* ---------- ciclo de vida ---------- */
   async onSession(session, sessionId, userId) {
     console.log(`✅ Nueva sesión: ${sessionId} para ${userId}`);
@@ -685,25 +657,7 @@ getAlertLimits(settings) {
         this.showClamped(session, sessionId, msg[settings.language || 'en']);
         return;
       }
-      // Carga previa (no bloqueante) de bitmaps para calentar caché
-      loadBitmaps().then(res => {
-        const loaded = Object.entries(res).filter(([,hex]) => !!hex).map(([k]) => k);
-        session.logger?.info?.(`Bitmaps precargados: ${loaded.length}/${AVAILABLE_KEYS.length}`, { loaded });
-      }).catch(()=>{});
 
-      // Test visual opcional al arrancar (debug)
-      const dbgKey = String(process.env.DEBUG_BOOT_BITMAP || '').toLowerCase();
-      const dbgMap = { low: 'alert-low-526x100', high: 'alert-high-526x100', sun:'weather-sun-526x100', cloud:'weather-cloud-526x100', rain:'weather-rain-526x100' };
-      const dbgSel = dbgMap[dbgKey] || null;
-      if (dbgSel && AVAILABLE_KEYS.includes(dbgSel)) {
-        try {
-          const shown = await this.tryShowBitmapByKey(session, dbgSel, 5000, '');
-          if (shown) {
-            // Si mostramos el bitmap, esperamos un poco para que se vea y luego continuamos
-            await this.__delay(5200);
-          }
-        } catch (_) {}
-      }
       this.activeSessions.set(sessionId, { session, userId, settings, updateInterval: null });
       this.setupEventHandlers(session, sessionId, userId);
 
@@ -736,6 +690,18 @@ getAlertLimits(settings) {
         }
       }, 60 * 1000);
       this.dayWatchTimers.set(sessionId, dayWatch);
+
+      /* ---------- BOOT OVERLAY BMP 5s si está configurado ---------- */
+      if (DEBUG_BOOT_BITMAP) {
+        const bootBmp = getBitmapByAlias(DEBUG_BOOT_BITMAP);
+        if (bootBmp) {
+          console.log(`[debug] DEBUG_BOOT_BITMAP=${DEBUG_BOOT_BITMAP} → mostrando 5s en DASHBOARD`);
+          try { await showBitmapCompat(session, { bitmap: bootBmp, width: 576, durationMs: 5000, fallbackText: `(boot: ${DEBUG_BOOT_BITMAP})` }); }
+          catch (e) { session.logger?.debug?.('Boot bitmap failed', { msg: e?.message }); }
+        } else {
+          console.warn(`[debug] DEBUG_BOOT_BITMAP="${DEBUG_BOOT_BITMAP}" no encontrado en assets/bitmaps`);
+        }
+      }
 
       await this.showInitialAndHide(session, sessionId, settings);
       await this.startNormalOperation(session, sessionId, userId, settings);
@@ -897,11 +863,7 @@ getAlertLimits(settings) {
 
             const line1 = isEs ? 'Ajustes guardados' : 'Settings saved';
             const line2 = `Units: ${settings.units} · HeadUp: ${settings.enable_head_up_display ? 'ON' : 'OFF'}`;
-            const unitIsMmol = String(settings.units||'').toLowerCase().includes('mmol');
-            const limitsEcho = unitIsMmol
-              ? `${(limits.low/18).toFixed(1)}-${(limits.high/18).toFixed(1)} mmol/L`
-              : `${limits.low}-${limits.high} mg/dL`;
-            const line3 = `${isEs ? 'TIR hoy' : 'TIR'}: ${limitsEcho}`;
+            const line3 = (isEs ? 'TIR' : 'TIR') + `: ${limits.low}-${limits.high} mg/dL`;
             const line4 = `${isEs ? 'Avanzado' : 'Advanced'}: ${settings.enable_advanced_mode ? 'ON' : 'OFF'}`;
             const line5 = (isEs ? 'Alarmas' : 'Alerts') + `: ${settings.alertsEnabled ? 'ON' : 'OFF'} · Hyst: ±${hystMg} mg/dL (±${hystMmol} mmol/L) · ${stateStr}`;
 
@@ -1083,27 +1045,27 @@ getAlertLimits(settings) {
     const baseText = `${msgs[lang][type]}\n${displayValue} ${unit}`;
     const alertDuration = settings.alert_duration_ms || 15000;
 
-    // 1) Intento con BITMAP según tipo
-    const key = (type === 'low') ? 'alert-low-526x100' : 'alert-high-526x100';
-    let shownBitmap = false;
-    if (AVAILABLE_KEYS.includes(key)) {
-      try {
-        const hex = await getBitmapHex(key);
-        if (hex) {
-          shownBitmap = await this.showBitmapSafe(session, hex, alertDuration);
-        }
-      } catch (_) {}
-    }
-if (shownBitmap) {
-      // Ya se mostró el bitmap; programamos ocultar y salimos
-      if (this.displayTimers.has(sessionId)) clearTimeout(this.displayTimers.get(sessionId));
-      this.displayTimers.set(sessionId, setTimeout(() => this.hideDisplay(session, sessionId), alertDuration + 120));
-      return;
+    // --- NUEVO: usa bitmaps en alertas (con fallback a texto) ---
+    try {
+      const bmpAlias = type === 'low' ? 'low' : 'high';
+      const bmp = getBitmapByAlias(bmpAlias);
+      if (bmp) {
+        await showBitmapCompat(session, {
+          bitmap: bmp,
+          width: 576,
+          durationMs: alertDuration,
+          fallbackText: baseText
+        });
+        // Al cerrar, limpiamos display
+        try { this.hideDisplay(session, sessionId); } catch {}
+        return;
+      }
+    } catch (e) {
+      session.logger?.debug?.('Bitmap alert fallback to text', { msg: e?.message });
     }
 
-    // 2) Fallback: blinking de texto si bitmap no está disponible
+    // Fallback original (parpadeo texto)
     if (this.displayTimers.has(sessionId)) clearTimeout(this.displayTimers.get(sessionId));
-
     const blinkInterval = 600;
     const startTime = Date.now();
     let isVisible = true;
@@ -1123,6 +1085,7 @@ if (shownBitmap) {
       this.hideDisplay(session, sessionId);
     }, alertDuration + 120));
   }
+
   alertLimitsChanged(oldSettings, newSettings) {
     if (!oldSettings) return false;
     return (
