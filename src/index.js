@@ -6,13 +6,14 @@
  * Settings en segundos/minutos + toggle barra TIR
  * Mejora: cliente axios por sesión, debounce de settings, animación reforzada
  *
- * Bitmaps (robusto):
+ * Bitmaps (genérico y robusto):
  *  - Carga BMP leyendo bytes y enviando base64 a showBitmapView (evita errores "missing BM signature")
  *  - Fallback a texto si falla
+ *  - Sin forzar ViewType.DASHBOARD (apps no-sistema no lo ven en G1)
  */
 
 require('dotenv').config();
-const { AppServer, ViewType /*, BitmapUtils*/ } = require('@mentra/sdk');
+const { AppServer, ViewType /* no usamos dashboard para bitmaps */ } = require('@mentra/sdk');
 const axios = require('axios');
 const path = require('path');
 const fs = require('fs');
@@ -50,7 +51,7 @@ function isLikelyBmp(location) {
   }
 }
 
-/** Muestra un bitmap leyendo bytes y enviando Base64 al SDK (robusto) */
+/** Muestra un bitmap leyendo bytes y enviando Base64 al SDK (robusto, sin DASHBOARD) */
 async function showBitmapByLocation(session, location, { durationMs = 5000 } = {}) {
   if (!location) {
     try { session.layouts.showTextWall('(bitmap missing)', { durationMs }); } catch {}
@@ -60,8 +61,8 @@ async function showBitmapByLocation(session, location, { durationMs = 5000 } = {
     if (!isLikelyBmp(location)) throw new Error('firma BM no encontrada (no es BMP válido)');
     const buf = fs.readFileSync(location);
     const b64 = buf.toString('base64');
-    // Importante: no pasamos 'view' → se usa la vista visible de la app (no el dashboard del sistema)
-    session.layouts.showBitmapView(b64, { durationMs });
+    try { session.layouts.clearView(); } catch {}
+    session.layouts.showBitmapView(b64, { durationMs }); // <- vista por defecto de la app
     return true;
   } catch (e) {
     session.logger?.warn?.('Bitmap base64 mode falló, fallback texto', { msg: e?.message, location });
@@ -91,6 +92,8 @@ if (!MENTRAOS_API_KEY) {
 }
 
 const UNITS = { MGDL: 'mg/dL', MMOL: 'mmol/L' };
+// Render layers priority: ECO(0) < HUD(1) < BOOT(2) < ALERT(3)
+const RENDER_LAYERS = { ECO: 0, HUD: 1, BOOT: 2, ALERT: 3 };
 
 class NightscoutMentraApp extends AppServer {
   constructor(opts) {
@@ -108,6 +111,11 @@ class NightscoutMentraApp extends AppServer {
     this._http = new Map();             // cliente axios por sesión
     this._settingsDebounce = new Map(); // debounce settings
     this._sessionLocale = new Map();    // cache locale/tz por sesión
+
+    // gestor antisolapes
+    this._renderHoldUntil = new Map();      // sessionId -> timestamp ms (bloqueo temporal de texto)
+    this._renderLayer = new Map();          // sessionId -> capa actual (0..3)
+    this._lastEcoAt = new Map();            // sessionId -> timestamp ms (rate-limit del ECO)
   }
 
   /* ---------- helpers ---------- */
@@ -144,6 +152,27 @@ class NightscoutMentraApp extends AppServer {
     const v = this.parseSlicerValue(x, null);
     // UI mmol a veces viene x10 (p.ej. 39 = 3.9)
     return (v !== null && Number.isFinite(v)) ? (v >= 30 ? v / 10 : v) : null;
+  }
+
+  /* ---------- render layering helpers ---------- */
+  _canRender(sessionId, layer) {
+    const hold = this._renderHoldUntil.get(sessionId) || 0;
+    if (Date.now() < hold) return false;
+    const current = this._renderLayer.get(sessionId);
+    if (current == null) return layer >= RENDER_LAYERS.HUD;
+    return layer >= current;
+  }
+
+  _beginOverlay(sessionId, layer, durationMs) {
+    const until = Date.now() + (durationMs || 0);
+    this._renderLayer.set(sessionId, layer);
+    this._renderHoldUntil.set(sessionId, until + 100);
+  }
+
+  _endOverlay(session, sessionId) {
+    try { this.hideDisplay(session, sessionId); } catch {}
+    this._renderLayer.set(sessionId, RENDER_LAYERS.HUD);
+    this._renderHoldUntil.set(sessionId, 0);
   }
 
   /* ---------- alertas / límites ---------- */
@@ -631,6 +660,8 @@ class NightscoutMentraApp extends AppServer {
   /* ---------- UI ---------- */
   showClamped(session, sessionId, text, maxLines = 5) {
     try {
+      if (!this._canRender(sessionId, RENDER_LAYERS.HUD)) return;
+
       const lines = String(text || '').replace(/\r/g, '').split('\n');
       while (lines.length && lines[0].trim() === '') lines.shift();
       while (lines.length && lines[lines.length - 1].trim() === '') lines.pop();
@@ -644,7 +675,7 @@ class NightscoutMentraApp extends AppServer {
   hideDisplay(session, sessionId) {
     try {
       session.layouts.clearView();
-      session.layouts.clearView({ view: ViewType.DASHBOARD });
+      session.layouts.clearView({ view: ViewType.DASHBOARD }); // no molesta, limpia por si acaso
       this._lastShownText.delete(sessionId);
     } catch {}
   }
@@ -714,13 +745,17 @@ class NightscoutMentraApp extends AppServer {
       if (DEBUG_BOOT_BITMAP) {
         const loc = getBitmapLocationByAlias(DEBUG_BOOT_BITMAP);
         if (loc) {
-          session.logger?.debug?.(`[debug] DEBUG_BOOT_BITMAP=${DEBUG_BOOT_BITMAP} → mostrando 5s en DASHBOARD`);
+          const durationMs = 5000;
           try {
-            await showBitmapByLocation(session, loc, { durationMs: 5000 });
+            this._beginOverlay(sessionId, RENDER_LAYERS.BOOT, durationMs);
+            const ok = await showBitmapByLocation(session, loc, { durationMs });
+            setTimeout(async () => {
+              this._endOverlay(session, sessionId);
+              await this.showInitialAndHide(session, sessionId, settings);
+            }, durationMs + 120);
+            return; // no seguimos al HUD hasta terminar el boot overlay
           } catch (e) {
             session.logger?.warn?.('Boot bitmap falló', { msg: e?.message });
-          } finally {
-            setTimeout(() => this.hideDisplay(session, sessionId), 5100);
           }
         } else {
           console.warn(`[debug] DEBUG_BOOT_BITMAP="${DEBUG_BOOT_BITMAP}" no encontrado en assets/bitmaps`);
@@ -870,7 +905,7 @@ class NightscoutMentraApp extends AppServer {
           sd.settings = settings;
           this.activeSessions.set(sessionId, sd);
 
-          // ECO al guardar ajustes (con estado)
+          // ECO al guardar ajustes (con estado y sin solaparse)
           try {
             let dNow = null;
             try { dNow = await this.getGlucoseData(settings, sessionId); await this.checkAlerts(session, sessionId, dNow, settings); } catch(_){}
@@ -895,8 +930,19 @@ class NightscoutMentraApp extends AppServer {
             const line4 = `${isEs ? 'Avanzado' : 'Advanced'}: ${settings.enable_advanced_mode ? 'ON' : 'OFF'}`;
             const line5 = (isEs ? 'Alarmas' : 'Alerts') + `: ${settings.alertsEnabled ? 'ON' : 'OFF'} · Hyst: ±${hystMg} mg/dL (±${hystMmol} mmol/L) · ${stateStr}`;
 
-            this.showClamped(session, sessionId, [line1,line2,line3,line4,line5].join('\n'));
-            setTimeout(() => this.hideDisplay(session, sessionId), 2200);
+            // ECO: no mostrar si overlay activo y con rate-limit
+            if (this._canRender(sessionId, RENDER_LAYERS.ECO)) {
+              const lastEco = this._lastEcoAt.get(sessionId) || 0;
+              if (Date.now() - lastEco > 2000) {
+                this._lastEcoAt.set(sessionId, Date.now());
+                this.showClamped(session, sessionId, [line1,line2,line3,line4,line5].join('\n'));
+                setTimeout(() => this.hideDisplay(session, sessionId), 2200);
+              } else {
+                session.logger?.debug?.('ECO omitido por rate-limit');
+              }
+            } else {
+              session.logger?.debug?.('ECO omitido por overlay activo');
+            }
           } catch {}
         } catch (error) {
           session.logger?.error(error, 'Failed to process settings update');
@@ -1096,12 +1142,14 @@ class NightscoutMentraApp extends AppServer {
     let ok = false;
     if (loc) {
       try {
+        this._beginOverlay(sessionId, RENDER_LAYERS.ALERT, alertDuration);
         ok = await showBitmapByLocation(session, loc, { durationMs: alertDuration });
       } catch (_) { ok = false; }
     }
 
     // 2) Si no hay BMP o falla, fallback a texto parpadeante
     if (!ok) {
+      this._beginOverlay(sessionId, RENDER_LAYERS.ALERT, alertDuration);
       const blinkInterval = 600;
       if (this.displayTimers.has(sessionId)) clearTimeout(this.displayTimers.get(sessionId));
       const startTime = Date.now();
@@ -1109,7 +1157,7 @@ class NightscoutMentraApp extends AppServer {
       const blinker = setInterval(() => {
         if (Date.now() - startTime > alertDuration) {
           clearInterval(blinker);
-          this.hideDisplay(session, sessionId);
+          this._endOverlay(session, sessionId);
           return;
         }
         const symbol = isVisible ? '[!]' : '[ ]';
@@ -1117,15 +1165,19 @@ class NightscoutMentraApp extends AppServer {
         isVisible = !isVisible;
       }, blinkInterval);
 
-      this.displayTimers.set(sessionId, setTimeout(() => {
-        clearInterval(blinker);
-        this.hideDisplay(session, sessionId);
-      }, alertDuration + 120));
+      this.displayTimers.set(sessionId, setTimeout(() => { clearInterval(blinker); this._endOverlay(session, sessionId); }, alertDuration + 120));
       return;
     }
 
     // 3) Si BMP ok: ocultar al acabar
-    setTimeout(() => this.hideDisplay(session, sessionId), alertDuration + 120);
+    setTimeout(() => this._endOverlay(session, sessionId), alertDuration + 120);
+
+    // (Opcional) refrescar HUD tras la alerta:
+    setTimeout(async () => {
+      try {
+        await this.showGlucoseTemporarily(session, sessionId, (settings.display_duration_ms || 5000), settings);
+      } catch {}
+    }, alertDuration + 180);
   }
 
   /* ---------- MIRA tool ---------- */
@@ -1186,7 +1238,7 @@ server.start().catch(err => {
   console.error('⛔ Error iniciando servidor:', err);
   process.exit(1);
 });
-console.log('🚀 Nightscout MentraOS v2.13.1 — Hysteresis + ECO + Pred no-avanzado + Bitmaps(base64)');
+console.log('🚀 Nightscout MentraOS v2.13.1 — Hysteresis + ECO + Pred no-avanzado + Bitmaps(base64) + Capas');
 
 const KEEP_ALIVE_URL = process.env.RENDER_URL || 'https://mentra-nightscout.onrender.com';
 server.app.get('/health', (_, res) => res.json({
