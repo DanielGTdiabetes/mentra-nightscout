@@ -21,7 +21,7 @@ const fs = require('fs/promises');
 const PACKAGE_NAME = process.env.PACKAGE_NAME || 'com.tucompania.nightscout-glucose';
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const MENTRAOS_API_KEY = process.env.MENTRAOS_API_KEY;
-const DEBUG_BOOT_BITMAP = (process.env.DEBUG_BOOT_BITMAP || '').toLowerCase(); // \"low\" | \"high\" | \"bell\" | \"\"
+const DEBUG_BOOT_BITMAP = (process.env.DEBUG_BOOT_BITMAP || '').toLowerCase(); // "low" | "high" | "bell" | ""
 
 if (!MENTRAOS_API_KEY) {
   console.error('⛔ MENTRAOS_API_KEY environment variable is required');
@@ -337,7 +337,6 @@ class NightscoutMentraApp extends AppServer {
     const timeAgo = minutesAgo <= 1 ? (b.lang === 'es' ? 'ahora' : 'now') : (b.lang === 'es' ? `hace ${minutesAgo}m` : `${minutesAgo}m ago`);
     return `${display} ${settings.units || UNITS.MGDL} ${trend}\n${timeStr} (${timeAgo})`;
   }
-
   async formatForG1WithPrediction(data, settings, sessionId) {
     try {
       const base = await this.formatForG1(data, settings, sessionId);
@@ -630,7 +629,6 @@ class NightscoutMentraApp extends AppServer {
       ? (label === 'hoy' ? `CH/Ins hoy: ${c}g / ${i}U${lastStr}` : `CH/Ins ${label}: ${c}g / ${i}U${lastStr}`)
       : (label === 'today' ? `Carbs/Ins today: ${c}g / ${i}U${lastStr}` : `Carbs/Ins ${label}: ${c}g / ${i}U${lastStr}`);
   }
-
   /* ---------- obtención de datos ---------- */
   async getTodayEntries(settings, sessionId = 'default') {
     if (!settings || !sessionId) return [];
@@ -876,7 +874,6 @@ const pick = type === 'low' ? lowBmp : highBmp;
       return false;
     }
   }
-
   /* ---------- ciclo de vida ---------- */
   async onSession(session, sessionId, userId) {
     if (!session || !sessionId || !userId) {
@@ -1160,7 +1157,7 @@ try {
           } catch {}
           let tLine = '';
           try { const sum = await this.getRecentTreatments(s, 'day', sessionId); tLine = this.formatTreatmentsLine(sum, s, sessionId); } catch {}
-          await this.animateTIRFill(session, sessionId, s, baseLine, tirPct, tLine, minMaxLine);
+          await this.animateTIRFill(session, sessionId, s, baseLine, { tirPct }.tirPct, tLine, minMaxLine);
           this._scheduleHide(sessionId, s.display_duration_ms || 4000);
         } catch (e) {
           this.showClamped(session, sessionId, (this._getLocaleBundle(sessionId, { language: 'es' }).lang === 'es' ? 'Error al mostrar' : 'Display error'));
@@ -1196,7 +1193,6 @@ try {
     this._renderToken.delete(sessionId);
     this._lastShownText.delete(sessionId);
   }
-
   async showGlucoseTemporarily(session, sessionId, ms, providedSettings) {
     if (!session || !sessionId) return;
     try {
@@ -1325,7 +1321,6 @@ ${displayValue} ${unit}`;
     this.hideDisplay(session, sessionId);
   }, alertDuration));
 }
-
   /* ---------- util: estado eco de alarma (para ECO de ajustes) ---------- */
   getAlarmEchoState(sessionId, mgdl, settings) {
     try {
