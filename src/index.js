@@ -1357,36 +1357,43 @@ const app = new NightscoutMentraApp({
   apiKey: MENTRAOS_API_KEY,
 });
 
-(async () => {
+(function startHealthServer() {
   try {
-    const port = PORT;
-
-    if (typeof app.start === 'function') {
-      // Most AppServer implementations expose start(port)
-      await app.start(port);
-      console.log(`🚀 Nightscout MentraOS server started on port ${port} (pkg: ${PACKAGE_NAME}) [start()]`);
-      return;
-    }
-
-    if (typeof app.listen === 'function') {
-      app.listen(port, () => {
-        console.log(`🚀 Nightscout MentraOS server listening on port ${port} (pkg: ${PACKAGE_NAME}) [listen()]`);
-      });
-      return;
-    }
-
-    if (app.server && typeof app.server.listen === 'function') {
-      app.server.listen(port, () => {
-        console.log(`🚀 Nightscout MentraOS server listening on port ${port} (pkg: ${PACKAGE_NAME}) [server.listen()]`);
-      });
-      return;
-    }
-
-    // Some SDKs auto-bind; as a fallback, just log
-    console.log(`ℹ️ AppServer does not expose start()/listen(). Assuming SDK auto-start. (pkg: ${PACKAGE_NAME})`);
+    const http = require('http');
+    const port = Number(process.env.PORT || PORT || 3000);
+    const server = http.createServer((req, res) => {
+      if (req.url === '/health' || req.url === '/healthz' || req.url === '/readyz') {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end('ok');
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('Nightscout MentraOS is running');
+    });
+    server.listen(port, '0.0.0.0', () => {
+      console.log(`✅ Health server listening on ${port} (pkg: ${PACKAGE_NAME})`);
+    });
   } catch (e) {
-    console.error('❌ Failed to start server:', e);
-    process.exit(1);
+    console.error('❌ Failed to start health server:', e);
+  }
+})();
+
+(async () => {
+  console.log('>>> Iniciando bootstrap del SDK Mentra...');
+  const port = Number(process.env.PORT || PORT || 3000);
+  try {
+    if (typeof app.start === 'function') {
+      await app.start(port);
+      console.log(`🚀 MentraOS started on port ${port} [start()]`);
+    } else if (typeof app.listen === 'function') {
+      app.listen(port, () => console.log(`🚀 MentraOS listening on port ${port} [listen()]`));
+    } else if (app.server && typeof app.server.listen === 'function') {
+      app.server.listen(port, () => console.log(`🚀 MentraOS listening on port ${port} [server.listen()]`));
+    } else {
+      console.log('ℹ️ SDK no expone start()/listen(); continuamos con health server.');
+    }
+  } catch (e) {
+    console.error('⚠️ SDK start failed, health server sigue activo:', e?.message || e);
   }
 })();
 
