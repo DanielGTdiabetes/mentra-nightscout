@@ -13,39 +13,26 @@
  */
 
 require('dotenv').config();
-const { AppServer } = require('@mentra/sdk');
-const axios = require('axios');
+const express = require("express");
+const cors = require("cors");
+const axios = require("axios");
+const bodyParser = require("body-parser");
+const jwt = require("jsonwebtoken");
+const { AppServer } = require("@mentra/sdk");
 
-// Bitmaps externos (no tocar servidor si faltan; fallback a texto)
-let loadAllBitmaps = null, getBitmap = null, hasBitmap = null;
-try {
-  ({ loadAllBitmaps, getBitmap, hasBitmap } = require('./bitmaps'));
-  try { if (typeof loadAllBitmaps === 'function') loadAllBitmaps(); } catch (_) {}
-} catch (_) {
-  loadAllBitmaps = () => {};
-  getBitmap = () => null;
-  hasBitmap = () => false;
-}
+const app = express();
+app.use(cors());
+app.use(bodyParser.json());
 
-/* ---------- SHIM: compatibilidad SDK ---------- */
-if (typeof Object.prototype.updateSettingsForTesting !== 'function') {
-  Object.defineProperty(Object.prototype, 'updateSettingsForTesting', {
-    value: async () => {},
-    writable: true,
-    configurable: true,
-    enumerable: false
-  });
-}
-
-/* ---------- CONFIG ---------- */
-const UNITS = { MGDL: 'mg/dL', MMOL: 'mmol/L' };
-// Defaults solo para timings/visual; NO para NS url/token
+const UNITS = { MGDL: "mg/dL", MMOL: "mmol/L" };
 const DEFAULTS = {
   updateInterval: 5,
-  low_alert_mg: 70, high_alert_mg: 250,
-  low_alert_mmol: 3.9, high_alert_mmol: 13.9,
+  low_alert_mg: 70,
+  high_alert_mg: 250,
+  low_alert_mmol: 3.9,
+  high_alert_mmol: 13.9,
   alertsEnabled: true,
-  language: 'en',
+  language: "en",
   timezone: null,
   units: UNITS.MGDL,
   enable_head_up_display: true,
@@ -60,18 +47,29 @@ const DEFAULTS = {
   debug_force_alert: null
 };
 
-/* ---------- Utils ---------- */
+// ===== Bitmaps opcionales (G1B). Si faltan, seguimos en modo texto =====
+let loadAllBitmaps = null, getBitmap = null, hasBitmap = null;
+try {
+  ({ loadAllBitmaps, getBitmap, hasBitmap } = require('./bitmaps'));
+  try { if (typeof loadAllBitmaps === 'function') loadAllBitmaps(); } catch (_) {}
+} catch (_) {
+  loadAllBitmaps = () => {};
+  getBitmap = () => null;
+  hasBitmap = () => false;
+}
+// ===== Fin bitmaps opcionales =====
+
+/* Utils */
 function clamp(n, a, b) { return Math.min(b, Math.max(a, n)); }
 function isValidUrl(u) { try { new URL(u); return true; } catch { return false; } }
 function toNumber(v, d = 0) { const n = Number(v); return Number.isFinite(n) ? n : d; }
 
-/* ---------- App ---------- */
 class NightscoutMentraApp extends AppServer {
   constructor(opts) {
     super(opts);
     this.activeSessions = new Map();
     this.alertHistory = new Map();
-    this.alertLatch = new Map();       // latch 'low' | 'high' | null
+    this.alertLatch = new Map();
     this.displayTimers = new Map();
     this.headUpLastShown = new Map();
     this.dailyTirState = new Map();
@@ -79,11 +77,10 @@ class NightscoutMentraApp extends AppServer {
     this.lastGoodEntry = new Map();
     this._renderToken = new Map();
     this._lastShownText = new Map();
-    this._http = new Map();             // cliente axios por sesión
+    this._http = new Map();
     this._settingsEchoDebounce = new Map();
   }
 
-  /* ---------- axios por sesión ---------- */
   _getHttp(sessionId) {
     if (this._http.has(sessionId)) return this._http.get(sessionId);
     const instance = axios.create({ timeout: 8000 });
@@ -91,32 +88,29 @@ class NightscoutMentraApp extends AppServer {
     return instance;
   }
 
-  /* ---------- helpers de tiempo ---------- */
   __delay(ms) { return new Promise(res => setTimeout(res, ms)); }
 
-  /* ---------- lectura de NS ---------- */
   async getGlucoseData(settings, sessionId) {
     const http = this._getHttp(sessionId);
-    const base = String(settings.nightscoutUrl || '').replace(/\/+$/, '');
-    if (!base || !isValidUrl(base)) throw new Error('NS_URL_MISSING');
-    const hasQuery = base.includes('?');
-    const token = String(settings.nightscoutToken || '').trim();
-    const tokenParam = token ? (hasQuery ? `&token=${encodeURIComponent(token)}` : `?token=${encodeURIComponent(token)}`) : (hasQuery ? '' : '?');
+    const base = String(settings.nightscoutUrl || "").replace(/\/+$/, "");
+    if (!base || !isValidUrl(base)) throw new Error("NS_URL_MISSING");
+    const hasQuery = base.includes("?");
+    const token = String(settings.nightscoutToken || "").trim();
+    const tokenParam = token ? (hasQuery ? `&token=${encodeURIComponent(token)}` : `?token=${encodeURIComponent(token)}`) : (hasQuery ? "" : "?");
     const url = `${base}/api/v1/entries.json${tokenParam}&count=1`;
     const { data } = await http.get(url);
-    if (!Array.isArray(data) || !data[0]) throw new Error('Sin datos NS');
+    if (!Array.isArray(data) || !data[0]) throw new Error("Sin datos NS");
     const e = data[0];
     return {
       sgv: toNumber(e.sgv, NaN),
-      direction: e.direction || 'NONE',
+      direction: e.direction || "NONE",
       date: Number(e.date) || (new Date(e.dateString || e.date)).getTime() || Date.now()
     };
   }
 
-  /* ---------- settings ---------- */
   toBool(v) {
-    if (typeof v === 'boolean') return v;
-    if (typeof v === 'string') return ['1','true','on','yes','y'].includes(v.trim().toLowerCase());
+    if (typeof v === "boolean") return v;
+    if (typeof v === "string") return ["1","true","on","yes","y"].includes(v.trim().toLowerCase());
     return Boolean(v);
   }
   validateSlicerValue(v, min, max, def) {
@@ -133,14 +127,13 @@ class NightscoutMentraApp extends AppServer {
     return Number.isFinite(n) ? clamp(n, 2, 30) : null;
   }
 
-  /** Decide umbrales (mg primero o mmol primero según unidad) */
   decideThresholdFromDual(mg, mmol, units = UNITS.MGDL, mmolAsMg = null) {
-    const unitsStr = String(units || '').toLowerCase();
-    if (unitsStr.includes('mmol')) {        // mmol/L => usa mmol primero
+    const unitsStr = String(units || "").toLowerCase();
+    if (unitsStr.includes("mmol")) {
       if (Number.isFinite(mmolAsMg)) return mmolAsMg;
-      if (Number.isFinite(mg))        return mg;
-      return 5; // fallback
-    } else {                            // mg/dL (o desconocida) => usa mg primero
+      if (Number.isFinite(mg)) return mg;
+      return 5;
+    } else {
       if (Number.isFinite(mg)) return mg;
       if (Number.isFinite(mmolAsMg)) return mmolAsMg;
       return 70;
@@ -150,22 +143,20 @@ class NightscoutMentraApp extends AppServer {
   getUserSettings(session) {
     try {
       const keys = [
-        'nightscout_url','nightscout_token','update_interval',
-        'low_alert_mg','high_alert_mg','low_alert_mmol','high_alert_mmol',
-        'alerts_enabled','language','timezone','units',
-        'enable_head_up_display',
-        'display_duration_s','alert_duration_s','alert_cooldown_min',
-        'show_tir_bar','show_range_bar',
-        'display_duration_ms','alert_duration_ms','alert_cooldown_ms',
-        'enable_advanced_mode','advanced_mode_enabled',
-        'alert_hysteresis_mg','alert_hysteresis_mmol',
-        // legacy tolerados
-        'tir_low_mg','tir_high_mg','tir_low_mmol','tir_high_mmol',
-        'time_in_range_low_mg','time_in_range_high_mg','time_in_range_low_mmol','time_in_range_high_mmol',
-        'prediction_horizon_min','prediction_horizon_mins',
-        'debug_force_alert','debug_boot_bitmap'
+        "nightscout_url","nightscout_token","update_interval",
+        "low_alert_mg","high_alert_mg","low_alert_mmol","high_alert_mmol",
+        "alerts_enabled","language","timezone","units",
+        "enable_head_up_display",
+        "display_duration_s","alert_duration_s","alert_cooldown_min",
+        "show_tir_bar","show_range_bar",
+        "display_duration_ms","alert_duration_ms","alert_cooldown_ms",
+        "enable_advanced_mode","advanced_mode_enabled",
+        "alert_hysteresis_mg","alert_hysteresis_mmol",
+        "tir_low_mg","tir_high_mg","tir_low_mmol","tir_high_mmol",
+        "time_in_range_low_mg","time_in_range_high_mg","time_in_range_low_mmol","time_in_range_high_mmol",
+        "prediction_horizon_min","prediction_horizon_mins",
+        "debug_force_alert","debug_boot_bitmap"
       ];
-
       const vals = keys.map(k => (session && session.settings && session.settings[k] != null) ? session.settings[k] : null);
       const kv = Object.fromEntries(keys.map((k,i)=>[k,vals[i]]));
 
@@ -189,19 +180,17 @@ class NightscoutMentraApp extends AppServer {
         : (this.toBool(kv.show_tir_bar) || this.toBool(kv.show_range_bar));
 
       return {
-        // URL/TOKEN SOLO desde ajustes:
-        nightscoutUrl: String(kv.nightscout_url || '').trim(),
-        nightscoutToken: String(kv.nightscout_token || '').trim(),
-
+        nightscoutUrl: String(kv.nightscout_url || "").trim(),
+        nightscoutToken: String(kv.nightscout_token || "").trim(),
         updateInterval: ui,
         low_alert_mg: this.validateSlicerValue(kv.low_alert_mg, 50, 120, DEFAULTS.low_alert_mg),
         high_alert_mg: this.validateSlicerValue(kv.high_alert_mg, 180, 400, DEFAULTS.high_alert_mg),
         low_alert_mmol: this.normalizeMmol(kv.low_alert_mmol) ?? DEFAULTS.low_alert_mmol,
         high_alert_mmol: this.normalizeMmol(kv.high_alert_mmol) ?? DEFAULTS.high_alert_mmol,
         alertsEnabled: this.toBool(kv.alerts_enabled ?? DEFAULTS.alertsEnabled),
-        language: (kv.language || DEFAULTS.language).toLowerCase().startsWith('es') ? 'es' : 'en',
+        language: (kv.language || DEFAULTS.language).toLowerCase().startsWith("es") ? "es" : "en",
         timezone: kv.timezone || DEFAULTS.timezone,
-        units: (String(kv.units || '').toLowerCase().includes('mmol') ? UNITS.MMOL : UNITS.MGDL),
+        units: (String(kv.units || "").toLowerCase().includes("mmol") ? UNITS.MMOL : UNITS.MGDL),
         enable_head_up_display: this.toBool(kv.enable_head_up_display ?? DEFAULTS.enable_head_up_display),
         display_duration_ms: displayMs,
         alert_duration_ms: alertMs,
@@ -210,7 +199,6 @@ class NightscoutMentraApp extends AppServer {
         enable_advanced_mode: this.toBool(kv.enable_advanced_mode) || this.toBool(kv.advanced_mode_enabled) || DEFAULTS.enable_advanced_mode,
         alert_hysteresis_mg: this.validateSlicerValue(kv.alert_hysteresis_mg, 0, 50, DEFAULTS.alert_hysteresis_mg),
         alert_hysteresis_mmol: this.normalizeMmol(kv.alert_hysteresis_mmol) ?? DEFAULTS.alert_hysteresis_mmol,
-        // legacy tolerados
         tir_low_mg: this.parseSlicerValue(kv.tir_low_mg, null),
         tir_high_mg: this.parseSlicerValue(kv.tir_high_mg, null),
         tir_low_mmol: this.normalizeMmol(kv.tir_low_mmol),
@@ -221,13 +209,13 @@ class NightscoutMentraApp extends AppServer {
         time_in_range_high_mmol: this.normalizeMmol(kv.time_in_range_high_mmol),
         prediction_horizon_min: [15,30,60].includes(Number(kv.prediction_horizon_min || kv.prediction_horizon_mins))
           ? Number(kv.prediction_horizon_min || kv.prediction_horizon_mins) : DEFAULTS.prediction_horizon_min,
-        debug_force_alert: (typeof kv.debug_force_alert === 'string' ? kv.debug_force_alert : null),
-        debug_boot_bitmap: String(kv.debug_boot_bitmap || '').trim()
+        debug_force_alert: (typeof kv.debug_force_alert === "string" ? kv.debug_force_alert : null),
+        debug_boot_bitmap: String(kv.debug_boot_bitmap || "").trim()
       };
     } catch (e) {
-      console.error('Error leyendo settings:', e);
+      console.error("Error leyendo settings:", e);
       return {
-        nightscoutUrl: '', nightscoutToken: '',
+        nightscoutUrl: "", nightscoutToken: "",
         updateInterval: DEFAULTS.updateInterval,
         low_alert_mg: DEFAULTS.low_alert_mg, high_alert_mg: DEFAULTS.high_alert_mg,
         low_alert_mmol: DEFAULTS.low_alert_mmol, high_alert_mmol: DEFAULTS.high_alert_mmol,
@@ -238,11 +226,10 @@ class NightscoutMentraApp extends AppServer {
         alert_hysteresis_mg: DEFAULTS.alert_hysteresis_mg, alert_hysteresis_mmol: DEFAULTS.alert_hysteresis_mmol,
         prediction_horizon_min: DEFAULTS.prediction_horizon_min,
         debug_force_alert: null,
-        debug_boot_bitmap: ''
+        debug_boot_bitmap: ""
       };
     }
   }
-
   parseSettingsFromArray(arr) {
     const o = {};
     (arr || []).forEach(s => (o[s.key] = s.value));
@@ -267,17 +254,17 @@ class NightscoutMentraApp extends AppServer {
       : (this.toBool(o.show_tir_bar) || this.toBool(o.show_range_bar));
 
     return {
-      nightscoutUrl: String(o.nightscout_url || '').trim(),
-      nightscoutToken: String(o.nightscout_token || '').trim(),
+      nightscoutUrl: String(o.nightscout_url || "").trim(),
+      nightscoutToken: String(o.nightscout_token || "").trim(),
       updateInterval: ui,
       low_alert_mg: this.validateSlicerValue(o.low_alert_mg, 50, 120, DEFAULTS.low_alert_mg),
       high_alert_mg: this.validateSlicerValue(o.high_alert_mg, 180, 400, DEFAULTS.high_alert_mg),
       low_alert_mmol: this.normalizeMmol(o.low_alert_mmol) ?? DEFAULTS.low_alert_mmol,
       high_alert_mmol: this.normalizeMmol(o.high_alert_mmol) ?? DEFAULTS.high_alert_mmol,
       alertsEnabled: this.toBool(o.alerts_enabled ?? DEFAULTS.alertsEnabled),
-      language: (o.language || DEFAULTS.language).toLowerCase().startsWith('es') ? 'es' : 'en',
+      language: (o.language || DEFAULTS.language).toLowerCase().startsWith("es") ? "es" : "en",
       timezone: o.timezone || DEFAULTS.timezone,
-      units: (String(units || '').toLowerCase().includes('mmol') ? UNITS.MMOL : UNITS.MGDL),
+      units: (String(units || "").toLowerCase().includes("mmol") ? UNITS.MMOL : UNITS.MGDL),
       enable_head_up_display: this.toBool(o.enable_head_up_display ?? DEFAULTS.enable_head_up_display),
       display_duration_ms: displayMs,
       alert_duration_ms: alertMs,
@@ -286,7 +273,6 @@ class NightscoutMentraApp extends AppServer {
       enable_advanced_mode: this.toBool(o.enable_advanced_mode) || this.toBool(o.advanced_mode_enabled) || DEFAULTS.enable_advanced_mode,
       alert_hysteresis_mg: this.validateSlicerValue(o.alert_hysteresis_mg, 0, 50, DEFAULTS.alert_hysteresis_mg),
       alert_hysteresis_mmol: this.normalizeMmol(o.alert_hysteresis_mmol) ?? DEFAULTS.alert_hysteresis_mmol,
-      // legacy tolerados
       tir_low_mg: this.parseSlicerValue(o.tir_low_mg, null),
       tir_high_mg: this.parseSlicerValue(o.tir_high_mg, null),
       tir_low_mmol: this.normalizeMmol(o.tir_low_mmol),
@@ -297,51 +283,50 @@ class NightscoutMentraApp extends AppServer {
       time_in_range_high_mmol: this.normalizeMmol(o.time_in_range_high_mmol),
       prediction_horizon_min: [15,30,60].includes(Number(o.prediction_horizon_min || o.prediction_horizon_mins))
         ? Number(o.prediction_horizon_min || o.prediction_horizon_mins) : DEFAULTS.prediction_horizon_min,
-      debug_force_alert: (typeof o.debug_force_alert === 'string' ? o.debug_force_alert : null),
-      debug_boot_bitmap: String(o.debug_boot_bitmap || '').trim()
+      debug_force_alert: (typeof o.debug_force_alert === "string" ? o.debug_force_alert : null),
+      debug_boot_bitmap: String(o.debug_boot_bitmap || "").trim()
     };
   }
+
   /* ---------- UI helpers ---------- */
   convertToDisplay(mgdlValue, targetUnit) {
     return targetUnit === UNITS.MMOL ? (mgdlValue / 18).toFixed(1) : Math.round(mgdlValue);
   }
   getTrendArrow(dir) {
     const map = {
-      DoubleUp: '↑↑', SingleUp: '↑', FortyFiveUp: '↗',
-      Flat: '→',
-      FortyFiveDown: '↘', SingleDown: '↓', DoubleDown: '↓↓',
-      NONE: '-', 'NOT COMPUTABLE': '?'
+      DoubleUp: "↑↑", SingleUp: "↑", FortyFiveUp: "↗",
+      Flat: "→",
+      FortyFiveDown: "↘", SingleDown: "↓", DoubleDown: "↓↓",
+      NONE: "-", "NOT COMPUTABLE": "?"
     };
-    return map[dir] || '?';
+    return map[dir] || "?";
   }
   _getLocaleBundle(sessionId, settings) {
-    const lang = (settings.language || 'en') === 'es' ? 'es' : 'en';
-    const tz = settings.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-    const locale = lang === 'es' ? 'es-ES' : 'en-US';
+    const lang = (settings.language || "en") === "es" ? "es" : "en";
+    const tz = settings.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+    const locale = lang === "es" ? "es-ES" : "en-US";
     return { lang, tz, locale };
   }
 
   buildTirBar(pct) {
-    // 20 bloques; cada bloque = 5%
     const filled = clamp(Math.round(pct / 5), 0, 20);
-    let s = '';
-    for (let i = 0; i < 20; i++) s += (i < filled ? '█' : '░');
+    let s = "";
+    for (let i = 0; i < 20; i++) s += (i < filled ? "█" : "░");
     return s;
   }
 
   async formatForG1(data, settings, sessionId) {
     const display = this.convertToDisplay(data.sgv, settings.units || UNITS.MGDL);
     const trend = this.getTrendArrow(data.direction);
-    const b = this._getLocaleBundle(sessionId || 'default', settings);
+    const b = this._getLocaleBundle(sessionId || "default", settings);
     const readingTime = new Date(data.date);
-    const timeStr = readingTime.toLocaleTimeString(b.locale, { timeZone: b.tz, hour: '2-digit', minute: '2-digit', hour12: false });
+    const timeStr = readingTime.toLocaleTimeString(b.locale, { timeZone: b.tz, hour: "2-digit", minute: "2-digit", hour12: false });
     const minutesAgo = Math.floor((Date.now() - data.date) / 60000);
-    const timeAgo = minutesAgo <= 1 ? (b.lang === 'es' ? 'ahora' : 'now') : (b.lang === 'es' ? `hace ${minutesAgo}m` : `${minutesAgo}m ago`);
+    const timeAgo = minutesAgo <= 1 ? (b.lang === "es" ? "ahora" : "now") : (b.lang === "es" ? `hace ${minutesAgo}m` : `${minutesAgo}m ago`);
     return `${display} ${settings.units || UNITS.MGDL} ${trend}\n${timeStr} (${timeAgo})`;
   }
 
   async formatForG1WithPrediction(data, settings, sessionId) {
-    // Pred NO-avanzado: solo si cruza fijo ≤60 o ≥180 mg/dL
     const unit = settings.units || UNITS.MGDL;
     const highFixed = unit === UNITS.MMOL ? 10 : 180;
     const lowFixed  = unit === UNITS.MMOL ? 3.3 : 60;
@@ -356,10 +341,10 @@ class NightscoutMentraApp extends AppServer {
       if (!isHigh && !isLow) return base;
 
       const horizonMin = clamp(settings.prediction_horizon_min || DEFAULTS.prediction_horizon_min, 15, 60);
-      const delta = 0; // placeholder seguro
+      const delta = 0;
       const predictedMg = clamp(mg + delta, 40, 400);
       const displayPred = this.convertToDisplay(predictedMg, unit);
-      const t = (settings.language || 'en') === 'es'
+      const t = (settings.language || "en") === "es"
         ? `Pred ~${displayPred} ${unit} @${horizonMin}m`
         : `Pred ~${displayPred} ${unit} @${horizonMin}m`;
       return `${base}\n${t}`;
@@ -368,15 +353,13 @@ class NightscoutMentraApp extends AppServer {
     }
   }
 
-  /* ---------- TIR diario ---------- */
   _getTirLimits(settings) {
-    // decide límites: usa legacy o por defecto (70–180 para TIR si no se define)
     const units = settings.units || UNITS.MGDL;
     const lowMg  = this.decideThresholdFromDual(settings.tir_low_mg,  settings.tir_low_mmol,  units, settings.tir_low_mmol  ? settings.tir_low_mmol  * 18 : null) ?? 70;
     const highMg = this.decideThresholdFromDual(settings.tir_high_mg, settings.tir_high_mmol, units, settings.tir_high_mmol ? settings.tir_high_mmol * 18 : null) ?? 180;
     const low = clamp(lowMg, 40, 140);
     const high = clamp(highMg, 160, 300);
-    return { low, high }; // en mg/dL
+    return { low, high };
   }
 
   updateDailyTirState(sessionId, currentMg, _currentTs, settings) {
@@ -391,7 +374,6 @@ class NightscoutMentraApp extends AppServer {
     return { ...st, tirPct };
   }
 
-  /* ---------- Alerta + histéresis ---------- */
   _computeAlertType(data, settings) {
     const unit = settings.units || UNITS.MGDL;
     const mg = data.sgv;
@@ -405,34 +387,31 @@ class NightscoutMentraApp extends AppServer {
 
     const latch = this.alertLatch.get(settings.sessionId) || null;
 
-    // Forzado debug tiene prioridad (no aplica histéresis)
-    const force = (settings.debug_force_alert || '').toLowerCase();
-    if (force === 'low')  return 'low';
-    if (force === 'high') return 'high';
+    const force = (settings.debug_force_alert || "").toLowerCase();
+    if (force === "low")  return "low";
+    if (force === "high") return "high";
 
-    // Histéresis:
     if (mg < lowTh) {
-      this.alertLatch.set(settings.sessionId, 'low');
-      return 'low';
+      this.alertLatch.set(settings.sessionId, "low");
+      return "low";
     }
     if (mg > highTh) {
-      this.alertLatch.set(settings.sessionId, 'high');
-      return 'high';
+      this.alertLatch.set(settings.sessionId, "high");
+      return "high";
     }
-    if (latch === 'low'  && mg < (lowTh  + hystMg))  return 'low';   // mantener hasta alejarse de low+hyst
-    if (latch === 'high' && mg > (highTh - hystMg))  return 'high';  // mantener hasta alejarse de high-hyst
+    if (latch === "low"  && mg < (lowTh  + hystMg))  return "low";
+    if (latch === "high" && mg > (highTh - hystMg))  return "high";
 
     this.alertLatch.set(settings.sessionId, null);
     return null;
   }
 
-  /* ---------- Mostrar texto con clamp de líneas ---------- */
   showClamped(session, sessionId, text, maxLines = 5) {
     try {
-      const lines = String(text || '').replace(/\r/g, '').split('\n');
-      while (lines.length && lines[0].trim() === '') lines.shift();
-      while (lines.length && lines[lines.length - 1].trim() === '') lines.pop();
-      const out = lines.slice(0, maxLines).join('\n');
+      const lines = String(text || "").replace(/\r/g, "").split("\n");
+      while (lines.length && lines[0].trim() === "") lines.shift();
+      while (lines.length && lines[lines.length - 1].trim() === "") lines.pop();
+      const out = lines.slice(0, maxLines).join("\n");
       const last = this._lastShownText.get(sessionId);
       if (last === out) return;
       this._lastShownText.set(sessionId, out);
@@ -440,12 +419,10 @@ class NightscoutMentraApp extends AppServer {
     } catch (_) {}
   }
   hideDisplay(session, sessionId) {
-    try { session.layouts.showTextWall(''); this._lastShownText.delete(sessionId); } catch {}
+    try { session.layouts.showTextWall(""); this._lastShownText.delete(sessionId); } catch {}
   }
-
-  /* ---------- helpers ECO ---------- */
   _formatLimitsEcho(settings) {
-    const { low, high } = this._getTirLimits(settings); // mg/dL
+    const { low, high } = this._getTirLimits(settings);
     if ((settings.units || UNITS.MGDL) === UNITS.MMOL) {
       const lo = (low / 18).toFixed(1);
       const hi = (high / 18).toFixed(1);
@@ -455,40 +432,39 @@ class NightscoutMentraApp extends AppServer {
   }
 
   _echoSettings(session, sessionId, settings) {
-    const limitsEcho = this._formatLimitsEcho(settings); // mg/dL↔mmol/L correcto
-    const isEs = (settings.language || 'en') === 'es';
-    const l1 = isEs ? 'Ajustes guardados' : 'Settings saved';
-    const alerts = settings.alertsEnabled ? (isEs ? 'Alertas: ON' : 'Alerts: ON') : (isEs ? 'Alertas: OFF' : 'Alerts: OFF') ;
+    const limitsEcho = this._formatLimitsEcho(settings);
+    const isEs = (settings.language || "en") === "es";
+    const l1 = isEs ? "Ajustes guardados" : "Settings saved";
+    const alerts = settings.alertsEnabled ? (isEs ? "Alertas: ON" : "Alerts: ON") : (isEs ? "Alertas: OFF" : "Alerts: OFF") ;
     const nsWarn = (!settings.nightscoutUrl || !isValidUrl(settings.nightscoutUrl))
-      ? (isEs ? '⚠ Configura URL Nightscout' : '⚠ Set Nightscout URL')
+      ? (isEs ? "⚠ Configura URL Nightscout" : "⚠ Set Nightscout URL")
       : null;
-    const line3 = `${isEs ? 'TIR hoy' : 'TIR'}: ${limitsEcho}`;
-    const msg = [l1, alerts, line3].concat(nsWarn ? [nsWarn] : []).join('\n');
+    const line3 = `${isEs ? "TIR hoy" : "TIR"}: ${limitsEcho}`;
+    const msg = [l1, alerts, line3].concat(nsWarn ? [nsWarn] : []).join("\n");
     this.showClamped(session, sessionId, msg);
   }
-  /* ---------- Animación TIR + HUD ---------- */
+
   async animateTIRFill(session, sessionId, settings, formattedData, tirPct, tLine) {
     const arr = [];
     arr.push(formattedData);
     if (tirPct != null) {
-      const bar = !this.toBool(settings.show_tir_bar) ? '' : this.buildTirBar(tirPct);
-      const txt = (settings.language || 'en') === 'es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`;
+      const bar = !this.toBool(settings.show_tir_bar) ? "" : this.buildTirBar(tirPct);
+      const txt = (settings.language || "en") === "es" ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`;
       arr.push(txt);
       if (bar) arr.push(bar);
     }
     if (tLine) arr.push(tLine);
-    this.showClamped(session, sessionId, arr.join('\n'));
+    this.showClamped(session, sessionId, arr.join("\n"));
   }
 
-  /* ---------- Treatments resumen ---------- */
   async getRecentTreatments(settings, sessionId) {
     try {
       const http = this._getHttp(sessionId);
-      const base = String(settings.nightscoutUrl || '').replace(/\/+$/, '');
+      const base = String(settings.nightscoutUrl || "").replace(/\/+$/, "");
       if (!base || !isValidUrl(base)) return [];
-      const hasQuery = base.includes('?');
-      const token = String(settings.nightscoutToken || '').trim();
-      const tokenParam = token ? (hasQuery ? `&token=${encodeURIComponent(token)}` : `?token=${encodeURIComponent(token)}`) : (hasQuery ? '' : '?');
+      const hasQuery = base.includes("?");
+      const token = String(settings.nightscoutToken || "").trim();
+      const tokenParam = token ? (hasQuery ? `&token=${encodeURIComponent(token)}` : `?token=${encodeURIComponent(token)}`) : (hasQuery ? "" : "?");
       const url = `${base}/api/v1/treatments.json${tokenParam}&count=60`;
       const { data } = await http.get(url);
       return Array.isArray(data) ? data : [];
@@ -500,7 +476,7 @@ class NightscoutMentraApp extends AppServer {
   formatTreatmentsLine(arr, settings, sessionId) {
     try {
       const now = Date.now();
-      const since = now - 12 * 3600000; // 12h
+      const since = now - 12 * 3600000;
       let carbs = 0, ins = 0;
       for (const t of arr) {
         const ts = new Date(t.created_at || t.eventDate || t.timestamp || t.dateString || t.date).getTime() || 0;
@@ -508,25 +484,23 @@ class NightscoutMentraApp extends AppServer {
         carbs += Number(t.carbs || 0);
         ins   += Number(t.insulin || 0);
       }
-      const cStr = (settings.language || 'en') === 'es' ? 'CH día' : 'Carbs';
-      const iStr = (settings.language || 'en') === 'es' ? 'Ins día' : 'Ins';
+      const cStr = (settings.language || "en") === "es" ? "CH día" : "Carbs";
+      const iStr = (settings.language || "en") === "es" ? "Ins día" : "Ins";
       const carbsStr = `${Math.round(carbs)}g`;
-      const insStr = `${(Math.round(ins * 10) / 10).toFixed(1)}U`.replace(/\.0U$/,'U');
+      const insStr = `${(Math.round(ins * 10) / 10).toFixed(1)}U`.replace(/\.0U$/,"U");
       return `${cStr}: ${carbsStr} · ${iStr}: ${insStr}`;
     } catch {
-      return '';
+      return "";
     }
   }
 
-  /* ---------- Loop principal ---------- */
   async showInitialAndHide(session, sessionId, settings) {
-    // Bitmap de arranque opcional (si lo usas en el futuro via settings.debug_boot_bitmap)
     try {
-      const bootBmp = String(settings.debug_boot_bitmap || '').toLowerCase();
-      const bootMap = { low: 'alert-low-526x100', high: 'alert-high-526x100' };
+      const bootBmp = String(settings.debug_boot_bitmap || "").toLowerCase();
+      const bootMap = { low: "alert-low-526x100", high: "alert-high-526x100" };
       if (bootBmp && bootMap[bootBmp] && hasBitmap(bootMap[bootBmp]) && session && session.layouts) {
         const bmp = getBitmap(bootMap[bootBmp]);
-        if (bmp && typeof session.layouts.showBitmap === 'function') {
+        if (bmp && typeof session.layouts.showBitmap === "function") {
           session.layouts.showBitmap(bmp.dataRGBA, bmp.width, bmp.height);
           await this.__delay(2000);
         }
@@ -540,7 +514,7 @@ class NightscoutMentraApp extends AppServer {
       const formattedData = await this.formatForG1WithPrediction(data, settings, sessionId);
       if (settings.enable_advanced_mode) {
         const tirPct = tirRes.tirPct;
-        let tLine = '';
+        let tLine = "";
         try { const sum = await this.getRecentTreatments(settings, sessionId); tLine = this.formatTreatmentsLine(sum, settings, sessionId); } catch {}
         await this.animateTIRFill(session, sessionId, settings, formattedData, tirPct, tLine);
       } else {
@@ -550,12 +524,12 @@ class NightscoutMentraApp extends AppServer {
     } catch (e) {
       const last = this.lastGoodEntry.get(sessionId);
       let warn;
-      if (String(e && e.message) === 'NS_URL_MISSING') {
-        warn = (settings.language || 'en') === 'es'
-          ? '⚠ Configura URL/Token de Nightscout en Ajustes'
-          : '⚠ Set Nightscout URL/Token in Settings';
+      if (String(e && e.message) === "NS_URL_MISSING") {
+        warn = (settings.language || "en") === "es"
+          ? "⚠ Configura URL/Token de Nightscout en Ajustes"
+          : "⚠ Set Nightscout URL/Token in Settings";
       } else {
-        warn = (settings.language || 'en') === 'es' ? '⚠ sin datos NS' : '⚠ no NS data';
+        warn = (settings.language || "en") === "es" ? "⚠ sin datos NS" : "⚠ no NS data";
       }
       if (last) {
         const txt = await this.formatForG1WithPrediction(last, settings, sessionId);
@@ -576,11 +550,11 @@ class NightscoutMentraApp extends AppServer {
     }, settings.display_duration_ms || DEFAULTS.display_duration_ms);
     this.displayTimers.set(sessionId, t);
   }
-  /* ---------- Alertas visuales (bitmap fijo + texto parpadea) ---------- */
-  triggerAnimatedAlert(session, sessionId, data, settings, type) {
+  // *** AQUÍ ES DONDE INYECTAMOS EL BITMAP (fijo) Y MANTENEMOS EL TEXTO PARPADEANDO ***
+  async triggerAnimatedAlert(session, sessionId, data, settings, type) {
     const displayValue = this.convertToDisplay(data.sgv, settings.units || UNITS.MGDL);
     const unit = settings.units || UNITS.MGDL;
-    const lang = settings.language || 'en';
+    const lang = settings.language || "en";
     const msgs = {
       en: { low: `LOW GLUCOSE!`, high: `HIGH GLUCOSE!` },
       es: { low: `¡GLUCOSA BAJA!`, high: `¡GLUCOSA ALTA!` }
@@ -591,39 +565,32 @@ class NightscoutMentraApp extends AppServer {
 
     if (this.displayTimers.has(sessionId)) clearTimeout(this.displayTimers.get(sessionId));
 
-    const startTime = Date.now();
-
-    // 1) Mostrar BITMAP una sola vez (fijo) si existe soporte
+    // ===== Bitmap fijo arriba del texto (LOW/HIGH) =====
     try {
-      const bmpKey = type === 'low' ? 'alert-low-526x100'
-                    : type === 'high' ? 'alert-high-526x100'
-                    : null;
-      if (bmpKey && hasBitmap(bmpKey) && session && session.layouts && typeof session.layouts.showBitmap === 'function') {
+      const bmpKey = (type === "low") ? "alert-low-526x100" :
+                     (type === "high") ? "alert-high-526x100" : null;
+      if (bmpKey && typeof hasBitmap === "function" && hasBitmap(bmpKey) &&
+          session && session.layouts && typeof session.layouts.showBitmap === "function") {
         const bmp = getBitmap(bmpKey);
-        if (bmp) {
+        if (bmp && bmp.dataRGBA && bmp.width && bmp.height) {
           session.layouts.showBitmap(bmp.dataRGBA, bmp.width, bmp.height);
         }
       }
-    } catch (_) {
-      // si falla, seguiremos con texto normal
-    }
+    } catch (_) { /* fallback a solo texto */ }
+    // ===== Fin bitmap fijo =====
 
-    // 2) Parpadeo SOLO del texto (bitmap permanece si el SDK lo soporta)
-    const showTextFrame = (on) => {
-      const symbol = on ? '[!]' : '[ ]';
-      this.showClamped(session, sessionId, `${symbol} ${baseText}`);
-    };
-
+    const startTime = Date.now();
     let isVisible = true;
-    showTextFrame(true);
+
     const blinker = setInterval(() => {
       if (Date.now() - startTime > alertDuration) {
         clearInterval(blinker);
         this.hideDisplay(session, sessionId);
         return;
       }
+      const symbol = isVisible ? "[!]" : "[ ]";
+      this.showClamped(session, sessionId, `${symbol} ${baseText}`);
       isVisible = !isVisible;
-      showTextFrame(isVisible);
     }, blinkInterval);
 
     this.displayTimers.set(sessionId, setTimeout(() => {
@@ -632,7 +599,6 @@ class NightscoutMentraApp extends AppServer {
     }, alertDuration + 120));
   }
 
-  /* ---------- Control ciclo de alertas + cooldown ---------- */
   _canFireAlert(sessionId, settings) {
     const hist = this.alertHistory.get(sessionId) || { last: 0 };
     const now = Date.now();
@@ -649,22 +615,20 @@ class NightscoutMentraApp extends AppServer {
     const type = this._computeAlertType(data, { ...settings, sessionId });
     if (!type) return;
 
-    if (!this._canFireAlert(sessionId, settings)) return; // cooldown
+    if (!this._canFireAlert(sessionId, settings)) return;
 
     this.triggerAnimatedAlert(session, sessionId, data, settings, type);
     this._markAlertFired(sessionId);
   }
 
-  /* ---------- Head-up gesture ---------- */
   _shouldShowHeadUp(sessionId, settings) {
     if (!this.toBool(settings.enable_head_up_display)) return false;
     const last = this.headUpLastShown.get(sessionId) || 0;
-    if (Date.now() - last < 3000) return false; // anti-spam
+    if (Date.now() - last < 3000) return false;
     this.headUpLastShown.set(sessionId, Date.now());
     return true;
   }
 
-  /* ---------- Ciclo de refresco ---------- */
   async updateLoop(sessionId) {
     const sd = this.activeSessions.get(sessionId);
     if (!sd) return;
@@ -675,58 +639,30 @@ class NightscoutMentraApp extends AppServer {
       this.lastGoodEntry.set(sessionId, data);
       await this.checkAndAlert(session, sessionId, data, settings);
     } catch (_) {
-      // ignoramos errores de red en loop
     } finally {
       const ui = clamp(settings.updateInterval || DEFAULTS.updateInterval, 1, 30);
       setTimeout(() => this.updateLoop(sessionId), ui * 1000);
     }
   }
+  // *** Mantén este handler tal y como lo tenías en tu base que funcionaba ***
+  async onSession(session, sessionId, userId) {
+    try {
+      const settings = this.getUserSettings(session);
+      this.activeSessions.set(sessionId, { session, settings, headUpEnabled: true, renderToken: 0 });
 
-  /* ---------- Eventos de sesión ---------- */
-  async onSessionStarted(session) {
-    const sessionId = session.sessionId;
-    const settings = this.getUserSettings(session);
-    this.activeSessions.set(sessionId, { session, settings, headUpEnabled: true, renderToken: 0 });
+      // ECO (incluye TIR con unidades correctas y aviso si falta URL)
+      this._debouncedEcho(sessionId);
 
-    // ECO de ajustes guardados (valida TIR-units y avisa si falta URL)
-    this._debouncedEcho(sessionId);
+      // HUD inicial
+      await this.showInitialAndHide(session, sessionId, settings);
 
-    // Mostrar primera vez
-    await this.showInitialAndHide(session, sessionId, settings);
-
-    // Iniciar loop de actualización
-    setTimeout(() => this.updateLoop(sessionId), (settings.updateInterval || DEFAULTS.updateInterval) * 1000);
+      // Iniciar loop periódico
+      setTimeout(() => this.updateLoop(sessionId), (settings.updateInterval || DEFAULTS.updateInterval) * 1000);
+    } catch (e) {
+      console.error("onSession error:", e);
+    }
   }
 
-  async onSessionUpdated(session) {
-    const sessionId = session.sessionId;
-    const prev = this.activeSessions.get(sessionId);
-    const newSettings = this.getUserSettings(session);
-
-    this.activeSessions.set(sessionId, { session, settings: newSettings, headUpEnabled: prev?.headUpEnabled ?? true, renderToken: (prev?.renderToken || 0) + 1 });
-
-    // ECO de ajustes (debounced)
-    this._debouncedEcho(sessionId);
-
-    // Mostrar HUD de una
-    await this.showInitialAndHide(session, sessionId, newSettings);
-  }
-
-  async onSessionEnded(session) {
-    const sessionId = session.sessionId;
-    this.activeSessions.delete(sessionId);
-    this.alertHistory.delete(sessionId);
-    this.alertLatch.delete(sessionId);
-    this.displayTimers.delete(sessionId);
-    this.headUpLastShown.delete(sessionId);
-    this.dailyTirState.delete(sessionId);
-    this.dayWatchTimers.delete(sessionId);
-    this.lastGoodEntry.delete(sessionId);
-    this._http.delete(sessionId);
-    this._lastShownText.delete(sessionId);
-  }
-
-  /* ---------- Debounce del ECO ---------- */
   _debouncedEcho(sessionId) {
     if (this._settingsEchoDebounce.has(sessionId)) clearTimeout(this._settingsEchoDebounce.get(sessionId));
     const t = setTimeout(() => {
@@ -737,41 +673,42 @@ class NightscoutMentraApp extends AppServer {
     this._settingsEchoDebounce.set(sessionId, t);
   }
 
-  /* ---------- Interactions ---------- */
   async onInteraction(session, interaction) {
     const sessionId = session.sessionId;
     const sd = this.activeSessions.get(sessionId);
     if (!sd) return;
     const settings = sd.settings;
 
-    // Gesto "cabeza arriba": mostrar HUD rápido
-    if (interaction && interaction.type === 'HEAD_UP') {
+    if (interaction && interaction.type === "HEAD_UP") {
       if (!this._shouldShowHeadUp(sessionId, settings)) return;
       await this.showInitialAndHide(session, sessionId, settings);
     }
   }
 
-  /* ---------- Utilidades varias ---------- */
   mgToUnit(mg, unit) { return unit === UNITS.MMOL ? (mg / 18).toFixed(1) : Math.round(mg); }
 }
 
-/* ---------- Arranque servidor ---------- */
+/* ---------- Arranque del servidor: respeta tu base ---------- */
 const PORT = Number(process.env.PORT || 3000);
-const app = new NightscoutMentraApp({
-  packageName: process.env.PACKAGE_NAME || 'com.tucompania.nightscout-glucose',
-  apiKey: process.env.MENTRAOS_API_KEY || 'demo',
+const server = new NightscoutMentraApp({
+  packageName: process.env.PACKAGE_NAME || "com.tucompania.nightscout-glucose",
+  apiKey: process.env.MENTRAOS_API_KEY || "demo",
   port: PORT
 });
 
-app.start()
-  .then(() => {
-    console.log(`Server started on ${PORT} (pkg: ${process.env.PACKAGE_NAME || 'com.tucompania.nightscout-glucose'})`);
-  })
-  .catch(err => {
-    console.error('⛔ Error iniciando servidor:', err);
-    process.exit(1);
-  });
-/* ---------- Helpers extra opcionales ---------- */
+// Si en tu base usabas app.start() o app.listen(), mantén lo que ya funcionaba.
+// Aquí exponemos /health por si lo usabas para Render (sin romper nada).
+server.start().then(() => {
+  console.log(`Server started on ${PORT}`);
+  try {
+    server.app?.get?.("/health", (_req, res) => res.json({ status: "alive", ts: new Date().toISOString() }));
+  } catch {}
+}).catch(err => {
+  console.error("Error iniciando servidor:", err);
+  process.exit(1);
+});
+// (si tu base tenía más endpoints Express u otros helpers, déjalos igual)
+
 NightscoutMentraApp.prototype.findMinMaxOfDay = function(entries) {
   try {
     if (!Array.isArray(entries) || !entries.length) return null;
@@ -789,14 +726,12 @@ NightscoutMentraApp.prototype.findMinMaxOfDay = function(entries) {
 
 NightscoutMentraApp.prototype.formatMinMaxLine = function(minMax, settings) {
   try {
-    if (!minMax) return '';
+    if (!minMax) return "";
     const u = settings.units || UNITS.MGDL;
     const min = this.mgToUnit(minMax.min, u);
     const max = this.mgToUnit(minMax.max, u);
-    const isEs = (settings.language || 'en') === 'es';
+    const isEs = (settings.language || "en") === "es";
     return isEs ? `Mín/Máx: ${min}/${max} ${u}` : `Min/Max: ${min}/${max} ${u}`;
-  } catch { return ''; }
+  } catch { return ""; }
 };
-
-/* ---------- Export (opcional pruebas locales) ---------- */
 module.exports = { NightscoutMentraApp };
