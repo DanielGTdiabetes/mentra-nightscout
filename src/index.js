@@ -419,7 +419,7 @@ class NightscoutMentraApp extends AppServer {
     const trend = this.getTrendArrow(data.direction);
     const b = this._getLocaleBundle(sessionId || 'default', settings);
     const readingTime = new Date(data.date);
-    the const timeStr = readingTime.toLocaleTimeString(b.locale, { timeZone: b.tz, hour: '2-digit', minute: '2-digit', hour12: false });
+    const timeStr = readingTime.toLocaleTimeString(b.locale, { timeZone: b.tz, hour: '2-digit', minute: '2-digit', hour12: false });
     const minutesAgo = Math.floor((Date.now() - data.date) / 60000);
     const timeAgo = minutesAgo <= 1 ? (b.lang === 'es' ? 'ahora' : 'now') : (b.lang === 'es' ? `hace ${minutesAgo}m` : `${minutesAgo}m ago`);
     return `${display} ${settings.units || UNITS.MGDL} ${trend}\n${timeStr} (${timeAgo})`;
