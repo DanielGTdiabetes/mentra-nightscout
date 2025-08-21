@@ -49,12 +49,8 @@ async function showBitmapByLocation(session, location, { durationMs = 5000 } = {
   try {
     if (!isLikelyBmp(location)) throw new Error("firma BM no encontrada");
     const b64 = fs.readFileSync(location).toString("base64");
-    
-    if (session?.layouts?.showBitmapView) {
-      session.layouts.showBitmapView(b64, { durationMs });
-    } else {
-      session.layouts?.showTextWall?.("[icon]");
-    }
+    // No llamamos a clearView para evitar "Unknown layout type: clear_view"
+    try { session.layouts?.showBitmapView ? session.layouts.showBitmapView(b64, { durationMs }) : session.layouts?.showTextWall?.("[icon]"); } catch (e) {}
     return true;
   } catch (e) {
     try { session.layouts.showTextWall("(bitmap error)"); } catch (ee) {}
@@ -142,12 +138,8 @@ class NightscoutMentraApp extends AppServer {
 
   /* ---------- limpieza vista ---------- */
   _safeClearView(session){
-    try{
-      if (session?.layouts && typeof session.layouts.clearView==="function"){
-        /* clearView disabled for compatibility */
-        return;
-      }
-    }catch(e){}
+    // Evitar clearView por compatibilidad con G1/SDK
+    try{ session.layouts?.showTextWall?.("\\u200B"); }catch(e){}
     try{ session.layouts?.showTextWall?.(""); }catch(e){}
   }
 
@@ -163,10 +155,10 @@ class NightscoutMentraApp extends AppServer {
   showClamped(session, sessionId, text, maxLines=5){
     try{
       if (!this._canRender(sessionId, RENDER_LAYERS.HUD)) return;
-      const lines=String(text||"").replace(/\r/g,"").split("\n");
+      const lines=String(text||"").replace(/\\r/g,"").split("\\n");
       while(lines.length && lines[0].trim()==="") lines.shift();
       while(lines.length && lines[lines.length-1].trim()==="") lines.pop();
-      const out=lines.slice(0,maxLines).join("\n");
+      const out=lines.slice(0,maxLines).join("\\n");
       const last=this._lastShownText.get(sessionId);
       if (last===out) return;
       this._lastShownText.set(sessionId, out);
@@ -177,7 +169,7 @@ class NightscoutMentraApp extends AppServer {
   hideDisplay(session, sessionId){
     try{
       this._safeClearView(session);
-      try{ session.layouts?.showTextWall?.("\u200B"); }catch(e){}
+      try{ session.layouts?.showTextWall?.("\\u200B"); }catch(e){}
       setTimeout(()=>{ try{ this._safeClearView(session); }catch(e){} },50);
       setTimeout(()=>{ try{ this._safeClearView(session); }catch(e){} },120);
       this._lastShownText.delete(sessionId);
@@ -272,7 +264,7 @@ class NightscoutMentraApp extends AppServer {
         alert_cooldown_ms: coolMs,
         show_tir_bar: showTirBar,
         enable_advanced_mode: this.toBool(kv.enable_advanced_mode) || this.toBool(kv.advanced_mode_enabled),
-        alert_present_mode: String(kv.alert_present_mode || "mixed").toLowerCase(),
+        alert_present_mode: String(kv.alert_present_mode || "icon").toLowerCase(),
         alert_hysteresis_mg: this.validateSlicerValue(kv.alert_hysteresis_mg, 0, 50, 5),
         alert_hysteresis_mmol: this.normalizeMmol(kv.alert_hysteresis_mmol) ?? 0.3,
         tir_low_mg: this.parseSlicerValue(kv.tir_low_mg, null),
@@ -298,7 +290,7 @@ class NightscoutMentraApp extends AppServer {
         display_duration_ms:5000, alert_duration_ms:15000, alert_cooldown_ms:600000,
         show_tir_bar:true,
         enable_advanced_mode:false,
-        alert_present_mode:"mixed",
+        alert_present_mode:"icon",
         alert_hysteresis_mg:5, alert_hysteresis_mmol:0.3,
         prediction_horizon_min:30,
         debug_force_alert:null
@@ -344,7 +336,7 @@ class NightscoutMentraApp extends AppServer {
       alert_cooldown_ms: coolMs,
       show_tir_bar: showTirBar,
       enable_advanced_mode: this.toBool(o.enable_advanced_mode) || this.toBool(o.advanced_mode_enabled),
-      alert_present_mode: String(o.alert_present_mode || o.alert_present || "mixed").toLowerCase(),
+      alert_present_mode: String(o.alert_present_mode || o.alert_present || "icon").toLowerCase(),
       alert_hysteresis_mg: this.validateSlicerValue(o.alert_hysteresis_mg, 0, 50, 5),
       alert_hysteresis_mmol: this.normalizeMmol(o.alert_hysteresis_mmol) ?? 0.3,
       tir_low_mg: this.parseSlicerValue(o.tir_low_mg, null),
@@ -433,7 +425,7 @@ class NightscoutMentraApp extends AppServer {
     const timeStr=t.toLocaleTimeString(b.locale, {timeZone:b.tz, hour:"2-digit", minute:"2-digit", hour12:false});
     const minutesAgo=Math.floor((Date.now()-data.date)/60000);
     const timeAgo= minutesAgo<=1 ? (b.lang==="es"?"ahora":"now") : (b.lang==="es"?`hace ${minutesAgo}m`:`${minutesAgo}m ago`);
-    return `${display} ${settings.units||UNITS.MGDL} ${trend}\n${timeStr} (${timeAgo})`;
+    return `${display} ${settings.units||UNITS.MGDL} ${trend}\\n${timeStr} (${timeAgo})`;
   }
   async formatForG1WithPrediction(data, settings, sessionId){
     try{
@@ -442,10 +434,10 @@ class NightscoutMentraApp extends AppServer {
         ? await this.buildPredictionShort(settings, sessionId, null, null)
         : await this.buildPredictionShort(settings, sessionId, 60, 180);
       if (!predShort) return base;
-      const parts=base.split("\n");
+      const parts=base.split("\\n");
       const l1=parts[0]||"", l2=(parts[1]||"");
       const rest=parts.slice(2);
-      return `${l1}\n${l2} · ${predShort}${rest.length? `\n${rest.join("\n")}`:""}`;
+      return `${l1}\\n${l2} · ${predShort}${rest.length? `\\n${rest.join("\\n")}`:""}`;
     }catch(e){ return await this.formatForG1(data, settings, sessionId); }
   }
 
@@ -515,15 +507,15 @@ class NightscoutMentraApp extends AppServer {
     const labelBar = `${tirLine}${bar? " "+bar:""}`;
     try{
       let clean=(tLine||"")
-        .replace(/^\s*CH\/Ins hoy:\s*/,"")
-        .replace(/^\s*Carbs\/Ins today:\s*/,"")
-        .replace(/\s*[·•]\s*(Last|Últ):[\s\S]*$/i,"")
-        .replace(/\s*Last:[\s\S]*$/i,"")
-        .replace(/\s*Últ:[\s\S]*$/i,"")
-        .replace(/\s*\/\s*/g,"/")
-        .replace(/\s+/g," ")
+        .replace(/^\\s*CH\\/Ins hoy:\\s*/,"")
+        .replace(/^\\s*Carbs\\/Ins today:\\s*/,"")
+        .replace(/\\s*[·•]\\s*(Last|Últ):[\\s\\S]*$/i,"")
+        .replace(/\\s*Last:[\\s\\S]*$/i,"")
+        .replace(/\\s*Últ:[\\s\\S]*$/i,"")
+        .replace(/\\s*\\/\\s*/g,"/")
+        .replace(/\\s+/g," ")
         .trim();
-      return clean? `${labelBar}\n${clean}` : labelBar;
+      return clean? `${labelBar}\\n${clean}` : labelBar;
     }catch(e){ return labelBar; }
   }
   updateDailyTirState(sessionId, readingMgdl, readingTs, settings){
@@ -641,44 +633,39 @@ class NightscoutMentraApp extends AppServer {
     const unit=settings.units||UNITS.MGDL;
     const lang=settings.language||"en";
     const msgs={ en:{low:`LOW GLUCOSE!`,high:`HIGH GLUCOSE!`}, es:{low:`¡GLUCOSA BAJA!`, high:`¡GLUCOSA ALTA!`} };
-    const baseText=`${msgs[lang][type]}\n${displayValue} ${unit}`;
+    const baseText=`${msgs[lang][type]}\\n${displayValue} ${unit}`;
     const alertDuration=settings.alert_duration_ms||15000;
-    const mode=["mixed","icon","text"].includes(settings.alert_present_mode)? settings.alert_present_mode : "mixed";
+    const modeRaw=String(settings.alert_present_mode||"icon").toLowerCase();
+    const mode=(modeRaw==="text"||modeRaw==="icon")? modeRaw : "icon";
     const alias= type==="low" ? "low" : "high";
     const loc=getBitmapLocationByAlias(alias);
+
+    // Cancel any pending hide to avoid overlap while alert is on screen
+    try{ if (this.displayTimers.has(sessionId)) { clearTimeout(this.displayTimers.get(sessionId)); this.displayTimers.delete(sessionId); } }catch(e){}
 
     this._beginOverlay(sessionId, RENDER_LAYERS.ALERT, alertDuration);
 
     if (mode==="icon" && loc){
       await showBitmapByLocation(session, loc, {durationMs:alertDuration});
       setTimeout(()=> this._endOverlay(session, sessionId), alertDuration+120);
+      // After the alert, show a brief HUD
+      setTimeout(async ()=>{ try{ await this.showGlucoseTemporarily(session, sessionId, (settings.display_duration_ms||5000), settings); }catch(e){} }, alertDuration+180);
       return;
     }
 
-    if (mode==="text" || !loc){
-      const blink=700, start=Date.now();
-      const timer=setInterval(()=>{
-        if (Date.now()-start>alertDuration){
-          clearInterval(timer); this._endOverlay(session, sessionId); return;
-        }
-        const on=Math.floor((Date.now()-start)/blink)%2===0;
-        this.showOverlayText(session, sessionId, `${on?"[!]":"[ ]"} ${baseText}`);
-      }, blink);
-      this.displayTimers.set(sessionId, setTimeout(()=>{ try{clearInterval(timer);}catch(e){} this._endOverlay(session, sessionId); }, alertDuration+120));
-      return;
-    }
-
-    // mixed: alternar icono/texto
-    const SLICE=700; const start=Date.now(); let phase=0;
-    await showBitmapByLocation(session, loc, {durationMs:Math.min(SLICE,alertDuration)});
-    const inter=setInterval(async ()=>{
-      const elapsed=Date.now()-start;
-      if (elapsed>alertDuration){ clearInterval(inter); this._endOverlay(session, sessionId); return; }
-      phase=1-phase;
-      if (phase===0) await showBitmapByLocation(session, loc, {durationMs:Math.min(SLICE, alertDuration-elapsed)});
-      else this.showOverlayText(session, sessionId, baseText);
-    }, SLICE);
-    this.displayTimers.set(sessionId, setTimeout(()=>{ try{clearInterval(inter);}catch(e){} this._endOverlay(session, sessionId); }, alertDuration+120));
+    // TEXT mode (or no bitmap): simple blink on a single text layout to avoid double-surface rendering
+    const blink=700, start=Date.now();
+    const timer=setInterval(()=>{
+      if (Date.now()-start>alertDuration){
+        try{ clearInterval(timer); }catch(e){}
+        this._endOverlay(session, sessionId);
+        return;
+      }
+      const on=Math.floor((Date.now()-start)/blink)%2===0;
+      this.showOverlayText(session, sessionId, `${on?"[!]":"[ ]"} ${baseText}`);
+    }, blink);
+    this.displayTimers.set(sessionId, setTimeout(()=>{ try{clearInterval(timer);}catch(e){} this._endOverlay(session, sessionId); }, alertDuration+120));
+    // After the alert, show a brief HUD
     setTimeout(async ()=>{ try{ await this.showGlucoseTemporarily(session, sessionId, (settings.display_duration_ms||5000), settings); }catch(e){} }, alertDuration+180);
   }
 
@@ -735,8 +722,8 @@ class NightscoutMentraApp extends AppServer {
       if (!showBar || !anims || tirPct==null || !Number.isFinite(tirPct)){
         const bar= showBar && tirPct!=null ? " "+this.__barFromRatio(tirPct/100,20) : "";
         const tirLine = tirPct==null ? (s.language==="es"?"TIR hoy: n/d":"TIR: n/a") : (s.language==="es"?`TIR hoy: ${tirPct}%`:`TIR: ${tirPct}%`);
-        const line2=`${tirLine}${bar}` + (tLine? `\n${tLine}`:"");
-        const out= extraLine? `${headerText}\n${line2}\n${extraLine}` : `${headerText}\n${line2}`;
+        const line2=`${tirLine}${bar}` + (tLine? `\\n${tLine}`:"");
+        const out= extraLine? `${headerText}\\n${line2}\\n${extraLine}` : `${headerText}\\n${line2}`;
         this.showClamped(session, sessionId, out);
         return;
       }
@@ -747,7 +734,7 @@ class NightscoutMentraApp extends AppServer {
       const slots=20, leadIn=220, totalMs=920;
       const target=Math.floor(this.__clamp01(tirPct/100)*slots);
       const tirLine=(s.language==="es"?`TIR hoy: ${tirPct}%`:`TIR: ${tirPct}%`);
-      const base=(filled)=> `${headerText}\n${tirLine} ${this.__barFromRatio(filled/slots,slots)}${tLine?`\n${tLine}`:""}${extraLine?`\n${extraLine}`:""}`;
+      const base=(filled)=> `${headerText}\\n${tirLine} ${this.__barFromRatio(filled/slots,slots)}${tLine?`\\n${tLine}`:""}${extraLine?`\\n${extraLine}`:""}`;
 
       this.showClamped(session, sessionId, base(0));
       if (leadIn>0){
@@ -774,8 +761,8 @@ class NightscoutMentraApp extends AppServer {
       try{
         const bar=this.__barFromRatio((tirPct||0)/100,20);
         const tirLine= tirPct==null ? (s.language==="es"?"TIR hoy: n/d":"TIR: n/a") : (s.language==="es"?`TIR hoy: ${tirPct}%`:`TIR: ${tirPct}%`);
-        const line2=`${tirLine} ${bar}` + (tLine?`\n${tLine}`:"");
-        const out= extraLine? `${headerText}\n${line2}\n${extraLine}` : `${headerText}\n${line2}`;
+        const line2=`${tirLine} ${bar}` + (tLine?`\\n${tLine}`:"");
+        const out= extraLine? `${headerText}\\n${line2}\\n${extraLine}` : `${headerText}\\n${line2}`;
         this.showClamped(session, sessionId, out);
       }catch(ee){}
     }
@@ -809,7 +796,7 @@ class NightscoutMentraApp extends AppServer {
         }
       }catch(e){}
       const lang=(settings&&settings.language)||"en";
-      const msg={ en:"Error loading glucose data\nCheck your settings", es:"Error cargando datos\nRevisa tu configuración" };
+      const msg={ en:"Error loading glucose data\\nCheck your settings", es:"Error cargando datos\\nRevisa tu configuración" };
       this.showClamped(session, sessionId, msg[lang]); this._scheduleHide(sessionId, 5000);
     }
   }
@@ -856,7 +843,7 @@ class NightscoutMentraApp extends AppServer {
             const line3=`${isEs?"Rango":"Range"}: ${limitsEcho}`;
             const line4=`${isEs?"Avanzado":"Advanced"}: ${settings.enable_advanced_mode?"ON":"OFF"}`;
             const line5=(isEs?"Alarmas":"Alerts")+`: ${settings.alertsEnabled?"ON":"OFF"} · Hyst: ±${hystMg} mg/dL (±${hystMmol} mmol/L) · ${stateStr}`;
-            const ecoTxt=[line1,line2,line3,line4,line5].join("\n");
+            const ecoTxt=[line1,line2,line3,line4,line5].join("\\n");
 
             if (this._canRender(sessionId, RENDER_LAYERS.ECO)){
               const lastEco=this._lastEcoAt.get(sessionId)||0;
@@ -981,12 +968,13 @@ class NightscoutMentraApp extends AppServer {
 
   async onSession(session, sessionId, userId){
     try{
+      // Compat: algunos SDK no traen updateSettingsForTesting; noop
       if (typeof session.updateSettingsForTesting!=="function"){
         session.updateSettingsForTesting=async ()=>{ try{ session.logger?.debug?.("Compat shim: updateSettingsForTesting noop"); }catch(e){} };
       }
       let settings=await this.getUserSettings(session);
       if (!settings.nightscoutUrl){
-        const msg={ en:"Please configure Nightscout\nURL and token in settings", es:"Configura URL y token\nde Nightscout en ajustes" };
+        const msg={ en:"Please configure Nightscout\\nURL and token in settings", es:"Configura URL y token\\nde Nightscout en ajustes" };
         this.showClamped(session, sessionId, msg[settings.language||"en"]); return;
       }
 
