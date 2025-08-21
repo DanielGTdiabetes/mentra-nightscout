@@ -237,7 +237,7 @@ class NightscoutMentraApp extends AppServer {
         'show_tir_bar','show_range_bar',
         'display_duration_ms','alert_duration_ms','alert_cooldown_ms',
         'enable_advanced_mode','advanced_mode_enabled',
-        'alert_present_mode',
+        'alert_present_mode','alert_present',
         'alert_hysteresis_mg','alert_hysteresis_mmol',
         'tir_low_mg','tir_high_mg','tir_low_mmol','tir_high_mmol',
         'time_in_range_low_mg','time_in_range_high_mg','time_in_range_low_mmol','time_in_range_high_mmol',
@@ -429,12 +429,12 @@ class NightscoutMentraApp extends AppServer {
         ? await this.buildPredictionShort(settings, sessionId, null, null)
         : await this.buildPredictionShort(settings, sessionId, 60, 180);
       if (!predShort) return base;
-      const parts = base.split('\\n');
+      const parts = base.split('\n');
       const l1 = parts[0] || '';
       const l2 = (parts.length > 1 ? parts[1] : '');
       const sep = ' · ';
       const rest = parts.slice(2);
-      return `${l1}\\n${l2}${sep}${predShort}${rest.length ? `\\n${rest.join('\\n')}` : ''}`;
+      return `${l1}\n${l2}${sep}${predShort}${rest.length ? `\n${rest.join('\n')}` : ''}`;
     } catch (error) {
       console.error('Error in formatForG1WithPrediction, falling back:', error);
       return await this.formatForG1(data, settings, sessionId);
@@ -447,7 +447,7 @@ class NightscoutMentraApp extends AppServer {
     const baseRaw = (settings.nightscoutUrl || '').trim();
     if (!baseRaw) return null;
     const base = baseRaw.startsWith('http') ? baseRaw : ('https://' + baseRaw);
-    const baseURL = base.replace(/\\/$/, '');
+    const baseURL = base.replace(/\/$/, '');
     if (!cli || cli.defaults.baseURL !== baseURL || cli.defaults.params?.token !== settings.nightscoutToken){
       cli = axios.create({
         baseURL,
@@ -547,13 +547,13 @@ class NightscoutMentraApp extends AppServer {
       let clean = (tLine || '')
         .replace(/^CH\/Ins hoy: /, '')
         .replace(/^Carbs\/Ins today: /, '')
-        .replace(/\\s*[·•]\\s*(Last|Últ):[\\s\\S]*$/i, '')
-        .replace(/\\s*Last:[\\s\\S]*$/i, '')
-        .replace(/\\s*Últ:[\\s\\S]*$/i, '')
+        .replace(/\s*[·•]\s*(Last|Últ):[\s\S]*$/i, '')
+        .replace(/\s*Last:[\s\S]*$/i, '')
+        .replace(/\s*Últ:[\s\S]*$/i, '')
         .replace(/\s*\/\s*/g, '/')
         .replace(/\s+/g, ' ')
         .trim();
-      return clean ? `${labelBar}\\n${clean}` : labelBar;
+      return clean ? `${labelBar}\n${clean}` : labelBar;
     } catch { return labelBar; }
   }
 
@@ -670,10 +670,10 @@ class NightscoutMentraApp extends AppServer {
     try {
       if (!this._canRender(sessionId, RENDER_LAYERS.HUD)) return;
 
-      const lines = String(text || '').replace(/\r/g, '').split('\\n');
+      const lines = String(text || '').replace(/\r/g, '').split('\n');
       while (lines.length && lines[0].trim() === '') lines.shift();
       while (lines.length && lines[lines.length - 1].trim() === '') lines.pop();
-      const out = lines.slice(0, maxLines).join('\\n');
+      const out = lines.slice(0, maxLines).join('\n');
       const last = this._lastShownText.get(sessionId);
       if (last === out) return;
       this._lastShownText.set(sessionId, out);
@@ -711,7 +711,7 @@ class NightscoutMentraApp extends AppServer {
     try {
       settings = await this.getUserSettings(session);
       if (!settings.nightscoutUrl) {
-        const msg = { en: 'Please configure Nightscout\\nURL and token in settings', es: 'Configura URL y token\\nde Nightscout en ajustes' };
+        const msg = { en: 'Please configure Nightscout\nURL and token in settings', es: 'Configura URL y token\nde Nightscout en ajustes' };
         this.showClamped(session, sessionId, msg[settings.language || 'en']);
         return;
       }
@@ -812,10 +812,10 @@ class NightscoutMentraApp extends AppServer {
       } catch (_) {}
       const lang = (settings && settings.language) || 'en';
       const errorMsg = error.message?.includes('URL no configurada')
-        ? { en: 'Nightscout URL not set\\nCheck settings', es: 'URL de Nightscout no configurada\\nRevisa ajustes' }
+        ? { en: 'Nightscout URL not set\nCheck settings', es: 'URL de Nightscout no configurada\nRevisa ajustes' }
         : (error.message?.includes('Sin datos') || error.message?.includes('timeout'))
-        ? { en: 'Cannot connect to Nightscout\\nCheck URL and token', es: 'No se puede conectar\\nRevisa URL y token' }
-        : { en: 'Error loading glucose data\\nCheck your settings', es: 'Error cargando datos\\nRevisa tu configuración' };
+        ? { en: 'Cannot connect to Nightscout\nCheck URL and token', es: 'No se puede conectar\nRevisa URL y token' }
+        : { en: 'Error loading glucose data\nCheck your settings', es: 'Error cargando datos\nRevisa tu configuración' };
       this.showClamped(session, sessionId, errorMsg[lang]);
       this._scheduleHide(sessionId, 5000);
     }
@@ -828,8 +828,8 @@ class NightscoutMentraApp extends AppServer {
       if (!showBar || !anims || tirPct == null || !Number.isFinite(tirPct)){
         const bar = showBar && tirPct != null ? ' ' + this.__barFromRatio(tirPct/100, 20) : '';
         const tirLine = tirPct == null ? (s.language==='es' ? 'TIR hoy: n/d' : 'TIR: n/a') : (s.language==='es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
-        const line2 = `${tirLine}${bar}` + (tLine ? `\\n${tLine}` : '');
-        const out = extraLine ? `${headerText}\\n${line2}\\n${extraLine}` : `${headerText}\\n${line2}`;
+        const line2 = `${tirLine}${bar}` + (tLine ? `\n${tLine}` : '');
+        const out = extraLine ? `${headerText}\n${line2}\n${extraLine}` : `${headerText}\n${line2}`;
         this.showClamped(session, sessionId, out);
         return;
       }
@@ -844,9 +844,9 @@ class NightscoutMentraApp extends AppServer {
 
       const tirLine = (s.language==='es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
       const base = (filled) =>
-        `${headerText}\\n${tirLine} ${this.__barFromRatio(filled/slots, slots)}`
-        + (tLine ? `\\n${tLine}` : '')
-        + (extraLine ? `\\n${extraLine}` : '');
+        `${headerText}\n${tirLine} ${this.__barFromRatio(filled/slots, slots)}`
+        + (tLine ? `\n${tLine}` : '')
+        + (extraLine ? `\n${extraLine}` : '');
 
       this.showClamped(session, sessionId, base(0));
       if (leadIn>0){
@@ -878,8 +878,8 @@ class NightscoutMentraApp extends AppServer {
       try {
         const bar = this.__barFromRatio((tirPct||0)/100, 20);
         const tirLine = tirPct == null ? (s.language==='es' ? 'TIR hoy: n/d' : 'TIR: n/a') : (s.language==='es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
-        const line2 = `${tirLine} ${bar}` + (tLine ? `\\n${tLine}` : '');
-        const out = extraLine ? `${headerText}\\n${line2}\\n${extraLine}` : `${headerText}\\n${line2}`;
+        const line2 = `${tirLine} ${bar}` + (tLine ? `\n${tLine}` : '');
+        const out = extraLine ? `${headerText}\n${line2}\n${extraLine}` : `${headerText}\n${line2}`;
         this.showClamped(session, sessionId, out);
       } catch {}
     }
@@ -943,7 +943,7 @@ class NightscoutMentraApp extends AppServer {
               const lastEco = this._lastEcoAt.get(sessionId) || 0;
               if (Date.now() - lastEco > 2000) {
                 this._lastEcoAt.set(sessionId, Date.now());
-                this.showClamped(session, sessionId, [line1,line2,line3,line4,line5].join('\\n'));
+                this.showClamped(session, sessionId, [line1,line2,line3,line4,line5].join('\n'));
                 setTimeout(() => this.hideDisplay(session, sessionId), 2200);
               } else {
                 session.logger?.debug?.('ECO omitido por rate-limit');
@@ -1000,7 +1000,7 @@ class NightscoutMentraApp extends AppServer {
           } catch {}
           let tLine = '';
           try { const sum = await this.getRecentTreatments(s, 'day', sessionId); tLine = this.formatTreatmentsLine(sum, s, sessionId); } catch {}
-          await this.animateTIRFill(session, sessionId, s, baseLine, { toString: ()=>String(tirPct) }*1 || tirPct, tLine, minMaxLine);
+          await this.animateTIRFill(session, sessionId, s, baseLine, tirPct, tLine, minMaxLine);
           this._scheduleHide(sessionId, s.display_duration_ms || 4000);
         } catch (e) {
           this.showClamped(session, sessionId, (this._getLocaleBundle(sessionId, {language:'es'}).lang==='es' ? 'Error al mostrar' : 'Display error'));
@@ -1134,76 +1134,76 @@ class NightscoutMentraApp extends AppServer {
 
   /** Intenta mostrar alerta con BMP (base64); si falla, usa texto parpadeante */
   async triggerBitmapAlert(session, sessionId, data, settings, type) {
-  const displayValue = this.convertToDisplay(data.sgv, settings.units || UNITS.MGDL);
-  const unit = settings.units || UNITS.MGDL;
-  const lang = settings.language || 'en';
-  const msgs = { en: { low: `LOW GLUCOSE!`, high: `HIGH GLUCOSE!` },
-                 es: { low: `¡GLUCOSA BAJA!`, high: `¡GLUCOSA ALTA!` } };
-  const baseText = `${msgs[lang][type]}\\n${displayValue} ${unit}`;
-  const alertDuration = settings.alert_duration_ms || 15000;
+    const displayValue = this.convertToDisplay(data.sgv, settings.units || UNITS.MGDL);
+    const unit = settings.units || UNITS.MGDL;
+    const lang = settings.language || 'en';
+    const msgs = { en: { low: `LOW GLUCOSE!`, high: `HIGH GLUCOSE!` },
+                   es: { low: `¡GLUCOSA BAJA!`, high: `¡GLUCOSA ALTA!` } };
+    const baseText = `${msgs[lang][type]}\n${displayValue} ${unit}`;
+    const alertDuration = settings.alert_duration_ms || 15000;
 
-  const mode = ['mixed','icon','text'].includes(settings.alert_present_mode)
-    ? settings.alert_present_mode : 'mixed';
+    const mode = ['mixed','icon','text'].includes(settings.alert_present_mode)
+      ? settings.alert_present_mode : 'mixed';
 
-  const alias = type === 'low' ? 'low' : 'high';
-  const loc = getBitmapLocationByAlias(alias);
+    const alias = type === 'low' ? 'low' : 'high';
+    const loc = getBitmapLocationByAlias(alias);
 
-  // Empezamos overlay ALERT
-  this._beginOverlay(sessionId, RENDER_LAYERS.ALERT, alertDuration);
+    // Empezamos overlay ALERT
+    this._beginOverlay(sessionId, RENDER_LAYERS.ALERT, alertDuration);
 
-  if (mode === 'icon' && loc) {
-    // Sólo icono
-    const ok = await showBitmapByLocation(session, loc, { durationMs: alertDuration });
-    setTimeout(() => this._endOverlay(session, sessionId), alertDuration + 120);
-    return;
-  }
+    if (mode === 'icon' && loc) {
+      // Sólo icono
+      const ok = await showBitmapByLocation(session, loc, { durationMs: alertDuration });
+      setTimeout(() => this._endOverlay(session, sessionId), alertDuration + 120);
+      return;
+    }
 
-  if (mode === 'text' || !loc) {
-    // Sólo texto (o no hay BMP): parpadeo
-    const blink = 600;
+    if (mode === 'text' || !loc) {
+      // Sólo texto (o no hay BMP): parpadeo
+      const blink = 600;
+      const start = Date.now();
+      const timer = setInterval(() => {
+        if (Date.now() - start > alertDuration) {
+          clearInterval(timer);
+          this._endOverlay(session, sessionId);
+          return;
+        }
+        const on = Math.floor((Date.now() - start) / blink) % 2 === 0;
+        this.showClamped(session, sessionId, `${on ? '[!]' : '[ ]'} ${baseText}`);
+      }, blink);
+      this.displayTimers.set(sessionId, setTimeout(() => { clearInterval(timer); this._endOverlay(session, sessionId); }, alertDuration + 120));
+      return;
+    }
+
+    // Modo mezclado: alternar icono y texto
+    const slice = 600; // ms por fase
     const start = Date.now();
-    const timer = setInterval(() => {
-      if (Date.now() - start > alertDuration) {
-        clearInterval(timer);
+    let phase = 0; // 0: icono, 1: texto
+    // mostramos rápido el icono al inicio
+    await showBitmapByLocation(session, loc, { durationMs: Math.min(slice, alertDuration) });
+
+    const inter = setInterval(async () => {
+      const elapsed = Date.now() - start;
+      if (elapsed > alertDuration) {
+        clearInterval(inter);
         this._endOverlay(session, sessionId);
         return;
       }
-      const on = Math.floor((Date.now() - start) / blink) % 2 === 0;
-      this.showClamped(session, sessionId, `${on ? '[!]' : '[ ]'} ${baseText}`);
-    }, blink);
-    this.displayTimers.set(sessionId, setTimeout(() => { clearInterval(timer); this._endOverlay(session, sessionId); }, alertDuration + 120));
-    return;
+      phase = 1 - phase;
+      if (phase === 0) {
+        await showBitmapByLocation(session, loc, { durationMs: Math.min(slice, alertDuration - elapsed) });
+      } else {
+        this.showClamped(session, sessionId, baseText);
+      }
+    }, slice);
+
+    this.displayTimers.set(sessionId, setTimeout(() => { clearInterval(inter); this._endOverlay(session, sessionId); }, alertDuration + 120));
+
+    // Opcional: refresco HUD al terminar
+    setTimeout(async () => {
+      try { await this.showGlucoseTemporarily(session, sessionId, (settings.display_duration_ms || 5000), settings); } catch {}
+    }, alertDuration + 180);
   }
-
-  // Modo mezclado: alternar icono y texto
-  const slice = 600; // ms por fase
-  const start = Date.now();
-  let phase = 0; // 0: icono, 1: texto
-  // mostramos rápido el icono al inicio
-  await showBitmapByLocation(session, loc, { durationMs: Math.min(slice, alertDuration) });
-
-  const inter = setInterval(async () => {
-    const elapsed = Date.now() - start;
-    if (elapsed > alertDuration) {
-      clearInterval(inter);
-      this._endOverlay(session, sessionId);
-      return;
-    }
-    phase = 1 - phase;
-    if (phase === 0) {
-      await showBitmapByLocation(session, loc, { durationMs: Math.min(slice, alertDuration - elapsed) });
-    } else {
-      this.showClamped(session, sessionId, baseText);
-    }
-  }, slice);
-
-  this.displayTimers.set(sessionId, setTimeout(() => { clearInterval(inter); this._endOverlay(session, sessionId); }, alertDuration + 120));
-
-  // Opcional: refresco HUD al terminar
-  setTimeout(async () => {
-    try { await this.showGlucoseTemporarily(session, sessionId, (settings.display_duration_ms || 5000), settings); } catch {}
-  }, alertDuration + 180);
-}
 
   /* ---------- MIRA tool ---------- */
   async onToolCall(data) {
