@@ -41,6 +41,25 @@ try {
   } catch (e1) {
     try {
       AppSessionClass = require("@mentra/sdk/app/session").AppSession;
+const express = require('express');
+
+// --- Pre-router: Express base app + shim de settings ---
+const baseApp = express();
+baseApp.use((req, res, next) => {
+  try {
+    const sess = req?.mentra?.session;
+    if (sess && typeof sess.updateSettingsForTesting !== "function") {
+      sess.updateSettingsForTesting = async function () {
+        sess.logger?.debug?.("Shim (request): updateSettingsForTesting noop");
+        return;
+      };
+    }
+  } catch (e) {
+    console.warn("Pre-router shim error:", e);
+  }
+  next();
+});
+
     } catch (e2) {}
   }
   if (AppSessionClass && !AppSessionClass.prototype.updateSettingsForTesting) {
