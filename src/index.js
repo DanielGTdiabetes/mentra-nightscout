@@ -19,6 +19,18 @@ const axios = require("axios");
 const path = require("path");
 const fs = require("fs");
 
+// --- parche directo al prototipo de AppSession ---
+try {
+  const { AppSession } = require("@mentra/sdk");
+  if (AppSession && !AppSession.prototype.updateSettingsForTesting) {
+    AppSession.prototype.updateSettingsForTesting = async function () {
+      this.logger?.debug?.("Global shim(prototype): updateSettingsForTesting noop");
+      return;
+    };
+  }
+} catch (err) {
+  console.warn("No se pudo aplicar shim global a AppSession", err);
+}
 /* ====== Polyfill global updateSettingsForTesting ====== */
 try {
   let AppSessionClass = null;
