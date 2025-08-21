@@ -13,7 +13,7 @@
  */
 
 require('dotenv').config();
-const { AppServer, ViewType /* no usamos dashboard para bitmaps */ } = require('@mentra/sdk');
+const { AppServer } = require('@mentra/sdk');
 const axios = require('axios');
 const path = require('path');
 const fs = require('fs');
@@ -61,8 +61,8 @@ async function showBitmapByLocation(session, location, { durationMs = 5000 } = {
     if (!isLikelyBmp(location)) throw new Error('firma BM no encontrada (no es BMP válido)');
     const buf = fs.readFileSync(location);
     const b64 = buf.toString('base64');
-    try { session.layouts.clearView(); } catch {}
-    session.layouts.showBitmapView(b64, { durationMs }); // <- vista por defecto de la app
+    try { this._safeClearView(session); } catch {}
+    if (session.layouts?.showBitmapView) { session.layouts.showBitmapView(b64, { durationMs }); } else { session.layouts?.showTextWall?.('[icon]'); } // fallback
     return true;
   } catch (e) {
     session.logger?.warn?.('Bitmap base64 mode falló, fallback texto', { msg: e?.message, location });
@@ -96,6 +96,21 @@ const UNITS = { MGDL: 'mg/dL', MMOL: 'mmol/L' };
 const RENDER_LAYERS = { ECO: 0, HUD: 1, BOOT: 2, ALERT: 3 };
 
 class NightscoutMentraApp extends AppServer {
+  _safeClearView(session) {
+    try {
+      if (session?.layouts && typeof session.layouts.clearView === 'function') {
+        this._safeClearView(session);
+        return;
+      }
+    } catch (e) {
+      // En algunos runtimes aparece "Unknown layout type: clear_wiew". Ignoramos y limpiamos con texto vacío.
+    }
+    try {
+      // Limpieza por sobrescritura (fallback)
+      session.layouts?.showTextWall?.('');
+    } catch (_) {}
+  }
+
   constructor(opts) {
     super(opts);
     this.activeSessions = new Map();
@@ -682,7 +697,7 @@ class NightscoutMentraApp extends AppServer {
   }
   hideDisplay(session, sessionId) {
     try {
-      session.layouts.clearView();
+      this._safeClearView(session);
       /* removed to avoid 'Unknown layout type: clear_wiew' on G1B */
       this._lastShownText.delete(sessionId);
     } catch {}
