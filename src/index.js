@@ -49,7 +49,7 @@ async function showBitmapByLocation(session, location, { durationMs = 5000 } = {
   try {
     if (!isLikelyBmp(location)) throw new Error("firma BM no encontrada");
     const b64 = fs.readFileSync(location).toString("base64");
-    try { if (session?.layouts?.clearView) session.layouts.clearView(); } catch (e) {}
+    try { if (session?.layouts?.clearView) /* clearView disabled for compatibility */ } catch (e) {}
     if (session?.layouts?.showBitmapView) {
       session.layouts.showBitmapView(b64, { durationMs });
     } else {
@@ -144,7 +144,7 @@ class NightscoutMentraApp extends AppServer {
   _safeClearView(session){
     try{
       if (session?.layouts && typeof session.layouts.clearView==="function"){
-        session.layouts.clearView();
+        /* clearView disabled for compatibility */
         return;
       }
     }catch(e){}
