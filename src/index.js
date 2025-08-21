@@ -706,16 +706,14 @@ class NightscoutMentraApp extends AppServer {
     } catch (e) {}
   } catch (e) {}
   }
-
-  
-  // Renderiza texto ignorando la puerta de _canRender (para OVERLAY ALERT/BOOT)
-  showOverlayText(session, sessionId, text) {
-    try {
-      const out = String(text || '');
-      this._lastShownText.set(sessionId, out);
-      session.layouts.showTextWall(out);
-    } catch (_) {}
-  }
+// Renderiza texto ignorando la puerta de _canRender (para OVERLAY ALERT/BOOT)
+NightscoutMentraApp.prototype.showOverlayText = function(session, sessionId, text) {
+  try {
+    const out = String(text || '');
+    this._lastShownText.set(sessionId, out);
+    session.layouts.showTextWall(out);
+  } catch (e) {}
+};
 
   /* ---------- helpers ECO ---------- */
 
