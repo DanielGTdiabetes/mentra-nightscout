@@ -237,7 +237,7 @@ class NightscoutMentraApp extends AppServer {
         'show_tir_bar','show_range_bar',
         'display_duration_ms','alert_duration_ms','alert_cooldown_ms',
         'enable_advanced_mode','advanced_mode_enabled',
-        alert_present_mode: (String(o.alert_present_mode || o.alert_present) || 'mixed').toLowerCase(),
+        'alert_present_mode',
         'alert_hysteresis_mg','alert_hysteresis_mmol',
         'tir_low_mg','tir_high_mg','tir_low_mmol','tir_high_mmol',
         'time_in_range_low_mg','time_in_range_high_mg','time_in_range_low_mmol','time_in_range_high_mmol',
@@ -283,6 +283,7 @@ class NightscoutMentraApp extends AppServer {
         alert_cooldown_ms: coolMs,
         show_tir_bar: showTirBar,
         enable_advanced_mode: this.toBool(kv.enable_advanced_mode) || this.toBool(kv.advanced_mode_enabled),
+        alert_present_mode: (String(kv.alert_present_mode || kv.alert_present) || 'mixed').toLowerCase(),
         alert_hysteresis_mg: this.validateSlicerValue(kv.alert_hysteresis_mg, 0, 50, 5),
         alert_hysteresis_mmol: this.normalizeMmol(kv.alert_hysteresis_mmol) ?? 0.3,
         tir_low_mg: this.parseSlicerValue(kv.tir_low_mg, null),
@@ -309,6 +310,7 @@ class NightscoutMentraApp extends AppServer {
         display_duration_ms: 5000, alert_duration_ms: 15000, alert_cooldown_ms: 600000,
         show_tir_bar: true,
         enable_advanced_mode: false,
+        alert_present_mode: 'mixed',
         alert_hysteresis_mg: 5, alert_hysteresis_mmol: 0.3,
         prediction_horizon_min: 30,
         debug_force_alert: null
@@ -356,6 +358,7 @@ class NightscoutMentraApp extends AppServer {
       alert_cooldown_ms: coolMs,
       show_tir_bar: showTirBar,
       enable_advanced_mode: this.toBool(o.enable_advanced_mode) || this.toBool(o.advanced_mode_enabled),
+      alert_present_mode: (String(o.alert_present_mode || o.alert_present) || 'mixed').toLowerCase(),
       alert_hysteresis_mg: this.validateSlicerValue(o.alert_hysteresis_mg, 0, 50, 5),
       alert_hysteresis_mmol: this.normalizeMmol(o.alert_hysteresis_mmol) ?? 0.3,
       tir_low_mg: this.parseSlicerValue(o.tir_low_mg, null),
@@ -426,12 +429,12 @@ class NightscoutMentraApp extends AppServer {
         ? await this.buildPredictionShort(settings, sessionId, null, null)
         : await this.buildPredictionShort(settings, sessionId, 60, 180);
       if (!predShort) return base;
-      const parts = base.split('\n');
+      const parts = base.split('\\n');
       const l1 = parts[0] || '';
       const l2 = (parts.length > 1 ? parts[1] : '');
       const sep = ' · ';
       const rest = parts.slice(2);
-      return `${l1}\n${l2}${sep}${predShort}${rest.length ? `\n${rest.join('\n')}` : ''}`;
+      return `${l1}\\n${l2}${sep}${predShort}${rest.length ? `\\n${rest.join('\\n')}` : ''}`;
     } catch (error) {
       console.error('Error in formatForG1WithPrediction, falling back:', error);
       return await this.formatForG1(data, settings, sessionId);
@@ -444,7 +447,7 @@ class NightscoutMentraApp extends AppServer {
     const baseRaw = (settings.nightscoutUrl || '').trim();
     if (!baseRaw) return null;
     const base = baseRaw.startsWith('http') ? baseRaw : ('https://' + baseRaw);
-    const baseURL = base.replace(/\/$/, '');
+    const baseURL = base.replace(/\\/$/, '');
     if (!cli || cli.defaults.baseURL !== baseURL || cli.defaults.params?.token !== settings.nightscoutToken){
       cli = axios.create({
         baseURL,
@@ -544,13 +547,13 @@ class NightscoutMentraApp extends AppServer {
       let clean = (tLine || '')
         .replace(/^CH\/Ins hoy: /, '')
         .replace(/^Carbs\/Ins today: /, '')
-        .replace(/\s*[·•]\s*(Last|Últ):[\s\S]*$/i, '')
-        .replace(/\s*Last:[\s\S]*$/i, '')
-        .replace(/\s*Últ:[\s\S]*$/i, '')
-        .replace(/\s*\/\s*/g, '/')
-        .replace(/\s+/g, ' ')
+        .replace(/\\s*[·•]\\s*(Last|Últ):[\\s\\S]*$/i, '')
+        .replace(/\\s*Last:[\\s\\S]*$/i, '')
+        .replace(/\\s*Últ:[\\s\\S]*$/i, '')
+        .replace(/\\s*\\/\\s*/g, '/')
+        .replace(/\\s+/g, ' ')
         .trim();
-      return clean ? `${labelBar}\n${clean}` : labelBar;
+      return clean ? `${labelBar}\\n${clean}` : labelBar;
     } catch { return labelBar; }
   }
 
@@ -667,10 +670,10 @@ class NightscoutMentraApp extends AppServer {
     try {
       if (!this._canRender(sessionId, RENDER_LAYERS.HUD)) return;
 
-      const lines = String(text || '').replace(/\r/g, '').split('\n');
+      const lines = String(text || '').replace(/\\r/g, '').split('\\n');
       while (lines.length && lines[0].trim() === '') lines.shift();
       while (lines.length && lines[lines.length - 1].trim() === '') lines.pop();
-      const out = lines.slice(0, maxLines).join('\n');
+      const out = lines.slice(0, maxLines).join('\\n');
       const last = this._lastShownText.get(sessionId);
       if (last === out) return;
       this._lastShownText.set(sessionId, out);
@@ -708,7 +711,7 @@ class NightscoutMentraApp extends AppServer {
     try {
       settings = await this.getUserSettings(session);
       if (!settings.nightscoutUrl) {
-        const msg = { en: 'Please configure Nightscout\nURL and token in settings', es: 'Configura URL y token\nde Nightscout en ajustes' };
+        const msg = { en: 'Please configure Nightscout\\nURL and token in settings', es: 'Configura URL y token\\nde Nightscout en ajustes' };
         this.showClamped(session, sessionId, msg[settings.language || 'en']);
         return;
       }
@@ -809,10 +812,10 @@ class NightscoutMentraApp extends AppServer {
       } catch (_) {}
       const lang = (settings && settings.language) || 'en';
       const errorMsg = error.message?.includes('URL no configurada')
-        ? { en: 'Nightscout URL not set\nCheck settings', es: 'URL de Nightscout no configurada\nRevisa ajustes' }
+        ? { en: 'Nightscout URL not set\\nCheck settings', es: 'URL de Nightscout no configurada\\nRevisa ajustes' }
         : (error.message?.includes('Sin datos') || error.message?.includes('timeout'))
-        ? { en: 'Cannot connect to Nightscout\nCheck URL and token', es: 'No se puede conectar\nRevisa URL y token' }
-        : { en: 'Error loading glucose data\nCheck your settings', es: 'Error cargando datos\nRevisa tu configuración' };
+        ? { en: 'Cannot connect to Nightscout\\nCheck URL and token', es: 'No se puede conectar\\nRevisa URL y token' }
+        : { en: 'Error loading glucose data\\nCheck your settings', es: 'Error cargando datos\\nRevisa tu configuración' };
       this.showClamped(session, sessionId, errorMsg[lang]);
       this._scheduleHide(sessionId, 5000);
     }
@@ -825,8 +828,8 @@ class NightscoutMentraApp extends AppServer {
       if (!showBar || !anims || tirPct == null || !Number.isFinite(tirPct)){
         const bar = showBar && tirPct != null ? ' ' + this.__barFromRatio(tirPct/100, 20) : '';
         const tirLine = tirPct == null ? (s.language==='es' ? 'TIR hoy: n/d' : 'TIR: n/a') : (s.language==='es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
-        const line2 = `${tirLine}${bar}` + (tLine ? `\n${tLine}` : '');
-        const out = extraLine ? `${headerText}\n${line2}\n${extraLine}` : `${headerText}\n${line2}`;
+        const line2 = `${tirLine}${bar}` + (tLine ? `\\n${tLine}` : '');
+        const out = extraLine ? `${headerText}\\n${line2}\\n${extraLine}` : `${headerText}\\n${line2}`;
         this.showClamped(session, sessionId, out);
         return;
       }
@@ -841,9 +844,9 @@ class NightscoutMentraApp extends AppServer {
 
       const tirLine = (s.language==='es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
       const base = (filled) =>
-        `${headerText}\n${tirLine} ${this.__barFromRatio(filled/slots, slots)}`
-        + (tLine ? `\n${tLine}` : '')
-        + (extraLine ? `\n${extraLine}` : '');
+        `${headerText}\\n${tirLine} ${this.__barFromRatio(filled/slots, slots)}`
+        + (tLine ? `\\n${tLine}` : '')
+        + (extraLine ? `\\n${extraLine}` : '');
 
       this.showClamped(session, sessionId, base(0));
       if (leadIn>0){
@@ -875,8 +878,8 @@ class NightscoutMentraApp extends AppServer {
       try {
         const bar = this.__barFromRatio((tirPct||0)/100, 20);
         const tirLine = tirPct == null ? (s.language==='es' ? 'TIR hoy: n/d' : 'TIR: n/a') : (s.language==='es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
-        const line2 = `${tirLine} ${bar}` + (tLine ? `\n${tLine}` : '');
-        const out = extraLine ? `${headerText}\n${line2}\n${extraLine}` : `${headerText}\n${line2}`;
+        const line2 = `${tirLine} ${bar}` + (tLine ? `\\n${tLine}` : '');
+        const out = extraLine ? `${headerText}\\n${line2}\\n${extraLine}` : `${headerText}\\n${line2}`;
         this.showClamped(session, sessionId, out);
       } catch {}
     }
@@ -940,7 +943,7 @@ class NightscoutMentraApp extends AppServer {
               const lastEco = this._lastEcoAt.get(sessionId) || 0;
               if (Date.now() - lastEco > 2000) {
                 this._lastEcoAt.set(sessionId, Date.now());
-                this.showClamped(session, sessionId, [line1,line2,line3,line4,line5].join('\n'));
+                this.showClamped(session, sessionId, [line1,line2,line3,line4,line5].join('\\n'));
                 setTimeout(() => this.hideDisplay(session, sessionId), 2200);
               } else {
                 session.logger?.debug?.('ECO omitido por rate-limit');
@@ -997,7 +1000,7 @@ class NightscoutMentraApp extends AppServer {
           } catch {}
           let tLine = '';
           try { const sum = await this.getRecentTreatments(s, 'day', sessionId); tLine = this.formatTreatmentsLine(sum, s, sessionId); } catch {}
-          await this.animateTIRFill(session, sessionId, s, baseLine, tirPct, tLine, minMaxLine);
+          await this.animateTIRFill(session, sessionId, s, baseLine, { toString: ()=>String(tirPct) }*1 || tirPct, tLine, minMaxLine);
           this._scheduleHide(sessionId, s.display_duration_ms || 4000);
         } catch (e) {
           this.showClamped(session, sessionId, (this._getLocaleBundle(sessionId, {language:'es'}).lang==='es' ? 'Error al mostrar' : 'Display error'));
@@ -1136,7 +1139,7 @@ class NightscoutMentraApp extends AppServer {
   const lang = settings.language || 'en';
   const msgs = { en: { low: `LOW GLUCOSE!`, high: `HIGH GLUCOSE!` },
                  es: { low: `¡GLUCOSA BAJA!`, high: `¡GLUCOSA ALTA!` } };
-  const baseText = `${msgs[lang][type]}\n${displayValue} ${unit}`;
+  const baseText = `${msgs[lang][type]}\\n${displayValue} ${unit}`;
   const alertDuration = settings.alert_duration_ms || 15000;
 
   const mode = ['mixed','icon','text'].includes(settings.alert_present_mode)
