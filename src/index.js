@@ -16,9 +16,6 @@
 require("dotenv").config();
 const { AppServer } = require("@mentra/sdk");
 const axios = require("axios");
-const path = require("path");
-const fs = require("fs");
-
 // --- parche directo al prototipo de AppSession ---
 try {
   const { AppSession } = require("@mentra/sdk");
@@ -31,6 +28,11 @@ try {
 } catch (err) {
   console.warn("No se pudo aplicar shim global a AppSession", err);
 }
+
+const path = require("path");
+const fs = require("fs");
+
+
 /* ====== Polyfill global updateSettingsForTesting ====== */
 try {
   let AppSessionClass = null;
