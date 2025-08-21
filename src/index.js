@@ -550,8 +550,8 @@ class NightscoutMentraApp extends AppServer {
         .replace(/\\s*[·•]\\s*(Last|Últ):[\\s\\S]*$/i, '')
         .replace(/\\s*Last:[\\s\\S]*$/i, '')
         .replace(/\\s*Últ:[\\s\\S]*$/i, '')
-        .replace(/\\s*\\/\\s*/g, '/')
-        .replace(/\\s+/g, ' ')
+        .replace(/\s*\/\s*/g, '/')
+        .replace(/\s+/g, ' ')
         .trim();
       return clean ? `${labelBar}\\n${clean}` : labelBar;
     } catch { return labelBar; }
@@ -670,7 +670,7 @@ class NightscoutMentraApp extends AppServer {
     try {
       if (!this._canRender(sessionId, RENDER_LAYERS.HUD)) return;
 
-      const lines = String(text || '').replace(/\\r/g, '').split('\\n');
+      const lines = String(text || '').replace(/\r/g, '').split('\\n');
       while (lines.length && lines[0].trim() === '') lines.shift();
       while (lines.length && lines[lines.length - 1].trim() === '') lines.pop();
       const out = lines.slice(0, maxLines).join('\\n');
