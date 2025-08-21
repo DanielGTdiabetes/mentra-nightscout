@@ -62,7 +62,7 @@ async function showBitmapByLocation(session, location, { durationMs = 5000 } = {
     const buf = fs.readFileSync(location);
     const b64 = buf.toString('base64');
     try { this._safeClearView(session); } catch {}
-    if (session.layouts?.showBitmapView) { session.layouts.showBitmapView(b64, { durationMs }); } else { session.layouts?.showTextWall?.('[icon]'); } // fallback
+    session.layouts.showBitmapView(b64, { durationMs }); // <- vista por defecto de la app
     return true;
   } catch (e) {
     session.logger?.warn?.('Bitmap base64 mode falló, fallback texto', { msg: e?.message, location });
@@ -103,10 +103,9 @@ class NightscoutMentraApp extends AppServer {
         return;
       }
     } catch (e) {
-      // En algunos runtimes aparece "Unknown layout type: clear_wiew". Ignoramos y limpiamos con texto vacío.
+      // Ignorar 'Unknown layout type: clear_wiew'
     }
     try {
-      // Limpieza por sobrescritura (fallback)
       session.layouts?.showTextWall?.('');
     } catch (_) {}
   }
@@ -462,7 +461,7 @@ class NightscoutMentraApp extends AppServer {
     const baseRaw = (settings.nightscoutUrl || '').trim();
     if (!baseRaw) return null;
     const base = baseRaw.startsWith('http') ? baseRaw : ('https://' + baseRaw);
-    const baseURL = base.endsWith('/') ? base.slice(0, -1) : base;
+    const baseURL = base.replace(/\/$/, '');
     if (!cli || cli.defaults.baseURL !== baseURL || cli.defaults.params?.token !== settings.nightscoutToken){
       cli = axios.create({
         baseURL,
@@ -698,11 +697,17 @@ class NightscoutMentraApp extends AppServer {
   hideDisplay(session, sessionId) {
     try {
       this._safeClearView(session);
-      /* removed to avoid 'Unknown layout type: clear_wiew' on G1B */
+      try { session.layouts?.showTextWall?.('\u200B'); } catch {}
+      setTimeout(() => { try { this._safeClearView(session); } catch {} }, 50);
+      setTimeout(() => { try { this._safeClearView(session); } catch {} }, 120);
       this._lastShownText.delete(sessionId);
+      this._renderLayer.set(sessionId, RENDER_LAYERS.HUD);
+      this._renderHoldUntil.set(sessionId, 0);
     } catch {}
+  } catch {}
   }
 
+  
   // Renderiza texto ignorando la puerta de _canRender (para OVERLAY ALERT/BOOT)
   showOverlayText(session, sessionId, text) {
     try {
@@ -1201,7 +1206,7 @@ class NightscoutMentraApp extends AppServer {
     }
 
     // Modo mezclado: alternar icono y texto
-    const slice = 700; // ms por fase
+    const slice = 600; // ms por fase
     const start = Date.now();
     let phase = 0; // 0: icono, 1: texto
     // mostramos rápido el icono al inicio
@@ -1298,12 +1303,3 @@ server.app.get('/health', (_, res) => res.json({
   activeSessions: server.activeSessions.size
 }));
 setInterval(() => axios.get(`${KEEP_ALIVE_URL}/health`).catch(() => {}), 3 * 60 * 1000);
-
-
-// --- Robustez: evitar reinicios por excepciones no capturadas ---
-process.on('uncaughtException', (err) => {
-  try { console.error('[uncaughtException]', err?.stack || err); } catch {}
-});
-process.on('unhandledRejection', (reason) => {
-  try { console.error('[unhandledRejection]', reason); } catch {}
-});
