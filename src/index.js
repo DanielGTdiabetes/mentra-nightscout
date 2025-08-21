@@ -1056,7 +1056,15 @@ class NightscoutMentraApp extends AppServer {
 const server=new NightscoutMentraApp({ packageName:PACKAGE_NAME, apiKey:MENTRAOS_API_KEY, port:PORT });
 server.start().catch(err=>{ console.error("⛔ Error iniciando servidor:", err); process.exit(1); });
 console.log("🚀 Nightscout MentraOS — build retro (text-only alerts)");
-
+server.app.use((req, res, next) => {
+  try {
+    const sess = req?.mentra?.session;
+    if (sess && typeof sess.updateSettingsForTesting !== 'function') {
+      sess.updateSettingsForTesting = async () => { /* no-op */ };
+    }
+  } catch {}
+  next();
+});
 /* ====== Re-check periódico para sesiones activas ====== */
 setInterval(() => {
   try {
