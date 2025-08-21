@@ -155,10 +155,10 @@ class NightscoutMentraApp extends AppServer {
   showClamped(session, sessionId, text, maxLines=5){
     try{
       if (!this._canRender(sessionId, RENDER_LAYERS.HUD)) return;
-      const lines=String(text||"").replace(/\\r/g,"").split("\\n");
+      const lines=String(text||"").replace(/\r/g,"").split("\n");
       while(lines.length && lines[0].trim()==="") lines.shift();
       while(lines.length && lines[lines.length-1].trim()==="") lines.pop();
-      const out=lines.slice(0,maxLines).join("\\n");
+      const out=lines.slice(0,maxLines).join("\n");
       const last=this._lastShownText.get(sessionId);
       if (last===out) return;
       this._lastShownText.set(sessionId, out);
@@ -425,7 +425,7 @@ class NightscoutMentraApp extends AppServer {
     const timeStr=t.toLocaleTimeString(b.locale, {timeZone:b.tz, hour:"2-digit", minute:"2-digit", hour12:false});
     const minutesAgo=Math.floor((Date.now()-data.date)/60000);
     const timeAgo= minutesAgo<=1 ? (b.lang==="es"?"ahora":"now") : (b.lang==="es"?`hace ${minutesAgo}m`:`${minutesAgo}m ago`);
-    return `${display} ${settings.units||UNITS.MGDL} ${trend}\\n${timeStr} (${timeAgo})`;
+    return `${display} ${settings.units||UNITS.MGDL} ${trend}\n${timeStr} (${timeAgo})`;
   }
   async formatForG1WithPrediction(data, settings, sessionId){
     try{
@@ -434,10 +434,10 @@ class NightscoutMentraApp extends AppServer {
         ? await this.buildPredictionShort(settings, sessionId, null, null)
         : await this.buildPredictionShort(settings, sessionId, 60, 180);
       if (!predShort) return base;
-      const parts=base.split("\\n");
+      const parts=base.split("\n");
       const l1=parts[0]||"", l2=(parts[1]||"");
       const rest=parts.slice(2);
-      return `${l1}\\n${l2} · ${predShort}${rest.length? `\\n${rest.join("\\n")}`:""}`;
+      return `${l1}\n${l2} · ${predShort}${rest.length? `\n${rest.join("\n")}`:""}`;
     }catch(e){ return await this.formatForG1(data, settings, sessionId); }
   }
 
@@ -507,15 +507,15 @@ class NightscoutMentraApp extends AppServer {
     const labelBar = `${tirLine}${bar? " "+bar:""}`;
     try{
       let clean=(tLine||"")
-        .replace(/^\\s*CH\\/Ins hoy:\\s*/,"")
-        .replace(/^\\s*Carbs\\/Ins today:\\s*/,"")
+        .replace(/^\s*CH\/Ins hoy:\s*/,"")
+        .replace(/^\s*Carbs\/Ins today:\s*/,"")
         .replace(/\\s*[·•]\\s*(Last|Últ):[\\s\\S]*$/i,"")
-        .replace(/\\s*Last:[\\s\\S]*$/i,"")
-        .replace(/\\s*Últ:[\\s\\S]*$/i,"")
-        .replace(/\\s*\\/\\s*/g,"/")
-        .replace(/\\s+/g," ")
+        .replace(/\s*Last:[\s\S]*$/i,"")
+        .replace(/\s*Últ:[\s\S]*$/i,"")
+        .replace(/\s*\/\s*/g,"/")
+        .replace(/\s+/g," ")
         .trim();
-      return clean? `${labelBar}\\n${clean}` : labelBar;
+      return clean? `${labelBar}\n${clean}` : labelBar;
     }catch(e){ return labelBar; }
   }
   updateDailyTirState(sessionId, readingMgdl, readingTs, settings){
@@ -633,7 +633,7 @@ class NightscoutMentraApp extends AppServer {
     const unit=settings.units||UNITS.MGDL;
     const lang=settings.language||"en";
     const msgs={ en:{low:`LOW GLUCOSE!`,high:`HIGH GLUCOSE!`}, es:{low:`¡GLUCOSA BAJA!`, high:`¡GLUCOSA ALTA!`} };
-    const baseText=`${msgs[lang][type]}\\n${displayValue} ${unit}`;
+    const baseText=`${msgs[lang][type]}\n${displayValue} ${unit}`;
     const alertDuration=settings.alert_duration_ms||15000;
     const modeRaw=String(settings.alert_present_mode||"icon").toLowerCase();
     const mode=(modeRaw==="text"||modeRaw==="icon")? modeRaw : "icon";
@@ -722,8 +722,8 @@ class NightscoutMentraApp extends AppServer {
       if (!showBar || !anims || tirPct==null || !Number.isFinite(tirPct)){
         const bar= showBar && tirPct!=null ? " "+this.__barFromRatio(tirPct/100,20) : "";
         const tirLine = tirPct==null ? (s.language==="es"?"TIR hoy: n/d":"TIR: n/a") : (s.language==="es"?`TIR hoy: ${tirPct}%`:`TIR: ${tirPct}%`);
-        const line2=`${tirLine}${bar}` + (tLine? `\\n${tLine}`:"");
-        const out= extraLine? `${headerText}\\n${line2}\\n${extraLine}` : `${headerText}\\n${line2}`;
+        const line2=`${tirLine}${bar}` + (tLine? `\n${tLine}`:"");
+        const out= extraLine? `${headerText}\n${line2}\n${extraLine}` : `${headerText}\n${line2}`;
         this.showClamped(session, sessionId, out);
         return;
       }
@@ -734,7 +734,7 @@ class NightscoutMentraApp extends AppServer {
       const slots=20, leadIn=220, totalMs=920;
       const target=Math.floor(this.__clamp01(tirPct/100)*slots);
       const tirLine=(s.language==="es"?`TIR hoy: ${tirPct}%`:`TIR: ${tirPct}%`);
-      const base=(filled)=> `${headerText}\\n${tirLine} ${this.__barFromRatio(filled/slots,slots)}${tLine?`\\n${tLine}`:""}${extraLine?`\\n${extraLine}`:""}`;
+      const base=(filled)=> `${headerText}\n${tirLine} ${this.__barFromRatio(filled/slots,slots)}${tLine?`\n${tLine}`:""}${extraLine?`\n${extraLine}`:""}`;
 
       this.showClamped(session, sessionId, base(0));
       if (leadIn>0){
@@ -761,8 +761,8 @@ class NightscoutMentraApp extends AppServer {
       try{
         const bar=this.__barFromRatio((tirPct||0)/100,20);
         const tirLine= tirPct==null ? (s.language==="es"?"TIR hoy: n/d":"TIR: n/a") : (s.language==="es"?`TIR hoy: ${tirPct}%`:`TIR: ${tirPct}%`);
-        const line2=`${tirLine} ${bar}` + (tLine?`\\n${tLine}`:"");
-        const out= extraLine? `${headerText}\\n${line2}\\n${extraLine}` : `${headerText}\\n${line2}`;
+        const line2=`${tirLine} ${bar}` + (tLine?`\n${tLine}`:"");
+        const out= extraLine? `${headerText}\n${line2}\n${extraLine}` : `${headerText}\n${line2}`;
         this.showClamped(session, sessionId, out);
       }catch(ee){}
     }
@@ -796,7 +796,7 @@ class NightscoutMentraApp extends AppServer {
         }
       }catch(e){}
       const lang=(settings&&settings.language)||"en";
-      const msg={ en:"Error loading glucose data\\nCheck your settings", es:"Error cargando datos\\nRevisa tu configuración" };
+      const msg={ en:"Error loading glucose data\nCheck your settings", es:"Error cargando datos\nRevisa tu configuración" };
       this.showClamped(session, sessionId, msg[lang]); this._scheduleHide(sessionId, 5000);
     }
   }
@@ -843,7 +843,7 @@ class NightscoutMentraApp extends AppServer {
             const line3=`${isEs?"Rango":"Range"}: ${limitsEcho}`;
             const line4=`${isEs?"Avanzado":"Advanced"}: ${settings.enable_advanced_mode?"ON":"OFF"}`;
             const line5=(isEs?"Alarmas":"Alerts")+`: ${settings.alertsEnabled?"ON":"OFF"} · Hyst: ±${hystMg} mg/dL (±${hystMmol} mmol/L) · ${stateStr}`;
-            const ecoTxt=[line1,line2,line3,line4,line5].join("\\n");
+            const ecoTxt=[line1,line2,line3,line4,line5].join("\n");
 
             if (this._canRender(sessionId, RENDER_LAYERS.ECO)){
               const lastEco=this._lastEcoAt.get(sessionId)||0;
@@ -974,7 +974,7 @@ class NightscoutMentraApp extends AppServer {
       }
       let settings=await this.getUserSettings(session);
       if (!settings.nightscoutUrl){
-        const msg={ en:"Please configure Nightscout\\nURL and token in settings", es:"Configura URL y token\\nde Nightscout en ajustes" };
+        const msg={ en:"Please configure Nightscout\nURL and token in settings", es:"Configura URL y token\nde Nightscout en ajustes" };
         this.showClamped(session, sessionId, msg[settings.language||"en"]); return;
       }
 
