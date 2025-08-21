@@ -560,7 +560,7 @@ class NightscoutMentraApp extends AppServer {
       }else{
         const since=Date.now()-Math.max(1,hours)*60*60*1000;
         windowed=events.filter(e=> e.ts>=since);
-        label=`${hours}h";
+        label=`${hours}h`;
       }
       if (!windowed.length) return { label, totalCarbs:0, totalInsulin:0, last:null };
       let totalCarbs=0,totalInsulin=0,last=null;
