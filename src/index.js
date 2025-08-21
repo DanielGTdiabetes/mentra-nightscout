@@ -54,19 +54,19 @@ function isLikelyBmp(location) {
 /** Muestra un bitmap leyendo bytes y enviando Base64 al SDK (robusto, sin DASHBOARD) */
 async function showBitmapByLocation(session, location, { durationMs = 5000 } = {}) {
   if (!location) {
-    try { session.layouts.showTextWall('(bitmap missing)', { durationMs }); } catch {}
+    try { session.layouts.showTextWall('(bitmap missing)', { durationMs }); } catch (e) {}
     return false;
   }
   try {
     if (!isLikelyBmp(location)) throw new Error('firma BM no encontrada (no es BMP válido)');
     const buf = fs.readFileSync(location);
     const b64 = buf.toString('base64');
-    try { this._safeClearView(session); } catch {}
+    try { this._safeClearView(session); } catch (e) {}
     session.layouts.showBitmapView(b64, { durationMs }); // <- vista por defecto de la app
     return true;
   } catch (e) {
     session.logger?.warn?.('Bitmap base64 mode falló, fallback texto', { msg: e?.message, location });
-    try { session.layouts.showTextWall('(bitmap error)', { durationMs }); } catch {}
+    try { session.layouts.showTextWall('(bitmap error)', { durationMs }); } catch (e) {}
     return false;
   }
 }
@@ -188,7 +188,7 @@ class NightscoutMentraApp extends AppServer {
   }
 
   _endOverlay(session, sessionId) {
-    try { this.hideDisplay(session, sessionId); } catch {}
+    try { this.hideDisplay(session, sessionId); } catch (e) {}
     this._renderLayer.set(sessionId, RENDER_LAYERS.HUD);
     this._renderHoldUntil.set(sessionId, 0);
   }
@@ -697,14 +697,14 @@ class NightscoutMentraApp extends AppServer {
   hideDisplay(session, sessionId) {
     try {
       this._safeClearView(session);
-      try { session.layouts?.showTextWall?.('\u200B'); } catch {}
-      setTimeout(() => { try { this._safeClearView(session); } catch {} }, 50);
-      setTimeout(() => { try { this._safeClearView(session); } catch {} }, 120);
+      try { session.layouts?.showTextWall?.('\u200B'); } catch (e) {}
+      setTimeout(() => { try { this._safeClearView(session); } catch (e) {} }, 50);
+      setTimeout(() => { try { this._safeClearView(session); } catch (e) {} }, 120);
       this._lastShownText.delete(sessionId);
       this._renderLayer.set(sessionId, RENDER_LAYERS.HUD);
       this._renderHoldUntil.set(sessionId, 0);
-    } catch {}
-  } catch {}
+    } catch (e) {}
+  } catch (e) {}
   }
 
   
@@ -824,7 +824,7 @@ class NightscoutMentraApp extends AppServer {
           : (settings.language === 'es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
         const bar = !this.toBool(settings.show_tir_bar) || tirPct === null ? '' : this.buildTirBar(tirPct);
         let tLine = '';
-        try { const sum = await this.getRecentTreatments(settings, 'day', sessionId); tLine = this.formatTreatmentsLine(sum, settings, sessionId); } catch {}
+        try { const sum = await this.getRecentTreatments(settings, 'day', sessionId); tLine = this.formatTreatmentsLine(sum, settings, sessionId); } catch (e) {}
         await this.animateTIRFill(session, sessionId, settings, formattedData, tirPct, tLine);
       } else {
         this.showClamped(session, sessionId, formattedData);
@@ -911,7 +911,7 @@ class NightscoutMentraApp extends AppServer {
         const line2 = `${tirLine} ${bar}` + (tLine ? `\n${tLine}` : '');
         const out = extraLine ? `${headerText}\n${line2}\n${extraLine}` : `${headerText}\n${line2}`;
         this.showClamped(session, sessionId, out);
-      } catch {}
+      } catch (e) {}
     }
   }
 
@@ -981,7 +981,7 @@ class NightscoutMentraApp extends AppServer {
             } else {
               session.logger?.debug?.('ECO omitido por overlay activo');
             }
-          } catch {}
+          } catch (e) {}
         } catch (error) {
           session.logger?.error(error, 'Failed to process settings update');
         }
@@ -1027,9 +1027,9 @@ class NightscoutMentraApp extends AppServer {
                 ? `Min/Max hoy: ${minDisp} / ${maxDisp} ${s.units}`
                 : `Min/Max today: ${minDisp} / ${maxDisp} ${s.units}`;
             }
-          } catch {}
+          } catch (e) {}
           let tLine = '';
-          try { const sum = await this.getRecentTreatments(s, 'day', sessionId); tLine = this.formatTreatmentsLine(sum, s, sessionId); } catch {}
+          try { const sum = await this.getRecentTreatments(s, 'day', sessionId); tLine = this.formatTreatmentsLine(sum, s, sessionId); } catch (e) {}
           await this.animateTIRFill(session, sessionId, s, baseLine, tirPct, tLine, minMaxLine);
           this._scheduleHide(sessionId, s.display_duration_ms || 4000);
         } catch (e) {
@@ -1066,7 +1066,7 @@ class NightscoutMentraApp extends AppServer {
       if (settings.enable_advanced_mode) {
         const header = await this.formatForG1WithPrediction(data, settings, sessionId);
         let tLine = '';
-        try { const sum = await this.getRecentTreatments(settings, 'day', sessionId); tLine = this.formatTreatmentsLine(sum, settings, sessionId); } catch {}
+        try { const sum = await this.getRecentTreatments(settings, 'day', sessionId); tLine = this.formatTreatmentsLine(sum, settings, sessionId); } catch (e) {}
         await this.animateTIRFill(session, sessionId, settings, header, tirPct, tLine);
       } else {
         this.showClamped(session, sessionId, await this.formatForG1WithPrediction(data, settings, sessionId));
@@ -1231,7 +1231,7 @@ class NightscoutMentraApp extends AppServer {
 
     // Opcional: refresco HUD al terminar
     setTimeout(async () => {
-      try { await this.showGlucoseTemporarily(session, sessionId, (settings.display_duration_ms || 5000), settings); } catch {}
+      try { await this.showGlucoseTemporarily(session, sessionId, (settings.display_duration_ms || 5000), settings); } catch (e) {}
     }, alertDuration + 180);
   }
 
