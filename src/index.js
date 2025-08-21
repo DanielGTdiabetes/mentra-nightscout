@@ -447,7 +447,7 @@ class NightscoutMentraApp extends AppServer {
     const baseRaw = (settings.nightscoutUrl || '').trim();
     if (!baseRaw) return null;
     const base = baseRaw.startsWith('http') ? baseRaw : ('https://' + baseRaw);
-    const baseURL = base.replace(/\/$/, '');
+    const baseURL = base.endsWith('/') ? base.slice(0, -1) : base;
     if (!cli || cli.defaults.baseURL !== baseURL || cli.defaults.params?.token !== settings.nightscoutToken){
       cli = axios.create({
         baseURL,
@@ -688,7 +688,17 @@ class NightscoutMentraApp extends AppServer {
     } catch {}
   }
 
+  // Renderiza texto ignorando la puerta de _canRender (para OVERLAY ALERT/BOOT)
+  showOverlayText(session, sessionId, text) {
+    try {
+      const out = String(text || '');
+      this._lastShownText.set(sessionId, out);
+      session.layouts.showTextWall(out);
+    } catch (_) {}
+  }
+
   /* ---------- helpers ECO ---------- */
+
   getAlarmEchoState(sessionId, mgdl, settings) {
     const lim = this.getAlertLimits(settings);
     const latched = this.alertLatch.get(sessionId) || null;
@@ -1169,14 +1179,14 @@ class NightscoutMentraApp extends AppServer {
           return;
         }
         const on = Math.floor((Date.now() - start) / blink) % 2 === 0;
-        this.showClamped(session, sessionId, `${on ? '[!]' : '[ ]'} ${baseText}`);
+        this.showOverlayText(session, sessionId, `${on ? '[!]' : '[ ]'} ${baseText}`);
       }, blink);
       this.displayTimers.set(sessionId, setTimeout(() => { clearInterval(timer); this._endOverlay(session, sessionId); }, alertDuration + 120));
       return;
     }
 
     // Modo mezclado: alternar icono y texto
-    const slice = 600; // ms por fase
+    const slice = 700; // ms por fase
     const start = Date.now();
     let phase = 0; // 0: icono, 1: texto
     // mostramos rápido el icono al inicio
@@ -1193,7 +1203,7 @@ class NightscoutMentraApp extends AppServer {
       if (phase === 0) {
         await showBitmapByLocation(session, loc, { durationMs: Math.min(slice, alertDuration - elapsed) });
       } else {
-        this.showClamped(session, sessionId, baseText);
+        this.showOverlayText(session, sessionId, baseText);
       }
     }, slice);
 
@@ -1273,3 +1283,12 @@ server.app.get('/health', (_, res) => res.json({
   activeSessions: server.activeSessions.size
 }));
 setInterval(() => axios.get(`${KEEP_ALIVE_URL}/health`).catch(() => {}), 3 * 60 * 1000);
+
+
+// --- Robustez: evitar reinicios por excepciones no capturadas ---
+process.on('uncaughtException', (err) => {
+  try { console.error('[uncaughtException]', err?.stack || err); } catch {}
+});
+process.on('unhandledRejection', (reason) => {
+  try { console.error('[unhandledRejection]', reason); } catch {}
+});
