@@ -6,6 +6,11 @@
  * - HUD con predicción breve + TIR + tratamientos
  * - Limpieza robusta del display para que no quede texto fijo
  * - Polyfill global para updateSettingsForTesting (evita error en Render)
+ *
+ * CHANGELOG 2025-08-21:
+ * - Eliminado cualquier uso de `clearView()` para evitar el mensaje
+ *   "Unknown layout type: clear_wiew" en las gafas.
+ * - Sustituido por limpiezas con `showTextWall("")` y secuencias con \u200B.
  */
 
 require("dotenv").config();
@@ -57,8 +62,15 @@ async function showBitmapByLocation(session, location, { durationMs = 3000 } = {
   if (!location) return false;
   try {
     if (!isLikelyBmp(location)) throw new Error("firma BM no encontrada");
+
     const b64 = fs.readFileSync(location).toString("base64");
-    try { if (session?.layouts?.clearView) session.layouts.clearView(); } catch (e) {}
+
+    // En lugar de clearView(), limpiamos con showTextWall para evitar "clear_wiew"
+    try {
+      session?.layouts?.showTextWall?.("");    // blank
+      session?.layouts?.showTextWall?.("\u200B"); // zero-width (fuerza refresco)
+    } catch (e) {}
+
     if (session?.layouts?.showBitmapView) {
       session.layouts.showBitmapView(b64, { durationMs });
     } else if (session?.showBitmap) {
@@ -153,13 +165,10 @@ class NightscoutMentraApp extends AppServer {
 
   /* ---------- limpieza vista ---------- */
   _safeClearView(session){
-    try{
-      if (session?.layouts && typeof session.layouts.clearView==="function"){
-        session.layouts.clearView();
-        return;
-      }
-    }catch(e){}
-    try{ session?.layouts?.showTextWall?.(""); }catch(e){}
+    // IMPORTANTE: NO usar clearView() para evitar "Unknown layout type: clear_wiew"
+    try { session?.layouts?.showTextWall?.(""); } catch(e) {}
+    try { session?.layouts?.showTextWall?.("\u200B"); } catch(e) {}
+    try { session?.layouts?.showTextWall?.(""); } catch(e) {}
   }
 
   showOverlayText(session, sessionId, text){
@@ -188,7 +197,6 @@ class NightscoutMentraApp extends AppServer {
   hideDisplay(session, sessionId){
     try{
       this._safeClearView(session);
-      try{ session?.layouts?.showTextWall?.("\u200B"); }catch(e){}
       setTimeout(()=>{ try{ this._safeClearView(session); }catch(e){} },50);
       setTimeout(()=>{ try{ this._safeClearView(session); }catch(e){} },120);
       this._lastShownText.delete(sessionId);
@@ -864,9 +872,9 @@ class NightscoutMentraApp extends AppServer {
       const settingsHandler=(settingsData)=>{
         try{
           if (this._settingsDebounce.has(sessionId)) clearTimeout(this._settingsDebounce.get(sessionId));
-          const t=setTimeout(()=> runSettingsHandler(settingsData), 120);
-          this._settingsDebounce.set(sessionId, t);
         }catch(e){}
+        const t=setTimeout(()=> runSettingsHandler(settingsData), 120);
+        this._settingsDebounce.set(sessionId, t);
       };
 
       session?.events?.onAppSettingsUpdate?.(settingsHandler);
@@ -930,7 +938,7 @@ class NightscoutMentraApp extends AppServer {
       const {tirPct}=this.updateDailyTirState(sessionId, data.sgv, data.date, settings);
       if (settings.enable_advanced_mode){
         const header=await this.formatForG1WithPrediction(data, settings, sessionId);
-        let tLine=""; try{ const sum=await this.getRecentTreatments(settings,"day",sessionId); tLine=this.formatTreatmentsLine(sum,settings,sessionId); }catch(e){}
+        let tLine=""; try{ const sum=await this.getRecentTreatments(settings,"day",sessionId); tLine=this.formatTreatmentsLine(sum, settings, sessionId); }catch(e){}
         await this.animateTIRFill(session, sessionId, settings, header, tirPct, tLine);
       }else{
         this.showClamped(session, sessionId, await this.formatForG1WithPrediction(data, settings, sessionId));
@@ -987,7 +995,11 @@ class NightscoutMentraApp extends AppServer {
       // Mostrar bitmap de arranque (opcional)
       try{
         const loc=getBitmapLocationByAlias("boot");
-        if (loc){ this._beginOverlay(sessionId, RENDER_LAYERS.BOOT, 3000); await showBitmapByLocation(session, loc, {durationMs:3000}); setTimeout(()=> this._endOverlay(session, sessionId), 3120); }
+        if (loc){
+          this._beginOverlay(sessionId, RENDER_LAYERS.BOOT, 3000);
+          await showBitmapByLocation(session, loc, {durationMs:3000});
+          setTimeout(()=> this._endOverlay(session, sessionId), 3120);
+        }
       }catch(e){}
 
       await this.showInitialAndHide(session, sessionId, settings);
