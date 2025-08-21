@@ -704,8 +704,8 @@ class NightscoutMentraApp extends AppServer {
       this._renderLayer.set(sessionId, RENDER_LAYERS.HUD);
       this._renderHoldUntil.set(sessionId, 0);
     } catch (e) {}
-  } catch (e) {}
-  }
+
+
 // Renderiza texto ignorando la puerta de _canRender (para OVERLAY ALERT/BOOT)
 NightscoutMentraApp.prototype.showOverlayText = function(session, sessionId, text) {
   try {
