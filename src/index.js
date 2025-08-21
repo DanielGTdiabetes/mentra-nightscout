@@ -683,7 +683,7 @@ class NightscoutMentraApp extends AppServer {
   hideDisplay(session, sessionId) {
     try {
       session.layouts.clearView();
-      session.layouts.clearView({ view: ViewType.DASHBOARD }); // no molesta, limpia por si acaso
+      /* removed to avoid 'Unknown layout type: clear_wiew' on G1B */
       this._lastShownText.delete(sessionId);
     } catch {}
   }
