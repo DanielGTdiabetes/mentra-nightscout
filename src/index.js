@@ -1,18 +1,17 @@
 "use strict";
 /**
- * Nightscout MentraOS — build retro (text-only alerts)
- * - ALERTAS: solo texto animado (sin bitmaps de alarma)
- * - Boot bitmap opcional (syringes_shield_526x100.bmp) se mantiene
+ * Nightscout MentraOS — Retro (sin bitmaps, solo texto)
+ * - Quita completamente los BMP (incluida la pantalla de inicio)
+ * - NO usa session.layouts.clearView() => evita "Unknown layout type: clear:view"
+ * - Limpieza del display mediante showTextWall con \u200B y reintentos
+ * - Alertas solo texto con parpadeo
  * - HUD con predicción breve + TIR + tratamientos
- * - Limpieza robusta del display para que no quede texto fijo
- * - Polyfill global para updateSettingsForTesting (evita error en Render)
+ * - Polyfill para updateSettingsForTesting (evita error en Render/Mentra SDK)
  */
 
 require("dotenv").config();
 const { AppServer } = require("@mentra/sdk");
 const axios = require("axios");
-const path = require("path");
-const fs = require("fs");
 
 /* ====== Polyfill global updateSettingsForTesting ====== */
 try {
@@ -31,46 +30,7 @@ try {
     console.log("ℹ️ Polyfill aplicado en AppSession.prototype.updateSettingsForTesting");
   }
 } catch (e) {
-  // ignorar si no se encuentra la clase interna del SDK
-}
-
-/* ---------- Bitmaps ---------- */
-const BITMAPS_DIR = path.join(process.cwd(), "assets", "bitmaps");
-const BMP_ALIAS_TO_FILE = {
-  boot: "syringes_shield_526x100.bmp", // solo mantenemos el de arranque
-};
-function getBitmapLocationByAlias(alias) {
-  const file = BMP_ALIAS_TO_FILE[alias];
-  if (!file) return null;
-  return path.join(BITMAPS_DIR, file);
-}
-function isLikelyBmp(location) {
-  try {
-    const fd = fs.openSync(location, "r");
-    const buf = Buffer.alloc(2);
-    fs.readSync(fd, buf, 0, 2, 0);
-    fs.closeSync(fd);
-    return buf[0] === 0x42 && buf[1] === 0x4d;
-  } catch (e) { return false; }
-}
-async function showBitmapByLocation(session, location, { durationMs = 3000 } = {}) {
-  if (!location) return false;
-  try {
-    if (!isLikelyBmp(location)) throw new Error("firma BM no encontrada");
-    const b64 = fs.readFileSync(location).toString("base64");
-    try { if (session?.layouts?.clearView) session.layouts.clearView(); } catch (e) {}
-    if (session?.layouts?.showBitmapView) {
-      session.layouts.showBitmapView(b64, { durationMs });
-    } else if (session?.showBitmap) {
-      session.showBitmap(b64, { durationMs });
-    } else {
-      session?.layouts?.showTextWall?.("[icon]");
-    }
-    return true;
-  } catch (e) {
-    try { session?.layouts?.showTextWall?.("(bitmap error)"); } catch (ee) {}
-    return false;
-  }
+  // ignorar si no se puede cargar
 }
 
 /* ---------- Config ---------- */
@@ -82,15 +42,14 @@ if (!MENTRAOS_API_KEY) {
   process.exit(1);
 }
 const UNITS = { MGDL: "mg/dL", MMOL: "mmol/L" };
-// Capas: ECO(0) < HUD(1) < BOOT(2) < ALERT(3)
-const RENDER_LAYERS = { ECO: 0, HUD: 1, BOOT: 2, ALERT: 3 };
+// Capas: ECO(0) < HUD(1) < SPLASH(2) < ALERT(3)
+const RENDER_LAYERS = { ECO: 0, HUD: 1, SPLASH: 2, ALERT: 3 };
 
 /* =================================================================== */
 
 class NightscoutMentraApp extends AppServer {
   constructor(opts) {
     super(opts);
-    // Estados
     this.activeSessions = new Map();
     this.displayTimers = new Map();
     this.headUpLastShown = new Map();
@@ -151,19 +110,18 @@ class NightscoutMentraApp extends AppServer {
     this._renderHoldUntil.set(sessionId, 0);
   }
 
-  /* ---------- limpieza vista ---------- */
+  /* ---------- limpieza vista (sin clearView) ---------- */
   _safeClearView(session){
     try{
-      if (session?.layouts && typeof session.layouts.clearView==="function"){
-        session.layouts.clearView();
-        return;
-      }
+      // No llamamos a clearView para evitar "Unknown layout type: clear:view"
+      session?.layouts?.showTextWall?.("\u200B");
+      setTimeout(()=>{ try{ session?.layouts?.showTextWall?.(""); }catch(e){} }, 40);
+      setTimeout(()=>{ try{ session?.layouts?.showTextWall?.("\u200B"); }catch(e){} }, 90);
     }catch(e){}
-    try{ session?.layouts?.showTextWall?.(""); }catch(e){}
   }
 
   showOverlayText(session, sessionId, text){
-    // Se usa en ALERT/BOOT para no bloquear por _canRender
+    // Se usa en ALERT/SPLASH para no bloquear por _canRender
     try{
       const out=String(text||"");
       this._lastShownText.set(sessionId, out);
@@ -188,9 +146,6 @@ class NightscoutMentraApp extends AppServer {
   hideDisplay(session, sessionId){
     try{
       this._safeClearView(session);
-      try{ session?.layouts?.showTextWall?.("\u200B"); }catch(e){}
-      setTimeout(()=>{ try{ this._safeClearView(session); }catch(e){} },50);
-      setTimeout(()=>{ try{ this._safeClearView(session); }catch(e){} },120);
       this._lastShownText.delete(sessionId);
       this._renderLayer.set(sessionId, RENDER_LAYERS.HUD);
       this._renderHoldUntil.set(sessionId, 0);
@@ -239,7 +194,7 @@ class NightscoutMentraApp extends AppServer {
         "enable_advanced_mode","advanced_mode_enabled",
         "alert_present_mode",
         "alert_hysteresis_mg","alert_hysteresis_mmol",
-        "tir_low_mg","tir_high_mg","tir_low_mmol","tir_high_mmol",
+        "tir_low_mg","tir_high_mg","tir_low_mg","tir_high_mmol",
         "time_in_range_low_mg","time_in_range_high_mg","time_in_range_low_mmol","time_in_range_high_mmol",
         "prediction_horizon_min","prediction_horizon_mins",
         "debug_force_alert"
@@ -773,6 +728,18 @@ class NightscoutMentraApp extends AppServer {
   }
 
   /* ---------- HUD & ciclo de vida ---------- */
+  async showSplash(session, sessionId, settings){
+    // Pantalla de "inicio" solo texto (estilo retro), 2.2 segundos
+    const lang=(settings.language||"en");
+    const l1 = lang==="es" ? "Nightscout · MentraOS" : "Nightscout · MentraOS";
+    const l2 = lang==="es" ? "Conectando…" : "Connecting…";
+    const splash = `╔═══════════════════════╗\n║ ${l1} ║\n║ ${l2} ║\n╚═══════════════════════╝`;
+    const dur=2200;
+    this._beginOverlay(sessionId, RENDER_LAYERS.SPLASH, dur);
+    this.showOverlayText(session, sessionId, splash);
+    setTimeout(()=> this._endOverlay(session, sessionId), dur+120);
+  }
+
   async showInitialAndHide(session, sessionId, settings){
     try{
       const data=await this.getGlucoseData(settings, sessionId);
@@ -781,7 +748,6 @@ class NightscoutMentraApp extends AppServer {
       const formatted=await this.formatForG1WithPrediction(data, settings, sessionId);
       if (settings.enable_advanced_mode){
         const tirPct=tirRes.tirPct;
-        const bar= !this.toBool(settings.show_tir_bar) || tirPct==null? "" : this.buildTirBar(tirPct);
         let tLine="";
         try{ const sum=await this.getRecentTreatments(settings, "day", sessionId); tLine=this.formatTreatmentsLine(sum, settings, sessionId); }catch(e){}
         await this.animateTIRFill(session, sessionId, settings, formatted, tirPct, tLine);
@@ -971,6 +937,12 @@ class NightscoutMentraApp extends AppServer {
   }
 
   async onSession(session, sessionId, userId){
+    try {
+      if (session && session.layouts) {
+        try { session.layouts.clearView = async () => { /* no-op to avoid Unknown layout type: clear_view */ }; } catch (_) {}
+        try { session.layouts.showBitmapView = undefined; } catch (_) {}
+      }
+    } catch (_) {}
     try{
       if (typeof session.updateSettingsForTesting!=="function"){
         session.updateSettingsForTesting=async ()=>{ try{ session?.logger?.debug?.("Compat shim: updateSettingsForTesting noop"); }catch(e){} };
@@ -984,11 +956,8 @@ class NightscoutMentraApp extends AppServer {
       this.activeSessions.set(sessionId, { session, userId, settings, updateInterval:null });
       this.setupEventHandlers(session, sessionId, userId);
 
-      // Mostrar bitmap de arranque (opcional)
-      try{
-        const loc=getBitmapLocationByAlias("boot");
-        if (loc){ this._beginOverlay(sessionId, RENDER_LAYERS.BOOT, 3000); await showBitmapByLocation(session, loc, {durationMs:3000}); setTimeout(()=> this._endOverlay(session, sessionId), 3120); }
-      }catch(e){}
+      // Splash de inicio solo texto (sin bitmaps)
+      await this.showSplash(session, sessionId, settings);
 
       await this.showInitialAndHide(session, sessionId, settings);
       await this.startNormalOperation(session, sessionId, userId, settings);
@@ -1043,7 +1012,7 @@ class NightscoutMentraApp extends AppServer {
 /* ---------- init ---------- */
 const server=new NightscoutMentraApp({ packageName:PACKAGE_NAME, apiKey:MENTRAOS_API_KEY, port:PORT });
 server.start().catch(err=>{ console.error("⛔ Error iniciando servidor:", err); process.exit(1); });
-console.log("🚀 Nightscout MentraOS — build retro (text-only alerts)");
+console.log("🚀 Nightscout MentraOS — build retro (solo texto, sin bitmaps)");
 
 /* ====== Re-check periódico para sesiones activas ====== */
 setInterval(() => {
@@ -1060,7 +1029,7 @@ setInterval(() => {
 }, 2000);
 
 // Healthcheck + keepalive opcional
-server.app.get("/health", (_,res)=> res.json({ status:"alive", timestamp:new Date().toISOString(), version:"retro", activeSessions:server.activeSessions.size }));
+server.app.get("/health", (_,res)=> res.json({ status:"alive", timestamp:new Date().toISOString(), version:"retro-text", activeSessions:server.activeSessions.size }));
 
 // Robustez global
 process.on("uncaughtException",(err)=>{ try{ console.error("[uncaughtException]", err?.stack||err); }catch(e){} });
