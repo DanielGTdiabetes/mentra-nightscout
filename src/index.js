@@ -1,12 +1,11 @@
 "use strict";
 /**
- * Nightscout MentraOS v2.x — build robusta (revisión)
- * - Sin clearView (compat G1/SDK)
- * - Limpieza con carácter real \u200B + ""
- * - Alertas en UNA sola superficie: o bitmap o texto (sin mezcla por ojo)
- * - Shim robusto para session.updateSettingsForTesting / session.disconnect
- * - TIR + Predicción breve + Tratamientos + Animación TIR con token
- * - Regex y strings saneados
+ * Nightscout MentraOS — build retro (text-only alerts)
+ * - ALERTAS: solo texto animado (sin bitmaps de alarma)
+ * - Boot bitmap opcional (syringes_shield_526x100.bmp) se mantiene
+ * - HUD con predicción breve + TIR + tratamientos
+ * - Limpieza robusta del display para que no quede texto fijo
+ * - Polyfill global para updateSettingsForTesting (evita error en Render)
  */
 
 require("dotenv").config();
@@ -15,20 +14,31 @@ const axios = require("axios");
 const path = require("path");
 const fs = require("fs");
 
+/* ====== Polyfill global updateSettingsForTesting ====== */
+try {
+  let AppSessionClass = null;
+  try {
+    AppSessionClass = require("@mentra/sdk/dist/app/session").AppSession;
+  } catch (e1) {
+    try {
+      AppSessionClass = require("@mentra/sdk/app/session").AppSession;
+    } catch (e2) {}
+  }
+  if (AppSessionClass && !AppSessionClass.prototype.updateSettingsForTesting) {
+    AppSessionClass.prototype.updateSettingsForTesting = async function () {
+      return;
+    };
+    console.log("ℹ️ Polyfill aplicado en AppSession.prototype.updateSettingsForTesting");
+  }
+} catch (e) {
+  // ignorar si no se encuentra la clase interna del SDK
+}
+
 /* ---------- Bitmaps ---------- */
 const BITMAPS_DIR = path.join(process.cwd(), "assets", "bitmaps");
 const BMP_ALIAS_TO_FILE = {
-  low: "alert-low-526x100.bmp",
-  high: "alert-high-526x100.bmp",
-  bell: "alert-bell-526x100.bmp",
-  "arrow-up": "arrow-up-526x100.bmp",
-  "arrow-down": "arrow-down-526x100.bmp",
-  sun: "weather-sun-526x100.bmp",
-  cloud: "weather-cloud-526x100.bmp",
-  rain: "weather-rain-526x100.bmp",
+  boot: "syringes_shield_526x100.bmp", // solo mantenemos el de arranque
 };
-const DEBUG_BOOT_BITMAP = (process.env.DEBUG_BOOT_BITMAP || "").toLowerCase().trim();
-
 function getBitmapLocationByAlias(alias) {
   const file = BMP_ALIAS_TO_FILE[alias];
   if (!file) return null;
@@ -40,33 +50,25 @@ function isLikelyBmp(location) {
     const buf = Buffer.alloc(2);
     fs.readSync(fd, buf, 0, 2, 0);
     fs.closeSync(fd);
-    return buf[0] === 0x42 && buf[1] === 0x4d; // "BM"
+    return buf[0] === 0x42 && buf[1] === 0x4d;
   } catch (e) { return false; }
 }
-async function showBitmapByLocation(session, location, { durationMs = 5000 } = {}) {
-  if (!location) {
-    try { session.layouts.showTextWall("(bitmap missing)"); } catch (e) {}
-    return false;
-  }
+async function showBitmapByLocation(session, location, { durationMs = 3000 } = {}) {
+  if (!location) return false;
   try {
     if (!isLikelyBmp(location)) throw new Error("firma BM no encontrada");
     const b64 = fs.readFileSync(location).toString("base64");
-
-    // Asegura que no queda texto en otra superficie antes de poner el bitmap
-    try { session.layouts?.showTextWall?.(""); } catch (e) {}
-
-    // No usamos clearView para evitar "Unknown layout type: clear_view"
-    try {
-      if (session.layouts?.showBitmapView) {
-        session.layouts.showBitmapView(b64, { durationMs });
-      } else {
-        session.layouts?.showTextWall?.("[icon]");
-      }
-    } catch (e) {}
-
+    try { if (session?.layouts?.clearView) session.layouts.clearView(); } catch (e) {}
+    if (session?.layouts?.showBitmapView) {
+      session.layouts.showBitmapView(b64, { durationMs });
+    } else if (session?.showBitmap) {
+      session.showBitmap(b64, { durationMs });
+    } else {
+      session?.layouts?.showTextWall?.("[icon]");
+    }
     return true;
   } catch (e) {
-    try { session.layouts.showTextWall("(bitmap error)"); } catch (ee) {}
+    try { session?.layouts?.showTextWall?.("(bitmap error)"); } catch (ee) {}
     return false;
   }
 }
@@ -110,11 +112,6 @@ class NightscoutMentraApp extends AppServer {
     // Control de capas / bloqueo temporal
     this._renderHoldUntil = new Map();
     this._renderLayer = new Map();
-
-    // Re-chequeo periódico de shims (por si el SDK recrea sesiones)
-    setInterval(() => {
-      try { this._patchActiveSessions(); } catch (e) {}
-    }, 5000);
   }
 
   /* ---------- helpers base ---------- */
@@ -134,25 +131,6 @@ class NightscoutMentraApp extends AppServer {
   parseSlicerValue(val, fb){ const n=(typeof val==="object"&&val!==null)?parseFloat(val.value):parseFloat(val); return Number.isFinite(n)?n:fb; }
   validateSlicerValue(val,min,max,fb){ const v=this.parseSlicerValue(val,fb); return Number.isFinite(v)?Math.max(min,Math.min(max,v)):fb; }
   normalizeMmol(x){ const v=this.parseSlicerValue(x,null); return (v!==null&&Number.isFinite(v))?(v>=30? v/10 : v):null; }
-
-  /* ---------- shims ---------- */
-  _shimSession(session){
-    try{
-      if (typeof session.updateSettingsForTesting !== "function") {
-        session.updateSettingsForTesting = async () => { try { session.logger?.debug?.("Compat shim: updateSettingsForTesting noop"); } catch (e) {} };
-      }
-      if (typeof session.disconnect !== "function") {
-        session.disconnect = async () => { try { session.logger?.debug?.("Compat shim: disconnect noop"); } catch (e) {} };
-      }
-    }catch(e){}
-  }
-  _patchActiveSessions(){
-    try{
-      for (const [,sd] of this.activeSessions) {
-        if (sd?.session) this._shimSession(sd.session);
-      }
-    }catch(e){}
-  }
 
   /* ---------- capas ---------- */
   _canRender(sessionId, layer){
@@ -175,9 +153,13 @@ class NightscoutMentraApp extends AppServer {
 
   /* ---------- limpieza vista ---------- */
   _safeClearView(session){
-    // Evitar clearView por compatibilidad con G1/SDK
-    try{ session.layouts?.showTextWall?.("\u200B"); }catch(e){}
-    try{ session.layouts?.showTextWall?.(""); }catch(e){}
+    try{
+      if (session?.layouts && typeof session.layouts.clearView==="function"){
+        session.layouts.clearView();
+        return;
+      }
+    }catch(e){}
+    try{ session?.layouts?.showTextWall?.(""); }catch(e){}
   }
 
   showOverlayText(session, sessionId, text){
@@ -185,7 +167,7 @@ class NightscoutMentraApp extends AppServer {
     try{
       const out=String(text||"");
       this._lastShownText.set(sessionId, out);
-      session.layouts.showTextWall(out);
+      session?.layouts?.showTextWall?.(out);
     }catch(e){}
   }
 
@@ -199,14 +181,14 @@ class NightscoutMentraApp extends AppServer {
       const last=this._lastShownText.get(sessionId);
       if (last===out) return;
       this._lastShownText.set(sessionId, out);
-      session.layouts.showTextWall(out);
+      session?.layouts?.showTextWall?.(out);
     }catch(e){}
   }
 
   hideDisplay(session, sessionId){
     try{
       this._safeClearView(session);
-      try{ session.layouts?.showTextWall?.("\u200B"); }catch(e){}
+      try{ session?.layouts?.showTextWall?.("\u200B"); }catch(e){}
       setTimeout(()=>{ try{ this._safeClearView(session); }catch(e){} },50);
       setTimeout(()=>{ try{ this._safeClearView(session); }catch(e){} },120);
       this._lastShownText.delete(sessionId);
@@ -243,6 +225,7 @@ class NightscoutMentraApp extends AppServer {
     const b={ lang: settings.language||"en", locale: lang.locale, tz };
     this._sessionLocale.set(sessionId,b); return b;
   }
+
   /* ---------- settings ---------- */
   async getUserSettings(session){
     try{
@@ -300,7 +283,7 @@ class NightscoutMentraApp extends AppServer {
         alert_cooldown_ms: coolMs,
         show_tir_bar: showTirBar,
         enable_advanced_mode: this.toBool(kv.enable_advanced_mode) || this.toBool(kv.advanced_mode_enabled),
-        alert_present_mode: String(kv.alert_present_mode || "icon").toLowerCase(),
+        alert_present_mode: "text", // forzamos texto
         alert_hysteresis_mg: this.validateSlicerValue(kv.alert_hysteresis_mg, 0, 50, 5),
         alert_hysteresis_mmol: this.normalizeMmol(kv.alert_hysteresis_mmol) ?? 0.3,
         tir_low_mg: this.parseSlicerValue(kv.tir_low_mg, null),
@@ -326,7 +309,7 @@ class NightscoutMentraApp extends AppServer {
         display_duration_ms:5000, alert_duration_ms:15000, alert_cooldown_ms:600000,
         show_tir_bar:true,
         enable_advanced_mode:false,
-        alert_present_mode:"icon",
+        alert_present_mode:"text",
         alert_hysteresis_mg:5, alert_hysteresis_mmol:0.3,
         prediction_horizon_min:30,
         debug_force_alert:null
@@ -372,7 +355,7 @@ class NightscoutMentraApp extends AppServer {
       alert_cooldown_ms: coolMs,
       show_tir_bar: showTirBar,
       enable_advanced_mode: this.toBool(o.enable_advanced_mode) || this.toBool(o.advanced_mode_enabled),
-      alert_present_mode: String(o.alert_present_mode || o.alert_present || "icon").toLowerCase(),
+      alert_present_mode: "text",
       alert_hysteresis_mg: this.validateSlicerValue(o.alert_hysteresis_mg, 0, 50, 5),
       alert_hysteresis_mmol: this.normalizeMmol(o.alert_hysteresis_mmol) ?? 0.3,
       tir_low_mg: this.parseSlicerValue(o.tir_low_mg, null),
@@ -394,11 +377,11 @@ class NightscoutMentraApp extends AppServer {
     let cli=this._http.get(sessionId);
     const baseRaw=(settings.nightscoutUrl||"").trim();
     if (!baseRaw) return null;
-    const base=baseRaw.startsWith("http")? baseRaw : ("https://"+baseRaw);
+    const base=baseRaw.startsWith("http")? baseRaw : ("https://" + baseRaw);
     const baseURL=base.endsWith("/")? base.slice(0,-1) : base;
     const params=settings.nightscoutToken? { token: settings.nightscoutToken } : {};
     if (!cli || cli.defaults.baseURL!==baseURL || JSON.stringify(cli.defaults.params||{})!==JSON.stringify(params)){
-      cli=axios.create({ baseURL, headers:{ "User-Agent":"MentraOS-Nightscout/robusta" }, timeout:10000, params });
+      cli=axios.create({ baseURL, headers:{ "User-Agent":"MentraOS-Nightscout/retro" }, timeout:10000, params });
       this._http.set(sessionId, cli);
     }
     return cli;
@@ -588,7 +571,7 @@ class NightscoutMentraApp extends AppServer {
       }else{
         const since=Date.now()-Math.max(1,hours)*60*60*1000;
         windowed=events.filter(e=> e.ts>=since);
-        label=`${hours}h`;
+        label=`${hours}h";
       }
       if (!windowed.length) return { label, totalCarbs:0, totalInsulin:0, last:null };
       let totalCarbs=0,totalInsulin=0,last=null;
@@ -664,46 +647,29 @@ class NightscoutMentraApp extends AppServer {
     if (mgdl>=lim.high) return "high";
     return "none";
   }
-  async triggerBitmapAlert(session, sessionId, data, settings, type){
+
+  async triggerTextAlert(session, sessionId, data, settings, type){
+    // ALERTA SOLO TEXTO (retro): parpadeo
     const displayValue=this.convertToDisplay(data.sgv, settings.units||UNITS.MGDL);
     const unit=settings.units||UNITS.MGDL;
     const lang=settings.language||"en";
     const msgs={ en:{low:`LOW GLUCOSE!`,high:`HIGH GLUCOSE!`}, es:{low:`¡GLUCOSA BAJA!`, high:`¡GLUCOSA ALTA!`} };
     const baseText=`${msgs[lang][type]}\n${displayValue} ${unit}`;
     const alertDuration=settings.alert_duration_ms||15000;
-    const modeRaw=String(settings.alert_present_mode||"icon").toLowerCase();
-    const mode=(modeRaw==="text"||modeRaw==="icon")? modeRaw : "icon";
-    const alias= type==="low" ? "low" : "high";
-    const loc=getBitmapLocationByAlias(alias);
-
-    // Cancel timers de ocultado mientras la alerta está activa
-    try{ if (this.displayTimers.has(sessionId)) { clearTimeout(this.displayTimers.get(sessionId)); this.displayTimers.delete(sessionId); } }catch(e){}
 
     this._beginOverlay(sessionId, RENDER_LAYERS.ALERT, alertDuration);
 
-    if (mode==="icon" && loc){
-      // Asegurar que no queda texto activo antes del bitmap
-      try { session.layouts?.showTextWall?.(""); } catch(e){}
-      await showBitmapByLocation(session, loc, {durationMs:alertDuration});
-      setTimeout(()=> this._endOverlay(session, sessionId), alertDuration+120);
-      // Tras la alerta, pequeño HUD
-      setTimeout(async ()=>{ try{ await this.showGlucoseTemporarily(session, sessionId, (settings.display_duration_ms||5000), settings); }catch(e){} }, alertDuration+180);
-      return;
-    }
-
-    // TEXT mode (o sin bitmap): parpadeo simple en una única superficie
-    const blink=700, start=Date.now();
+    const blink=650, start=Date.now();
     const timer=setInterval(()=>{
       if (Date.now()-start>alertDuration){
-        try{ clearInterval(timer); }catch(e){}
-        this._endOverlay(session, sessionId);
-        return;
+        clearInterval(timer); this._endOverlay(session, sessionId); return;
       }
       const on=Math.floor((Date.now()-start)/blink)%2===0;
-      this.showOverlayText(session, sessionId, `${on?"[!]":"[ ]"} ${baseText}`);
+      this.showOverlayText(session, sessionId, `${on?"[!!]":"[  ]"} ${baseText}`);
     }, blink);
     this.displayTimers.set(sessionId, setTimeout(()=>{ try{clearInterval(timer);}catch(e){} this._endOverlay(session, sessionId); }, alertDuration+120));
-    // Después de la alarma, HUD breve
+
+    // al finalizar, enseñar HUD breve
     setTimeout(async ()=>{ try{ await this.showGlucoseTemporarily(session, sessionId, (settings.display_duration_ms||5000), settings); }catch(e){} }, alertDuration+180);
   }
 
@@ -719,6 +685,7 @@ class NightscoutMentraApp extends AppServer {
       oldS.alert_hysteresis_mmol!==newS.alert_hysteresis_mmol
     );
   }
+
   async checkAlerts(session, sessionId, data, settings){
     const limits=this.getAlertLimits(settings);
     const mgdl=data.sgv;
@@ -745,8 +712,8 @@ class NightscoutMentraApp extends AppServer {
     if (alertType){
       this.alertHistory.set(sessionId, Date.now());
       this.alertLatch.set(sessionId, alertType);
-      await this.triggerBitmapAlert(session, sessionId, data, settings, alertType);
-      session.logger?.warn?.("Alert sent",{type:alertType, value:mgdl});
+      await this.triggerTextAlert(session, sessionId, data, settings, alertType);
+      session?.logger?.warn?.("Alert sent",{type:alertType, value:mgdl});
     }
   }
 
@@ -814,6 +781,7 @@ class NightscoutMentraApp extends AppServer {
       const formatted=await this.formatForG1WithPrediction(data, settings, sessionId);
       if (settings.enable_advanced_mode){
         const tirPct=tirRes.tirPct;
+        const bar= !this.toBool(settings.show_tir_bar) || tirPct==null? "" : this.buildTirBar(tirPct);
         let tLine="";
         try{ const sum=await this.getRecentTreatments(settings, "day", sessionId); tLine=this.formatTreatmentsLine(sum, settings, sessionId); }catch(e){}
         await this.animateTIRFill(session, sessionId, settings, formatted, tirPct, tLine);
@@ -839,7 +807,7 @@ class NightscoutMentraApp extends AppServer {
 
   setupEventHandlers(session, sessionId, userId){
     try{
-      session.events?.onButtonPress?.(async ()=>{
+      session?.events?.onButtonPress?.(async ()=>{
         const sd=this.activeSessions.get(sessionId);
         const s=sd?.settings || await this.getUserSettings(session);
         await this.showGlucoseTemporarily(session, sessionId, s.display_duration_ms||4000, s);
@@ -890,7 +858,7 @@ class NightscoutMentraApp extends AppServer {
               }
             }
           }catch(e){}
-        }catch(error){ session.logger?.error?.(error,"Failed to process settings update"); }
+        }catch(error){ session?.logger?.error?.(error,"Failed to process settings update"); }
       };
 
       const settingsHandler=(settingsData)=>{
@@ -901,11 +869,11 @@ class NightscoutMentraApp extends AppServer {
         }catch(e){}
       };
 
-      session.events?.onAppSettingsUpdate?.(settingsHandler);
-      session.events?.onSettingsUpdate?.(settingsHandler);
-      session.events?.onSettingsChange?.(settingsHandler);
+      session?.events?.onAppSettingsUpdate?.(settingsHandler);
+      session?.events?.onSettingsUpdate?.(settingsHandler);
+      session?.events?.onSettingsChange?.(settingsHandler);
 
-      session.events?.onHeadPosition?.(async (data)=>{
+      session?.events?.onHeadPosition?.(async (data)=>{
         try{
           if (data?.position!=="up") return;
           const sd=this.activeSessions.get(sessionId);
@@ -936,7 +904,7 @@ class NightscoutMentraApp extends AppServer {
         }
       });
 
-      session.events?.onDisconnected?.(()=>{
+      session?.events?.onDisconnected?.(()=>{
         try{
           const t=this.displayTimers.get(sessionId); if (t) clearTimeout(t); this.displayTimers.delete(sessionId);
           const sd=this.activeSessions.get(sessionId); if (sd?.updateInterval) clearInterval(sd.updateInterval);
@@ -944,12 +912,12 @@ class NightscoutMentraApp extends AppServer {
           this.activeSessions.delete(sessionId); this.alertHistory.delete(sessionId);
           this.alertLatch.delete(sessionId); this.headUpLastShown.delete(sessionId);
           this.dailyTirState.delete(sessionId); this.lastGoodEntry.delete(sessionId);
-          session.logger?.info?.("Session disconnected");
+          session?.logger?.info?.("Session disconnected");
         }catch(e){}
       });
     }catch(error){
       console.error("⚠️ Error setting up event handlers:", error);
-      session.logger?.error?.(error, "Failed to setup event handlers");
+      session?.logger?.error?.(error, "Failed to setup event handlers");
     }
   }
 
@@ -979,7 +947,7 @@ class NightscoutMentraApp extends AppServer {
           return;
         }
       }catch(e){}
-      session.logger?.error?.(error,"Failed to show glucose temporarily");
+      session?.logger?.error?.(error,"Failed to show glucose temporarily");
     }
   }
 
@@ -995,7 +963,7 @@ class NightscoutMentraApp extends AppServer {
         this.updateDailyTirState(sessionId, d.sgv, d.date, s);
         if (s.alertsEnabled) await this.checkAlerts(session, sessionId, d, s);
       }catch(error){
-        session.logger?.debug?.("Normal operation cycle failed",{error:error.message});
+        session?.logger?.debug?.("Normal operation cycle failed",{error:error.message});
       }
     }, ms);
     const sd=this.activeSessions.get(sessionId);
@@ -1004,9 +972,9 @@ class NightscoutMentraApp extends AppServer {
 
   async onSession(session, sessionId, userId){
     try{
-      // Aplicar shims de compatibilidad inmediatamente
-      this._shimSession(session);
-
+      if (typeof session.updateSettingsForTesting!=="function"){
+        session.updateSettingsForTesting=async ()=>{ try{ session?.logger?.debug?.("Compat shim: updateSettingsForTesting noop"); }catch(e){} };
+      }
       let settings=await this.getUserSettings(session);
       if (!settings.nightscoutUrl){
         const msg={ en:"Please configure Nightscout\nURL and token in settings", es:"Configura URL y token\nde Nightscout en ajustes" };
@@ -1014,35 +982,13 @@ class NightscoutMentraApp extends AppServer {
       }
 
       this.activeSessions.set(sessionId, { session, userId, settings, updateInterval:null });
-      this._patchActiveSessions(); // asegúrate de que la sesión queda parcheada
       this.setupEventHandlers(session, sessionId, userId);
 
-      // Semilla TIR al arrancar
+      // Mostrar bitmap de arranque (opcional)
       try{
-        const entries=await this.getTodayEntries(settings, sessionId);
-        const dayStr=this.getLocalDayStr(Date.now(), settings, sessionId);
-        const range=this.getAlertLimits(settings);
-        let total=0,inRange=0;
-        for (const e of entries){ if (Number.isFinite(e.mgdl)){ total+=1; if (e.mgdl>=range.low && e.mgdl<=range.high) inRange+=1; } }
-        this.dailyTirState.set(sessionId, {dayStr,total,inRange});
-      }catch(e){ session.logger?.debug?.("Seed TIR failed",{err:e?.message}); }
-
-      // Overlay de boot si está activado por env
-      if (DEBUG_BOOT_BITMAP){
-        const loc=getBitmapLocationByAlias(DEBUG_BOOT_BITMAP);
-        if (loc){
-          const durationMs=5000;
-          try{
-            this._beginOverlay(sessionId, RENDER_LAYERS.BOOT, durationMs);
-            await showBitmapByLocation(session, loc, {durationMs});
-            setTimeout(async ()=>{
-              this._endOverlay(session, sessionId);
-              await this.showInitialAndHide(session, sessionId, settings);
-            }, durationMs+120);
-            return;
-          }catch(e){}
-        }
-      }
+        const loc=getBitmapLocationByAlias("boot");
+        if (loc){ this._beginOverlay(sessionId, RENDER_LAYERS.BOOT, 3000); await showBitmapByLocation(session, loc, {durationMs:3000}); setTimeout(()=> this._endOverlay(session, sessionId), 3120); }
+      }catch(e){}
 
       await this.showInitialAndHide(session, sessionId, settings);
       await this.startNormalOperation(session, sessionId, userId, settings);
@@ -1097,11 +1043,24 @@ class NightscoutMentraApp extends AppServer {
 /* ---------- init ---------- */
 const server=new NightscoutMentraApp({ packageName:PACKAGE_NAME, apiKey:MENTRAOS_API_KEY, port:PORT });
 server.start().catch(err=>{ console.error("⛔ Error iniciando servidor:", err); process.exit(1); });
-console.log("🚀 Nightscout MentraOS — build robusta (revisión)");
+console.log("🚀 Nightscout MentraOS — build retro (text-only alerts)");
 
-const KEEP_ALIVE_URL=process.env.RENDER_URL || "https://mentra-nightscout.onrender.com";
-server.app.get("/health", (_,res)=> res.json({ status:"alive", timestamp:new Date().toISOString(), version:"robusta", activeSessions:server.activeSessions.size }));
-setInterval(()=>{ try{ axios.get(`${KEEP_ALIVE_URL}/health`).catch(()=>{}); }catch(e){} }, 3*60*1000);
+/* ====== Re-check periódico para sesiones activas ====== */
+setInterval(() => {
+  try {
+    for (const [, sd] of server.activeSessions) {
+      const sess = sd?.session;
+      if (sess && typeof sess.updateSettingsForTesting !== "function") {
+        sess.updateSettingsForTesting = async () => { /* no-op */ };
+      }
+    }
+  } catch (e) {
+    // ignorar
+  }
+}, 2000);
+
+// Healthcheck + keepalive opcional
+server.app.get("/health", (_,res)=> res.json({ status:"alive", timestamp:new Date().toISOString(), version:"retro", activeSessions:server.activeSessions.size }));
 
 // Robustez global
 process.on("uncaughtException",(err)=>{ try{ console.error("[uncaughtException]", err?.stack||err); }catch(e){} });
