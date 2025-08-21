@@ -5,73 +5,17 @@
  * ES/EN + mg/dL/mmol ¦ 5 líneas max ¦ cache last-good-entry
  * Settings en segundos/minutos + toggle barra TIR
  * Mejora: cliente axios por sesión, debounce de settings, animación reforzada
- *
- * Bitmaps (genérico y robusto):
- *  - Carga BMP leyendo bytes y enviando base64 a showBitmapView (evita errores "missing BM signature")
- *  - Fallback a texto si falla
- *  - Sin forzar ViewType.DASHBOARD (apps no-sistema no lo ven en G1)
+ * NUEVO:
+ *  - Histeresis de alarmas (alert_hysteresis_mg / alert_hysteresis_mmol) con latch
+ *  - En NO avanzado, predicción sólo si cruza ≤60 o ≥180 mg/dL (fijos)
+ *  - ECO al guardar ajustes incluye estado de alarmas (BAJA/ALTA/Sin) en ES/EN, compacto
  */
 
 require('dotenv').config();
 const { AppServer } = require('@mentra/sdk');
 const axios = require('axios');
-const path = require('path');
-const fs = require('fs');
 
-/* ---------- BITMAPS: rutas por alias (opcionales) ---------- */
-const BITMAPS_DIR = path.join(process.cwd(), 'assets', 'bitmaps');
-const BMP_ALIAS_TO_FILE = {
-  low:         'alert-low-526x100.bmp',
-  high:        'alert-high-526x100.bmp',
-  bell:        'alert-bell-526x100.bmp',
-  'arrow-up':  'arrow-up-526x100.bmp',
-  'arrow-down':'arrow-down-526x100.bmp',
-  sun:         'weather-sun-526x100.bmp',
-  cloud:       'weather-cloud-526x100.bmp',
-  rain:        'weather-rain-526x100.bmp',
-};
-const DEBUG_BOOT_BITMAP = (process.env.DEBUG_BOOT_BITMAP || '').toLowerCase().trim(); // low|high|bell|arrow-up|arrow-down|sun|cloud|rain
-
-function getBitmapLocationByAlias(alias) {
-  const file = BMP_ALIAS_TO_FILE[alias];
-  if (!file) return null;
-  return path.join(BITMAPS_DIR, file);
-}
-
-/** Verificación rápida: ¿es un BMP real? (firma 'BM') */
-function isLikelyBmp(location) {
-  try {
-    const fd = fs.openSync(location, 'r');
-    const buf = Buffer.alloc(2);
-    fs.readSync(fd, buf, 0, 2, 0);
-    fs.closeSync(fd);
-    return buf.length === 2 && buf[0] === 0x42 && buf[1] === 0x4D; // 'B','M'
-  } catch {
-    return false;
-  }
-}
-
-/** Muestra un bitmap leyendo bytes y enviando Base64 al SDK (robusto, sin DASHBOARD) */
-async function showBitmapByLocation(session, location, { durationMs = 5000 } = {}) {
-  if (!location) {
-    try { session.layouts.showTextWall('(bitmap missing)', { durationMs }); } catch (e) {}
-    return false;
-  }
-  try {
-    if (!isLikelyBmp(location)) throw new Error('firma BM no encontrada (no es BMP válido)');
-    const buf = fs.readFileSync(location);
-    const b64 = buf.toString('base64');
-    try { this._safeClearView(session); } catch (e) {}
-    session.layouts.showBitmapView(b64, { durationMs }); // <- vista por defecto de la app
-    return true;
-  } catch (e) {
-    session.logger?.warn?.('Bitmap base64 mode falló, fallback texto', { msg: e?.message, location });
-    try { session.layouts.showTextWall('(bitmap error)', { durationMs }); } catch (e) {}
-    return false;
-  }
-}
-
-/* ---------- SHIM: compatibilidad SDK menor ---------- */
+/* ---------- SHIM: compatibilidad SDK ---------- */
 if (typeof Object.prototype.updateSettingsForTesting !== 'function') {
   Object.defineProperty(Object.prototype, 'updateSettingsForTesting', {
     value: async () => {},
@@ -92,24 +36,8 @@ if (!MENTRAOS_API_KEY) {
 }
 
 const UNITS = { MGDL: 'mg/dL', MMOL: 'mmol/L' };
-// Render layers priority: ECO(0) < HUD(1) < BOOT(2) < ALERT(3)
-const RENDER_LAYERS = { ECO: 0, HUD: 1, BOOT: 2, ALERT: 3 };
 
 class NightscoutMentraApp extends AppServer {
-  _safeClearView(session) {
-    try {
-      if (session?.layouts && typeof session.layouts.clearView === 'function') {
-        this._safeClearView(session);
-        return;
-      }
-    } catch (e) {
-      // Ignorar 'Unknown layout type: clear_wiew'
-    }
-    try {
-      session.layouts?.showTextWall?.('');
-    } catch (_) {}
-  }
-
   constructor(opts) {
     super(opts);
     this.activeSessions = new Map();
@@ -125,11 +53,6 @@ class NightscoutMentraApp extends AppServer {
     this._http = new Map();             // cliente axios por sesión
     this._settingsDebounce = new Map(); // debounce settings
     this._sessionLocale = new Map();    // cache locale/tz por sesión
-
-    // gestor antisolapes
-    this._renderHoldUntil = new Map();      // sessionId -> timestamp ms (bloqueo temporal de texto)
-    this._renderLayer = new Map();          // sessionId -> capa actual (0..3)
-    this._lastEcoAt = new Map();            // sessionId -> timestamp ms (rate-limit del ECO)
   }
 
   /* ---------- helpers ---------- */
@@ -168,76 +91,80 @@ class NightscoutMentraApp extends AppServer {
     return (v !== null && Number.isFinite(v)) ? (v >= 30 ? v / 10 : v) : null;
   }
 
-  /* ---------- render layering helpers ---------- */
-  _canRender(sessionId, layer) {
-  const hold = this._renderHoldUntil.get(sessionId) || 0;
-  if (Date.now() < hold) return false;
+  /* ---------- alertas / límites ---------- */
+  // PRIORIDAD POR UNIDAD: si units=mmol/L usa primero low/high en mmol (x10), si no, usa mg/dL.
+// Siempre devuelve límites en mg/dL para el resto del código.
+getAlertLimits(settings) {
+  const units = String(settings.units || '').toLowerCase();
 
-  const current = this._renderLayer.get(sessionId);
-  // Si NO hay overlay activo (current null/undefined) o la capa actual <= HUD ⇒ permitir pintar
-  if (current == null || current <= RENDER_LAYERS.HUD) return true;
+  // Candidatos en mg/dL (tal cual)
+  const lowMgRaw  = this.parseSlicerValue(settings.low_alert_mg,  NaN);
+  const highMgRaw = this.parseSlicerValue(settings.high_alert_mg, NaN);
+  const lowMgOK   = Number.isFinite(lowMgRaw)  ? Math.round(lowMgRaw)  : NaN;
+  const highMgOK  = Number.isFinite(highMgRaw) ? Math.round(highMgRaw) : NaN;
 
-  // Si hay overlay activo (BOOT/ALERT), sólo permitir si la capa solicitada >= capa actual
-  return layer >= current;
+  // Candidatos en mmol (pueden venir como 39=>3.9). normalizeMmol ya maneja x10.
+  const lowMmol   = this.normalizeMmol(settings.low_alert_mmol);
+  const highMmol  = this.normalizeMmol(settings.high_alert_mmol);
+  const lowFromMmolMg  = Number.isFinite(lowMmol)  ? Math.round(lowMmol  * 18) : NaN;
+  const highFromMmolMg = Number.isFinite(highMmol) ? Math.round(highMmol * 18) : NaN;
+
+  if (units.includes('mmol')) {
+    // mmol/L tiene prioridad
+    if (Number.isFinite(lowFromMmolMg) && Number.isFinite(highFromMmolMg)) {
+      return { low: lowFromMmolMg, high: highFromMmolMg };
+    }
+    if (Number.isFinite(lowMgOK) && Number.isFinite(highMgOK)) {
+      return { low: lowMgOK, high: highMgOK };
+    }
+    // Fallback por defecto típico mmol (3.9/13.9)
+    return { low: Math.round(3.9 * 18), high: Math.round(13.9 * 18) };
+  } else {
+    // mg/dL tiene prioridad (o unidad desconocida)
+    if (Number.isFinite(lowMgOK) && Number.isFinite(highMgOK)) {
+      return { low: lowMgOK, high: highMgOK };
+    }
+    if (Number.isFinite(lowFromMmolMg) && Number.isFinite(highFromMmolMg)) {
+      return { low: lowFromMmolMg, high: highFromMmolMg };
+    }
+    // Fallback por defecto típico mg/dL
+    return { low: 70, high: 250 };
+  }
 }
 
-  _beginOverlay(sessionId, layer, durationMs) {
-    const until = Date.now() + (durationMs || 0);
-    this._renderLayer.set(sessionId, layer);
-    this._renderHoldUntil.set(sessionId, until + 100);
-  }
-
-  _endOverlay(session, sessionId) {
-    try { this.hideDisplay(session, sessionId); } catch (e) {}
-    this._renderLayer.set(sessionId, RENDER_LAYERS.HUD);
-    this._renderHoldUntil.set(sessionId, 0);
-  }
-
-  /* ---------- alertas / límites ---------- */
-  getAlertLimits(settings) {
-    const units = String(settings.units || '').toLowerCase();
-    const lowMg  = this.parseSlicerValue(settings.low_alert_mg, NaN);
-    const highMg = this.parseSlicerValue(settings.high_alert_mg, NaN);
-    const lowM = this.normalizeMmol(settings.low_alert_mmol);
-    const highM = this.normalizeMmol(settings.high_alert_mmol);
-
-    const mgOK  = Number.isFinite(lowMg)  && Number.isFinite(highMg);
-    const mmOK  = Number.isFinite(lowM)   && Number.isFinite(highM);
-
-    if (units.includes('mmol')) {
-      if (mmOK)  return { low: Math.round(lowM*18),  high: Math.round(highM*18) };
-      if (mgOK)  return { low: Math.round(lowMg),    high: Math.round(highMg)   };
-      return { low: Math.round(3.9*18), high: Math.round(13.9*18) };
-    } else {
-      if (mgOK)  return { low: Math.round(lowMg),    high: Math.round(highMg)   };
-      if (mmOK)  return { low: Math.round(lowM*18),  high: Math.round(highM*18) };
-      return { low: 70, high: 250 };
-    }
-  }
-
   getHysteresisMg(settings) {
-    const mg = this.validateSlicerValue(settings.alert_hysteresis_mg, 0, 50, NaN);
-    const raw = this.parseSlicerValue(settings.alert_hysteresis_mmol, NaN);
-    let mmol = NaN;
-    if (Number.isFinite(raw)) {
-      if (Number.isInteger(raw)) {
-        if (raw >= 0 && raw <= 10) mmol = raw / 10;
-        else if (raw >= 30) mmol = raw / 10;
-        else mmol = raw;
-      } else mmol = raw;
-    }
-    const mmolAsMg = Number.isFinite(mmol) ? Math.round(mmol * 18) : NaN;
-    const units = String(settings.units || '').toLowerCase();
-    if (units.includes('mmol')) {
-      if (Number.isFinite(mmolAsMg)) return mmolAsMg;
-      if (Number.isFinite(mg)) return mg;
-      return 5;
+  // Lee candidatos
+  const mg = this.validateSlicerValue(settings.alert_hysteresis_mg, 0, 50, NaN);
+
+  // mmol puede venir sin decimales (x10) o con decimales según UI
+  const raw = this.parseSlicerValue(settings.alert_hysteresis_mmol, NaN);
+  let mmol = NaN;
+  if (Number.isFinite(raw)) {
+    if (Number.isInteger(raw)) {
+      // Consola sin decimales: 0..10 => 0.0..1.0  (p.ej. 3 => 0.3 mmol)
+      if (raw >= 0 && raw <= 10) mmol = raw / 10;
+      // Compatibilidad con “x10 grande” (39 => 3.9) si alguien lo usa aquí
+      else if (raw >= 30) mmol = raw / 10;
+      else mmol = raw; // enteros raros: tratamos como mmol real
     } else {
-      if (Number.isFinite(mg)) return mg;
-      if (Number.isFinite(mmolAsMg)) return mmolAsMg;
-      return 5;
+      mmol = raw; // ya decimal (si alguna UI lo permite)
     }
   }
+  const mmolAsMg = Number.isFinite(mmol) ? Math.round(mmol * 18) : NaN;
+
+  const units = String(settings.units || '').toLowerCase();
+
+  // PRIORIDAD POR UNIDAD SELECCIONADA
+  if (units.includes('mmol')) {        // mmol/L => usa mmol primero
+    if (Number.isFinite(mmolAsMg)) return mmolAsMg;
+    if (Number.isFinite(mg))        return mg;
+    return 5; // fallback
+  } else {                            // mg/dL (o desconocida) => usa mg primero
+    if (Number.isFinite(mg))        return mg;
+    if (Number.isFinite(mmolAsMg))  return mmolAsMg;
+    return 5; // fallback
+  }
+}
 
   /* ---------- lectura de settings ---------- */
   async getUserSettings(session) {
@@ -251,8 +178,9 @@ class NightscoutMentraApp extends AppServer {
         'show_tir_bar','show_range_bar',
         'display_duration_ms','alert_duration_ms','alert_cooldown_ms',
         'enable_advanced_mode','advanced_mode_enabled',
-        'alert_present_mode','alert_present',
+        // NUEVO:
         'alert_hysteresis_mg','alert_hysteresis_mmol',
+        // legacy tolerados
         'tir_low_mg','tir_high_mg','tir_low_mmol','tir_high_mmol',
         'time_in_range_low_mg','time_in_range_high_mg','time_in_range_low_mmol','time_in_range_high_mmol',
         'prediction_horizon_min','prediction_horizon_mins',
@@ -277,7 +205,8 @@ class NightscoutMentraApp extends AppServer {
         : this.validateSlicerValue(kv.alert_cooldown_ms, 60000, 3600000, 600000);
 
       const showTirBar = (kv.show_tir_bar == null && kv.show_range_bar == null)
-        ? true : (this.toBool(kv.show_tir_bar) || this.toBool(kv.show_range_bar));
+        ? true
+        : (this.toBool(kv.show_tir_bar) || this.toBool(kv.show_range_bar));
 
       return {
         nightscoutUrl: String(kv.nightscout_url || '').trim() || '',
@@ -297,9 +226,10 @@ class NightscoutMentraApp extends AppServer {
         alert_cooldown_ms: coolMs,
         show_tir_bar: showTirBar,
         enable_advanced_mode: this.toBool(kv.enable_advanced_mode) || this.toBool(kv.advanced_mode_enabled),
-        alert_present_mode: (String(kv.alert_present_mode || kv.alert_present) || 'mixed').toLowerCase(),
+        // NEW: histeresis (defaults)
         alert_hysteresis_mg: this.validateSlicerValue(kv.alert_hysteresis_mg, 0, 50, 5),
         alert_hysteresis_mmol: this.normalizeMmol(kv.alert_hysteresis_mmol) ?? 0.3,
+        // legacy tolerados
         tir_low_mg: this.parseSlicerValue(kv.tir_low_mg, null),
         tir_high_mg: this.parseSlicerValue(kv.tir_high_mg, null),
         tir_low_mmol: this.normalizeMmol(kv.tir_low_mmol),
@@ -324,7 +254,6 @@ class NightscoutMentraApp extends AppServer {
         display_duration_ms: 5000, alert_duration_ms: 15000, alert_cooldown_ms: 600000,
         show_tir_bar: true,
         enable_advanced_mode: false,
-        alert_present_mode: 'mixed',
         alert_hysteresis_mg: 5, alert_hysteresis_mmol: 0.3,
         prediction_horizon_min: 30,
         debug_force_alert: null
@@ -352,7 +281,8 @@ class NightscoutMentraApp extends AppServer {
       : this.validateSlicerValue(o.alert_cooldown_ms, 60000, 3600000, 600000);
 
     const showTirBar = (o.show_tir_bar == null && o.show_range_bar == null)
-      ? true : (this.toBool(o.show_tir_bar) || this.toBool(o.show_range_bar));
+      ? true
+      : (this.toBool(o.show_tir_bar) || this.toBool(o.show_range_bar));
 
     return {
       nightscoutUrl: String(o.nightscout_url || '').trim() || '',
@@ -372,9 +302,10 @@ class NightscoutMentraApp extends AppServer {
       alert_cooldown_ms: coolMs,
       show_tir_bar: showTirBar,
       enable_advanced_mode: this.toBool(o.enable_advanced_mode) || this.toBool(o.advanced_mode_enabled),
-      alert_present_mode: (String(o.alert_present_mode || o.alert_present) || 'mixed').toLowerCase(),
+      // NEW: histeresis
       alert_hysteresis_mg: this.validateSlicerValue(o.alert_hysteresis_mg, 0, 50, 5),
       alert_hysteresis_mmol: this.normalizeMmol(o.alert_hysteresis_mmol) ?? 0.3,
+      // legacy tolerados
       tir_low_mg: this.parseSlicerValue(o.tir_low_mg, null),
       tir_high_mg: this.parseSlicerValue(o.tir_high_mg, null),
       tir_low_mmol: this.normalizeMmol(o.tir_low_mmol),
@@ -439,6 +370,7 @@ class NightscoutMentraApp extends AppServer {
   async formatForG1WithPrediction(data, settings, sessionId) {
     try {
       const base = await this.formatForG1(data, settings, sessionId);
+      // NO avanzado: pred solo si cruza 60/180 mg/dL
       const predShort = settings.enable_advanced_mode
         ? await this.buildPredictionShort(settings, sessionId, null, null)
         : await this.buildPredictionShort(settings, sessionId, 60, 180);
@@ -475,20 +407,23 @@ class NightscoutMentraApp extends AppServer {
   }
 
   /**
-   * Predicción breve hasta cruce de límites (o 60/180 en no-avanzado).
+   * Predicción breve hasta cruce de límites.
+   * - lowOverrideMg/highOverrideMg: si números ⇒ usar (p.ej. 60/180 para no avanzado)
+   * - si null ⇒ usa límites configurados
+   * Devuelve null si no se prevé cruce dentro del horizonte.
    */
   async buildPredictionShort(settings, sessionId='default', lowOverrideMg=null, highOverrideMg=null) {
     const lim = this.getAlertLimits(settings);
     const lowThreshold = Number.isFinite(lowOverrideMg) ? lowOverrideMg : lim.low;
     const highThreshold = Number.isFinite(highOverrideMg) ? highOverrideMg : lim.high;
     const horizon = Number(settings.prediction_horizon_min || 30);
-    const maxSteps = Math.max(3, Math.min(12, Math.round(horizon / 5)));
+    const maxSteps = Math.max(3, Math.min(12, Math.round(horizon / 5))); // 15..60 → 3..12 pasos
     const isMmol = String(settings.units || '').toLowerCase().includes('mmol');
     const toDisp = (mgdl) => isMmol ? (mgdl/18).toFixed(1) : String(Math.round(mgdl));
     const http = this._ensureHttp(sessionId, settings);
     if (!http) return null;
 
-    // 1) Intento con devicestatus
+    // 1) Método exacto devicestatus
     try {
       const { data } = await http.get(`/api/v1/devicestatus.json?count=1`);
       const ds = Array.isArray(data) ? data[0] : data;
@@ -514,7 +449,7 @@ class NightscoutMentraApp extends AppServer {
       }
     } catch (_) {}
 
-    // 2) Fallback lineal con 2 últimos puntos
+    // 2) Fallback lineal
     try {
       const { data } = await http.get(`/api/v1/entries.json?count=2`);
       if (data && data.length >= 2) {
@@ -682,8 +617,6 @@ class NightscoutMentraApp extends AppServer {
   /* ---------- UI ---------- */
   showClamped(session, sessionId, text, maxLines = 5) {
     try {
-      if (!this._canRender(sessionId, RENDER_LAYERS.HUD)) return;
-
       const lines = String(text || '').replace(/\r/g, '').split('\n');
       while (lines.length && lines[0].trim() === '') lines.shift();
       while (lines.length && lines[lines.length - 1].trim() === '') lines.pop();
@@ -695,32 +628,14 @@ class NightscoutMentraApp extends AppServer {
     } catch (_) {}
   }
   hideDisplay(session, sessionId) {
-    try {
-      this._safeClearView(session);
-      try { session.layouts?.showTextWall?.('\u200B'); } catch (e) {}
-      setTimeout(() => { try { this._safeClearView(session); } catch (e) {} }, 50);
-      setTimeout(() => { try { this._safeClearView(session); } catch (e) {} }, 120);
-      this._lastShownText.delete(sessionId);
-      this._renderLayer.set(sessionId, RENDER_LAYERS.HUD);
-      this._renderHoldUntil.set(sessionId, 0);
-    } catch (e) {}
-
-
-// Renderiza texto ignorando la puerta de _canRender (para OVERLAY ALERT/BOOT)
-NightscoutMentraApp.prototype.showOverlayText = function(session, sessionId, text) {
-  try {
-    const out = String(text || '');
-    this._lastShownText.set(sessionId, out);
-    session.layouts.showTextWall(out);
-  } catch (e) {}
-};
+    try { session.layouts.showTextWall(''); this._lastShownText.delete(sessionId); } catch {}
+  }
 
   /* ---------- helpers ECO ---------- */
-
   getAlarmEchoState(sessionId, mgdl, settings) {
     const lim = this.getAlertLimits(settings);
     const latched = this.alertLatch.get(sessionId) || null;
-    if (latched === 'low' || latched === 'high') return latched;
+    if (latched === 'low' || latched === 'high') return latched; // ya activa
     if (!Number.isFinite(mgdl)) return 'none';
     if (mgdl <= lim.low) return 'low';
     if (mgdl >= lim.high) return 'high';
@@ -764,7 +679,7 @@ NightscoutMentraApp.prototype.showOverlayText = function(session, sessionId, tex
         session.logger?.debug?.('Seed TIR failed', { err: e?.message });
       }
 
-      // Cambio de día
+      // Reloj de cambio de día
       const dayWatch = setInterval(() => {
         const sd = this.activeSessions.get(sessionId);
         if (!sd) return;
@@ -776,27 +691,6 @@ NightscoutMentraApp.prototype.showOverlayText = function(session, sessionId, tex
         }
       }, 60 * 1000);
       this.dayWatchTimers.set(sessionId, dayWatch);
-
-      /* ---------- BOOT OVERLAY BMP (5s opcional con DEBUG_BOOT_BITMAP) ---------- */
-      if (DEBUG_BOOT_BITMAP) {
-        const loc = getBitmapLocationByAlias(DEBUG_BOOT_BITMAP);
-        if (loc) {
-          const durationMs = 5000;
-          try {
-            this._beginOverlay(sessionId, RENDER_LAYERS.BOOT, durationMs);
-            const ok = await showBitmapByLocation(session, loc, { durationMs });
-            setTimeout(async () => {
-              this._endOverlay(session, sessionId);
-              await this.showInitialAndHide(session, sessionId, settings);
-            }, durationMs + 120);
-            return; // no seguimos al HUD hasta terminar el boot overlay
-          } catch (e) {
-            session.logger?.warn?.('Boot bitmap falló', { msg: e?.message });
-          }
-        } else {
-          console.warn(`[debug] DEBUG_BOOT_BITMAP="${DEBUG_BOOT_BITMAP}" no encontrado en assets/bitmaps`);
-        }
-      }
 
       await this.showInitialAndHide(session, sessionId, settings);
       await this.startNormalOperation(session, sessionId, userId, settings);
@@ -822,9 +716,10 @@ NightscoutMentraApp.prototype.showOverlayText = function(session, sessionId, tex
           : (settings.language === 'es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
         const bar = !this.toBool(settings.show_tir_bar) || tirPct === null ? '' : this.buildTirBar(tirPct);
         let tLine = '';
-        try { const sum = await this.getRecentTreatments(settings, 'day', sessionId); tLine = this.formatTreatmentsLine(sum, settings, sessionId); } catch (e) {}
+        try { const sum = await this.getRecentTreatments(settings, 'day', sessionId); tLine = this.formatTreatmentsLine(sum, settings, sessionId); } catch {}
         await this.animateTIRFill(session, sessionId, settings, formattedData, tirPct, tLine);
       } else {
+        // No avanzado: base + pred condicionada (60/180)
         this.showClamped(session, sessionId, formattedData);
       }
       this._scheduleHide(sessionId, settings.display_duration_ms || 5000);
@@ -852,7 +747,7 @@ NightscoutMentraApp.prototype.showOverlayText = function(session, sessionId, tex
   async animateTIRFill(session, sessionId, s, headerText, tirPct, tLine='', extraLine='') {
     try {
       const showBar = !!s.show_tir_bar;
-      const anims   = s.enable_animations !== false;
+      const anims   = s.enable_animations !== false; // ON por defecto
       if (!showBar || !anims || tirPct == null || !Number.isFinite(tirPct)){
         const bar = showBar && tirPct != null ? ' ' + this.__barFromRatio(tirPct/100, 20) : '';
         const tirLine = tirPct == null ? (s.language==='es' ? 'TIR hoy: n/d' : 'TIR: n/a') : (s.language==='es' ? `TIR hoy: ${tirPct}%` : `TIR: ${tirPct}%`);
@@ -909,7 +804,7 @@ NightscoutMentraApp.prototype.showOverlayText = function(session, sessionId, tex
         const line2 = `${tirLine} ${bar}` + (tLine ? `\n${tLine}` : '');
         const out = extraLine ? `${headerText}\n${line2}\n${extraLine}` : `${headerText}\n${line2}`;
         this.showClamped(session, sessionId, out);
-      } catch (e) {}
+      } catch {}
     }
   }
 
@@ -941,7 +836,7 @@ NightscoutMentraApp.prototype.showOverlayText = function(session, sessionId, tex
           sd.settings = settings;
           this.activeSessions.set(sessionId, sd);
 
-          // ECO al guardar ajustes (con estado y sin solaparse)
+          // ECO: incluye estado de alarma actual
           try {
             let dNow = null;
             try { dNow = await this.getGlucoseData(settings, sessionId); await this.checkAlerts(session, sessionId, dNow, settings); } catch(_){}
@@ -952,43 +847,29 @@ NightscoutMentraApp.prototype.showOverlayText = function(session, sessionId, tex
 
             const alarmState = this.getAlarmEchoState(sessionId, dNow?.sgv, settings);
             const stateStr = isEs
-              ? (alarmState==='low' ? 'Activa: BAJA' : (alarmState==='high' ? 'Activa: ALTA' : 'Sin alarma'))
-              : (alarmState==='low' ? 'Active: LOW' : (alarmState==='high' ? 'Active: HIGH' : 'No alarm'));
+              ? (alarmState==='low' ? 'Activa: BAJA' : alarmState==='high' ? 'Activa: ALTA' : 'Sin alarma')
+              : (alarmState==='low' ? 'Active: LOW' : alarmState==='high' ? 'Active: HIGH' : 'No alarm');
 
+            const line1 = isEs ? 'Ajustes guardados' : 'Settings saved';
+            const line2 = `Units: ${settings.units} · HeadUp: ${settings.enable_head_up_display ? 'ON' : 'OFF'}`;
             const unitIsMmol = String(settings.units||'').toLowerCase().includes('mmol');
             const limitsEcho = unitIsMmol
               ? `${(limits.low/18).toFixed(1)}-${(limits.high/18).toFixed(1)} mmol/L`
               : `${limits.low}-${limits.high} mg/dL`;
-
-            const line1 = isEs ? 'Ajustes guardados' : 'Settings saved';
-            const line2 = `Units: ${settings.units} · HeadUp: ${settings.enable_head_up_display ? 'ON' : 'OFF'}`;
-            const line3 = `${isEs ? 'Rango' : 'Range'}: ${limitsEcho}`;
+            const line3 = `${isEs ? 'TIR hoy' : 'TIR'}: ${limitsEcho}`;
             const line4 = `${isEs ? 'Avanzado' : 'Advanced'}: ${settings.enable_advanced_mode ? 'ON' : 'OFF'}`;
             const line5 = (isEs ? 'Alarmas' : 'Alerts') + `: ${settings.alertsEnabled ? 'ON' : 'OFF'} · Hyst: ±${hystMg} mg/dL (±${hystMmol} mmol/L) · ${stateStr}`;
 
-            // ECO: no mostrar si overlay activo y con rate-limit
-            if (this._canRender(sessionId, RENDER_LAYERS.ECO)) {
-              const lastEco = this._lastEcoAt.get(sessionId) || 0;
-              if (Date.now() - lastEco > 2000) {
-                this._lastEcoAt.set(sessionId, Date.now());
-                this.showClamped(session, sessionId, [line1,line2,line3,line4,line5].join('\n'));
-                setTimeout(() => this.hideDisplay(session, sessionId), 2200);
-              } else {
-                session.logger?.debug?.('ECO omitido por rate-limit');
-              }
-            } else {
-              session.logger?.debug?.('ECO omitido por overlay activo');
-            }
-          } catch (e) {}
+            this.showClamped(session, sessionId, [line1,line2,line3,line4,line5].join('\n'));
+            setTimeout(() => this.hideDisplay(session, sessionId), 2200);
+          } catch {}
         } catch (error) {
           session.logger?.error(error, 'Failed to process settings update');
         }
       };
 
       const settingsHandler = (settingsData) => {
-        if (this._settingsDebounce.has(sessionId)) {
-          clearTimeout(this._settingsDebounce.get(sessionId));
-        }
+        if (this._settingsDebounce.has(sessionId)) clearTimeout(this._settingsDebounce.get(sessionId));
         const t = setTimeout(() => runSettingsHandler(settingsData), 120);
         this._settingsDebounce.set(sessionId, t);
       };
@@ -1004,7 +885,6 @@ NightscoutMentraApp.prototype.showOverlayText = function(session, sessionId, tex
           const s = sd?.settings; if (!s) return; if (!s.enable_head_up_display) return;
           const now = Date.now(); const last = this.headUpLastShown.get(sessionId) || 0;
           if (now - last < 10000) return; this.headUpLastShown.set(sessionId, now);
-
           const reading = await this.getGlucoseData(s, sessionId);
           const baseLine = await this.formatForG1WithPrediction(reading, s, sessionId);
           if (!s.enable_advanced_mode) {
@@ -1025,9 +905,9 @@ NightscoutMentraApp.prototype.showOverlayText = function(session, sessionId, tex
                 ? `Min/Max hoy: ${minDisp} / ${maxDisp} ${s.units}`
                 : `Min/Max today: ${minDisp} / ${maxDisp} ${s.units}`;
             }
-          } catch (e) {}
+          } catch {}
           let tLine = '';
-          try { const sum = await this.getRecentTreatments(s, 'day', sessionId); tLine = this.formatTreatmentsLine(sum, s, sessionId); } catch (e) {}
+          try { const sum = await this.getRecentTreatments(s, 'day', sessionId); tLine = this.formatTreatmentsLine(sum, s, sessionId); } catch {}
           await this.animateTIRFill(session, sessionId, s, baseLine, tirPct, tLine, minMaxLine);
           this._scheduleHide(sessionId, s.display_duration_ms || 4000);
         } catch (e) {
@@ -1064,7 +944,7 @@ NightscoutMentraApp.prototype.showOverlayText = function(session, sessionId, tex
       if (settings.enable_advanced_mode) {
         const header = await this.formatForG1WithPrediction(data, settings, sessionId);
         let tLine = '';
-        try { const sum = await this.getRecentTreatments(settings, 'day', sessionId); tLine = this.formatTreatmentsLine(sum, settings, sessionId); } catch (e) {}
+        try { const sum = await this.getRecentTreatments(settings, 'day', sessionId); tLine = this.formatTreatmentsLine(sum, settings, sessionId); } catch {}
         await this.animateTIRFill(session, sessionId, settings, header, tirPct, tLine);
       } else {
         this.showClamped(session, sessionId, await this.formatForG1WithPrediction(data, settings, sessionId));
@@ -1108,19 +988,6 @@ NightscoutMentraApp.prototype.showOverlayText = function(session, sessionId, tex
     }
   }
 
-  alertLimitsChanged(oldSettings, newSettings) {
-    if (!oldSettings) return false;
-    return (
-      oldSettings.low_alert_mg !== newSettings.low_alert_mg ||
-      oldSettings.high_alert_mg !== newSettings.high_alert_mg ||
-      oldSettings.low_alert_mmol !== newSettings.low_alert_mmol ||
-      oldSettings.high_alert_mmol !== newSettings.high_alert_mmol ||
-      oldSettings.units !== newSettings.units ||
-      oldSettings.alert_hysteresis_mg !== newSettings.alert_hysteresis_mg ||
-      oldSettings.alert_hysteresis_mmol !== newSettings.alert_hysteresis_mmol
-    );
-  }
-
   async checkAlerts(session, sessionId, data, settings) {
     const limits = this.getAlertLimits(settings);
     const mgdl = data.sgv;
@@ -1155,82 +1022,55 @@ NightscoutMentraApp.prototype.showOverlayText = function(session, sessionId, tex
     if (alertType) {
       this.alertHistory.set(sessionId, Date.now());
       this.alertLatch.set(sessionId, alertType);
-      await this.triggerBitmapAlert(session, sessionId, data, settings, alertType);
+      await this.triggerAnimatedAlert(session, sessionId, data, settings, alertType);
       session.logger?.warn('Alert sent', { type: alertType, value: mgdl });
     }
   }
 
-  /** Intenta mostrar alerta con BMP (base64); si falla, usa texto parpadeante */
-  async triggerBitmapAlert(session, sessionId, data, settings, type) {
+  async triggerAnimatedAlert(session, sessionId, data, settings, type) {
     const displayValue = this.convertToDisplay(data.sgv, settings.units || UNITS.MGDL);
     const unit = settings.units || UNITS.MGDL;
     const lang = settings.language || 'en';
-    const msgs = { en: { low: `LOW GLUCOSE!`, high: `HIGH GLUCOSE!` },
-                   es: { low: `¡GLUCOSA BAJA!`, high: `¡GLUCOSA ALTA!` } };
+    const msgs = {
+      en: { low: `LOW GLUCOSE!`, high: `HIGH GLUCOSE!` },
+      es: { low: `¡GLUCOSA BAJA!`, high: `¡GLUCOSA ALTA!` }
+    };
     const baseText = `${msgs[lang][type]}\n${displayValue} ${unit}`;
     const alertDuration = settings.alert_duration_ms || 15000;
+    const blinkInterval = 600;
 
-    const mode = ['mixed','icon','text'].includes(settings.alert_present_mode)
-      ? settings.alert_present_mode : 'mixed';
+    if (this.displayTimers.has(sessionId)) clearTimeout(this.displayTimers.get(sessionId));
 
-    const alias = type === 'low' ? 'low' : 'high';
-    const loc = getBitmapLocationByAlias(alias);
-
-    // Empezamos overlay ALERT
-    this._beginOverlay(sessionId, RENDER_LAYERS.ALERT, alertDuration);
-
-    if (mode === 'icon' && loc) {
-      // Sólo icono
-      const ok = await showBitmapByLocation(session, loc, { durationMs: alertDuration });
-      setTimeout(() => this._endOverlay(session, sessionId), alertDuration + 120);
-      return;
-    }
-
-    if (mode === 'text' || !loc) {
-      // Sólo texto (o no hay BMP): parpadeo
-      const blink = 600;
-      const start = Date.now();
-      const timer = setInterval(() => {
-        if (Date.now() - start > alertDuration) {
-          clearInterval(timer);
-          this._endOverlay(session, sessionId);
-          return;
-        }
-        const on = Math.floor((Date.now() - start) / blink) % 2 === 0;
-        this.showOverlayText(session, sessionId, `${on ? '[!]' : '[ ]'} ${baseText}`);
-      }, blink);
-      this.displayTimers.set(sessionId, setTimeout(() => { clearInterval(timer); this._endOverlay(session, sessionId); }, alertDuration + 120));
-      return;
-    }
-
-    // Modo mezclado: alternar icono y texto
-    const slice = 600; // ms por fase
-    const start = Date.now();
-    let phase = 0; // 0: icono, 1: texto
-    // mostramos rápido el icono al inicio
-    await showBitmapByLocation(session, loc, { durationMs: Math.min(slice, alertDuration) });
-
-    const inter = setInterval(async () => {
-      const elapsed = Date.now() - start;
-      if (elapsed > alertDuration) {
-        clearInterval(inter);
-        this._endOverlay(session, sessionId);
+    const startTime = Date.now();
+    let isVisible = true;
+    const blinker = setInterval(() => {
+      if (Date.now() - startTime > alertDuration) {
+        clearInterval(blinker);
+        this.hideDisplay(session, sessionId);
         return;
       }
-      phase = 1 - phase;
-      if (phase === 0) {
-        await showBitmapByLocation(session, loc, { durationMs: Math.min(slice, alertDuration - elapsed) });
-      } else {
-        this.showOverlayText(session, sessionId, baseText);
-      }
-    }, slice);
+      const symbol = isVisible ? '[!]' : '[ ]';
+      this.showClamped(session, sessionId, `${symbol} ${baseText}`);
+      isVisible = !isVisible;
+    }, blinkInterval);
 
-    this.displayTimers.set(sessionId, setTimeout(() => { clearInterval(inter); this._endOverlay(session, sessionId); }, alertDuration + 120));
+    this.displayTimers.set(sessionId, setTimeout(() => {
+      clearInterval(blinker);
+      this.hideDisplay(session, sessionId);
+    }, alertDuration + 120));
+  }
 
-    // Opcional: refresco HUD al terminar
-    setTimeout(async () => {
-      try { await this.showGlucoseTemporarily(session, sessionId, (settings.display_duration_ms || 5000), settings); } catch (e) {}
-    }, alertDuration + 180);
+  alertLimitsChanged(oldSettings, newSettings) {
+    if (!oldSettings) return false;
+    return (
+      oldSettings.low_alert_mg !== newSettings.low_alert_mg ||
+      oldSettings.high_alert_mg !== newSettings.high_alert_mg ||
+      oldSettings.low_alert_mmol !== newSettings.low_alert_mmol ||
+      oldSettings.high_alert_mmol !== newSettings.high_alert_mmol ||
+      oldSettings.units !== newSettings.units ||
+      oldSettings.alert_hysteresis_mg !== newSettings.alert_hysteresis_mg ||
+      oldSettings.alert_hysteresis_mmol !== newSettings.alert_hysteresis_mmol
+    );
   }
 
   /* ---------- MIRA tool ---------- */
@@ -1252,7 +1092,7 @@ NightscoutMentraApp.prototype.showOverlayText = function(session, sessionId, tex
       }
       if (!settings?.nightscoutUrl || !settings?.nightscoutToken) {
         throw new Error(lang === 'es' ? 'Nightscout no configurado' : 'Nightscout not configured');
-      }
+        }
       const reading = await this.getGlucoseData(settings);
       const display = this.convertToDisplay(reading.sgv, settings.units || UNITS.MGDL);
       const trend = this.getTrendArrow(reading.direction);
@@ -1291,7 +1131,7 @@ server.start().catch(err => {
   console.error('⛔ Error iniciando servidor:', err);
   process.exit(1);
 });
-console.log('🚀 Nightscout MentraOS v2.13.1 — Hysteresis + ECO + Pred no-avanzado + Bitmaps(base64) + Capas');
+console.log('🚀 Nightscout MentraOS v2.13.1 — Hysteresis + ECO + Pred no-avanzado');
 
 const KEEP_ALIVE_URL = process.env.RENDER_URL || 'https://mentra-nightscout.onrender.com';
 server.app.get('/health', (_, res) => res.json({
