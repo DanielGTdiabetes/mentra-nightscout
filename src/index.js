@@ -660,7 +660,7 @@ class NightscoutMentraApp extends AppServer {
       .sort((a,b)=> a.date-b.date);
     return today;
   }
-  async getGlucoseData(settings, sessionId="default"), preferCache=true{
+  async getGlucoseData(settings, sessionId="default", preferCache=true{
     
     if (preferCache) { const c=this._cachedEntry.get(sessionId); if (c && (Date.now()-c.ts)<(this._cacheTTLms||60000)) return c.data; }
 const http=this._ensureHttp(sessionId, settings);
