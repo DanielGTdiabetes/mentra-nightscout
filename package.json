@@ -1,17 +1,16 @@
 {
   "name": "nightscout-mentraos",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "scripts": {
-    "dev": "node src/index.js",
-    "start": "node src/index.js",
-    "postinstall": "node scripts/alias-amentra.js"
+    "start": "node index.js"
   },
   "dependencies": {
     "@mentra/sdk": "2.1.18",
     "axios": "^1.10.0",
     "dotenv": "^16.6.1",
-    "node-fetch": "^2.7.0"
-      },
+    "node-fetch": "^2.7.0",
+    "express": "^4.19.2"
+  },
   "engines": {
     "node": ">=18 <23"
   }
