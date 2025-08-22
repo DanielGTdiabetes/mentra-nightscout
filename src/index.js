@@ -107,9 +107,7 @@ async function showBitmapByLocation(session, location, { durationMs = 3000 } = {
 
 /* ---------- Config ---------- */
 const PACKAGE_NAME = process.env.PACKAGE_NAME || "com.tucompania.nightscout-glucose";
-
-const PACKAGE_NAME = process.env.PACKAGE_NAME || "com.tucompania.nightscout-glucose";
-const PORT = parseInt(process.env.PORT || "3000", 10);
+const PORT = Number(process.env.PORT || 3000);
 const MENTRAOS_API_KEY = process.env.MENTRAOS_API_KEY;
 if (!MENTRAOS_API_KEY) {
   console.error("⚠️ MENTRAOS_API_KEY is missing. Starting in LIMITED mode (health-only).");
@@ -124,12 +122,6 @@ if (!MENTRAOS_API_KEY) {
   return;
 }
 
-const PORT = parseInt(process.env.PORT || "3000", 10);
-const MENTRAOS_API_KEY = process.env.MENTRAOS_API_KEY;
-if (!MENTRAOS_API_KEY) {
-  console.error("⛔ MENTRAOS_API_KEY environment variable is required");
-  process.exit(1);
-}
 const UNITS = { MGDL: "mg/dL", MMOL: "mmol/L" };
 // Capas: ECO(0) < HUD(1) < BOOT(2) < ALERT(3)
 const RENDER_LAYERS = { ECO: 0, HUD: 1, BOOT: 2, ALERT: 3 };
