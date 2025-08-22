@@ -31,7 +31,19 @@ try {
 
 const path = require("path");
 const fs = require("fs");
-
+// --- EMERGENCY HOTFIX: evita TypeError aunque el SDK cree otro tipo de "session"
+if (typeof Object.prototype.updateSettingsForTesting !== 'function') {
+  Object.defineProperty(Object.prototype, 'updateSettingsForTesting', {
+    value: async function (_settings) {
+      // No-op global para builds antiguas/internas del SDK
+      try { this?.logger?.debug?.('global no-op updateSettingsForTesting'); } catch {}
+      return;
+    },
+    enumerable: false,   // no ensucia for..in
+    configurable: true,  // podrás quitarlo cuando el SDK lo arregle
+    writable: true
+  });
+}
 
 /* ---------- Bitmaps ---------- */
 const BITMAPS_DIR = path.join(process.cwd(), "assets", "bitmaps");
