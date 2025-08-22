@@ -107,21 +107,12 @@ async function showBitmapByLocation(session, location, { durationMs = 3000 } = {
 
 /* ---------- Config ---------- */
 const PACKAGE_NAME = process.env.PACKAGE_NAME || "com.tucompania.nightscout-glucose";
-const PORT = Number(process.env.PORT || 3000);
+const PORT = parseInt(process.env.PORT || "3000", 10);
 const MENTRAOS_API_KEY = process.env.MENTRAOS_API_KEY;
 if (!MENTRAOS_API_KEY) {
-  console.error("⚠️ MENTRAOS_API_KEY is missing. Starting in LIMITED mode (health-only).");
-  try {
-    const express = require("express");
-    const app = express();
-    app.get("/health", (_, res) => res.json({ status:"limited", reason:"NO_API_KEY", port: PORT, package: PACKAGE_NAME, time: Date.now() }));
-    app.listen(PORT, () => console.log(`✅ Health-only server on ${PORT} (no API key)`));
-  } catch(e) {
-    console.error("Failed to start health-only server:", e?.message||e);
-  }
-  return;
+  console.error("⛔ MENTRAOS_API_KEY environment variable is required");
+  process.exit(1);
 }
-
 const UNITS = { MGDL: "mg/dL", MMOL: "mmol/L" };
 // Capas: ECO(0) < HUD(1) < BOOT(2) < ALERT(3)
 const RENDER_LAYERS = { ECO: 0, HUD: 1, BOOT: 2, ALERT: 3 };
@@ -143,17 +134,10 @@ class NightscoutMentraApp extends AppServer {
     this._sessionLocale = new Map();
     this._lastShownText = new Map();
     this._lastEcoAt = new Map();
-    this._renderToken
-    this._blinkTimers = new Map(); // animaciones
+    this._renderToken = new Map();   // animaciones
 
     this.lastGoodEntry = new Map();
-    this.dailyTirState = new Map();  
-    // Throttle & render metrics
-    this._lastRenderAt = new Map();
-    this._pendingRenderTimer = new Map();
-    this._pendingRenderText = new Map();
-    this._metrics = Object.assign({}, this._metrics || {}, { rendersCoalesced:0 });
-// {dayStr,total,inRange}
+    this.dailyTirState = new Map();  // {dayStr,total,inRange}
 
     this._settingsDebounce = new Map();
 
@@ -660,10 +644,8 @@ class NightscoutMentraApp extends AppServer {
       .sort((a,b)=> a.date-b.date);
     return today;
   }
-  async getGlucoseData(settings, sessionId="default", preferCache=true{
-    
-    if (preferCache) { const c=this._cachedEntry.get(sessionId); if (c && (Date.now()-c.ts)<(this._cacheTTLms||60000)) return c.data; }
-const http=this._ensureHttp(sessionId, settings);
+  async getGlucoseData(settings, sessionId="default"){
+    const http=this._ensureHttp(sessionId, settings);
     if (!http) throw new Error("URL no configurada");
 
     const endpoints=[ `/api/v1/entries/sgv.json?count=1`, `/api/v1/entries.json?count=1`, `/api/v1/entries/current.json` ];
@@ -778,10 +760,8 @@ const http=this._ensureHttp(sessionId, settings);
         return;
       }
 
-      const token=(this._renderToken
-    this._blinkTimers = new Map();.get(sessionId)||0)+1;
-      this._renderToken
-    this._blinkTimers = new Map();.set(sessionId, token);
+      const token=(this._renderToken.get(sessionId)||0)+1;
+      this._renderToken.set(sessionId, token);
 
       const slots=20, leadIn=220, totalMs=920;
       const target=Math.floor(this.__clamp01(tirPct/100)*slots);
@@ -792,8 +772,7 @@ const http=this._ensureHttp(sessionId, settings);
       if (leadIn>0){
         const t0=Date.now();
         while(Date.now()-t0<leadIn){
-          if (this._renderToken
-    this._blinkTimers = new Map();.get(sessionId)!==token) return;
+          if (this._renderToken.get(sessionId)!==token) return;
           await this.__delay(30);
         }
       }
@@ -801,8 +780,7 @@ const http=this._ensureHttp(sessionId, settings);
       const ease=this.__getEasingFunction(String(s.animation_type||"cubic"));
       const tStart=Date.now(); let last=-1;
       while(true){
-        if (this._renderToken
-    this._blinkTimers = new Map();.get(sessionId)!==token) return;
+        if (this._renderToken.get(sessionId)!==token) return;
         const t=(Date.now()-tStart)/totalMs;
         const clamped=Math.max(0,Math.min(1,t));
         const filled=Math.min(target, Math.floor(ease(clamped)*target));
@@ -901,7 +879,7 @@ const http=this._ensureHttp(sessionId, settings);
 
             if (this._canRender(sessionId, RENDER_LAYERS.ECO)){
               const lastEco=this._lastEcoAt.get(sessionId)||0;
-              if (Date.now()-lastEco>3000){
+              if (Date.now()-lastEco>2000){
                 this._lastEcoAt.set(sessionId, Date.now());
                 this.showClamped(session, sessionId, ecoTxt);
                 setTimeout(()=> this.hideDisplay(session, sessionId), 2200);
