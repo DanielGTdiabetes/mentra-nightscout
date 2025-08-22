@@ -191,6 +191,43 @@ class NightscoutMentraApp extends AppServer {
     this._renderHoldUntil.set(sessionId, 0);
   }
 
+  /* ---------- render throttled (200ms) ---------- */
+  _renderTextThrottled(session, sessionId, text){
+    try{
+      const now=Date.now();
+      const last=this._lastRenderAt.get(sessionId)||0;
+      const elapsed=now-last;
+      const throttleMs=200;
+      const maxFlush=250;
+      if (!session?.layouts?.showTextWall) { try{ session?.layouts?.showTextWall?.(String(text??"")); }catch(_){}; this._lastRenderAt.set(sessionId, Date.now()); return; }
+      if ((Date.now()-last) > maxFlush) { try{ session.layouts.showTextWall(String(text??"")); }catch(_){}; this._lastRenderAt.set(sessionId, Date.now()); return; }
+
+      const doRender=()=>{
+        try{
+          const out=String(this._pendingRenderText.get(sessionId) ?? text ?? "");
+          session?.layouts?.showTextWall?.(out);
+          this._lastShownText?.set?.(sessionId, out);
+        }catch(e){}
+        this._pendingRenderText.delete(sessionId);
+        this._pendingRenderTimer.delete(sessionId);
+        this._lastRenderAt.set(sessionId, Date.now());
+      };
+      if (elapsed>=throttleMs && !this._pendingRenderTimer.get(sessionId)){
+        this._pendingRenderText.set(sessionId, text);
+        doRender();
+      } else {
+        this._pendingRenderText.set(sessionId, text);
+        this._metrics.rendersCoalesced = (this._metrics.rendersCoalesced||0)+1;
+        let t=this._pendingRenderTimer.get(sessionId);
+        if (!t){
+          const wait=Math.max(0, throttleMs - elapsed);
+          t=setTimeout(doRender, wait);
+          this._pendingRenderTimer.set(sessionId, t);
+        }
+      }
+    }catch(e){}
+  }
+
   /* ---------- limpieza vista ---------- */
   _safeClearView(session){
     // IMPORTANTE: NO usar clearView() para evitar "Unknown layout type: clear_wiew"
@@ -204,7 +241,7 @@ class NightscoutMentraApp extends AppServer {
     try{
       const out=String(text||"");
       this._lastShownText.set(sessionId, out);
-      session?.layouts?.showTextWall?.(out);
+      this._renderTextThrottled(session, sessionId, out);
     }catch(e){}
   }
 
@@ -218,7 +255,7 @@ class NightscoutMentraApp extends AppServer {
       const last=this._lastShownText.get(sessionId);
       if (last===out) return;
       this._lastShownText.set(sessionId, out);
-      session?.layouts?.showTextWall?.(out);
+      this._renderTextThrottled(session, sessionId, out);
     }catch(e){}
   }
 
@@ -652,7 +689,8 @@ class NightscoutMentraApp extends AppServer {
       .sort((a,b)=> a.date-b.date);
     return today;
   }
-  async getGlucoseData(settings, sessionId="default"){
+  async getGlucoseData(settings, sessionId="default", preferCache=true){
+    if (preferCache){ const c=this._cachedEntry.get(sessionId); if (c && (Date.now()-c.ts)<this._cacheTTLms) return c.data; }
     const http=this._ensureHttp(sessionId, settings);
     if (!http) throw new Error("URL no configurada");
 
@@ -667,7 +705,9 @@ class NightscoutMentraApp extends AppServer {
         if (!Number.isFinite(glucose)) throw new Error("No glucose data found");
         const dateValue=reading.date||reading.dateString||reading.sysTime;
         if (!dateValue) throw new Error("No date found");
-        return { sgv:glucose, date: typeof dateValue==="string"? new Date(dateValue).getTime() : dateValue, direction: reading.direction||reading.trend||"NONE" };
+        const __res = { sgv:glucose, date: typeof dateValue==="string" ? new Date(dateValue).getTime() : dateValue, direction: reading.direction||reading.trend||"NONE" };
+        this._cachedEntry.set(sessionId, { data: __res, ts: Date.now() });
+        return __res;
       }catch(e){ lastError=e; continue; }
     }
     throw new Error(`All endpoints failed. Last error: ${lastError?.message||"unknown"}`);
@@ -685,7 +725,8 @@ class NightscoutMentraApp extends AppServer {
   }
 
   async triggerTextAlert(session, sessionId, data, settings, type){
-    // ALERTA SOLO TEXTO (retro): parpadeo
+    try{ const __iv=this._blinkTimers.get(sessionId); if (__iv){ clearInterval(__iv); this._blinkTimers.delete(sessionId); this._metrics.blinksCanceled=(this._metrics.blinksCanceled||0)+1; } }catch(_){ }
+// ALERTA SOLO TEXTO (retro): parpadeo
     const displayValue=this.convertToDisplay(data.sgv, settings.units||UNITS.MGDL);
     const unit=settings.units||UNITS.MGDL;
     const lang=settings.language||"en";
@@ -696,14 +737,18 @@ class NightscoutMentraApp extends AppServer {
     this._beginOverlay(sessionId, RENDER_LAYERS.ALERT, alertDuration);
 
     const blink=650, start=Date.now();
-    const timer=setInterval(()=>{
+    const timer = setInterval(()=>{
       if (Date.now()-start>alertDuration){
-        clearInterval(timer); this._endOverlay(session, sessionId); return;
+        clearInterval(timer);
+    this._blinkTimers.set(sessionId, timer);
+this._endOverlay(session, sessionId); return;
       }
       const on=Math.floor((Date.now()-start)/blink)%2===0;
       this.showOverlayText(session, sessionId, `${on?"[!!]":"[  ]"} ${baseText}`);
     }, blink);
-    this.displayTimers.set(sessionId, setTimeout(()=>{ try{clearInterval(timer);}catch(e){} this._endOverlay(session, sessionId); }, alertDuration+120));
+    this.displayTimers.set(sessionId, setTimeout(()=>{ try{clearInterval(timer);}catch(e){}
+      try{ this._blinkTimers.delete(sessionId);}catch(e){}
+      this._endOverlay(session, sessionId); }, alertDuration+120));
 
     // al finalizar, enseñar HUD breve
     setTimeout(async ()=>{ try{ await this.showGlucoseTemporarily(session, sessionId, (settings.display_duration_ms||5000), settings); }catch(e){} }, alertDuration+180);
