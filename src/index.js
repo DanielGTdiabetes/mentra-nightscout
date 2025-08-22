@@ -144,7 +144,7 @@ class NightscoutMentraApp extends AppServer {
     this._lastShownText = new Map();
     this._lastEcoAt = new Map();
     this._renderToken
-    this._blinkTimers = new Map(); = new Map();   // animaciones
+    this._blinkTimers = new Map(); // animaciones
 
     this.lastGoodEntry = new Map();
     this.dailyTirState = new Map();  
