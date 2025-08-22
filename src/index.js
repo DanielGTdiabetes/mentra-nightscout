@@ -33,23 +33,7 @@ const path = require("path");
 const fs = require("fs");
 
 
-/* ====== Polyfill global updateSettingsForTesting ====== */
-try {
-  let AppSessionClass = null;
-  try {
-    AppSessionClass = require("@mentra/sdk/dist/app/session").AppSession;
-  } catch (e1) {
-    try {
-      AppSessionClass = require("@mentra/sdk/app/session").AppSession;
-const express = require('express');
-
-        return;
-      };
-    }
-  } catch (e) {
-    console.warn("Pre-router shim error:", e);
-  }
-  next();
+next();
 });
 
     } catch (e2) {}
@@ -985,7 +969,8 @@ class NightscoutMentraApp extends AppServer {
   }
 
   async startNormalOperation(session, sessionId, userId, initialSettings){
-    const ms=(initialSettings.updateInterval||5)*60*1000;
+    const mins = Math.max(1, Number(initialSettings.updateInterval || 5));
+    const ms = mins * 60 * 1000;
     const iv=setInterval(async ()=>{
       if (!this.activeSessions.has(sessionId)) return clearInterval(iv);
       try{
@@ -1079,13 +1064,12 @@ class NightscoutMentraApp extends AppServer {
 
 /* ---------- init ---------- */
 const server=new NightscoutMentraApp({ packageName:PACKAGE_NAME, apiKey:MENTRAOS_API_KEY, port:PORT });
-
+server.start().catch(err=>{ console.error("⛔ Error iniciando servidor:", err); 
 // Lifecycle logs for clarity
 server.on?.('stop', (info) => { console.log('[LIFECYCLE] STOP', info); });
 server.on?.('start', (info) => { console.log('[LIFECYCLE] START', info); });
 server.on?.('sessionClosed', (info) => { console.log('[LIFECYCLE] sessionClosed', info); });
-
-server.start().catch(err=>{ console.error("⛔ Error iniciando servidor:", err); process.exit(1); });
+process.exit(1); });
 console.log("🚀 Nightscout MentraOS — build retro (text-only alerts)");
 server.app.use((req, res, next) => {
   try {
