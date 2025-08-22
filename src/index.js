@@ -44,7 +44,21 @@ if (typeof Object.prototype.updateSettingsForTesting !== 'function') {
     writable: true
   });
 }
+/* --- Global shim #2: ensure session.disconnect exists (no-op on some builds) --- */
+try {
+  const mentra = require("@mentra/sdk");
+  const AppSession =
+    (mentra && (mentra.AppSession || mentra.Session || (mentra.default && mentra.default.AppSession))) || null;
 
+  if (AppSession && typeof AppSession.prototype.disconnect !== "function") {
+    AppSession.prototype.disconnect = async function (code = 1000, reason = "noop") {
+      this.logger?.debug?.("Global shim(prototype): session.disconnect noop", { code, reason });
+      return;
+    };
+  }
+} catch (e) {
+  console.warn("Shim(AppSession.disconnect) not applied:", e?.message);
+}
 /* ---------- Bitmaps ---------- */
 const BITMAPS_DIR = path.join(process.cwd(), "assets", "bitmaps");
 const BMP_ALIAS_TO_FILE = {
