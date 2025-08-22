@@ -110,8 +110,16 @@ const PACKAGE_NAME = process.env.PACKAGE_NAME || "com.tucompania.nightscout-gluc
 const PORT = parseInt(process.env.PORT || "3000", 10);
 const MENTRAOS_API_KEY = process.env.MENTRAOS_API_KEY;
 if (!MENTRAOS_API_KEY) {
-  console.error("⛔ MENTRAOS_API_KEY environment variable is required");
-  process.exit(1);
+  console.error("⚠️ MENTRAOS_API_KEY is missing. Starting in LIMITED mode (health-only).");
+  try {
+    const express = require("express");
+    const app = express();
+    app.get("/health", (_, res) => res.json({ status:"limited", reason:"NO_API_KEY", port: PORT, package: PACKAGE_NAME, time: Date.now() }));
+    app.listen(PORT, () => console.log(`✅ Health-only server on ${PORT} (no API key)`));
+  } catch(e) {
+    console.error("Failed to start health-only server:", e?.message||e);
+  }
+  return;
 }
 const UNITS = { MGDL: "mg/dL", MMOL: "mmol/L" };
 // Capas: ECO(0) < HUD(1) < BOOT(2) < ALERT(3)
@@ -879,7 +887,7 @@ class NightscoutMentraApp extends AppServer {
 
             if (this._canRender(sessionId, RENDER_LAYERS.ECO)){
               const lastEco=this._lastEcoAt.get(sessionId)||0;
-              if (Date.now()-lastEco>2000){
+              if (Date.now()-lastEco>3000){
                 this._lastEcoAt.set(sessionId, Date.now());
                 this.showClamped(session, sessionId, ecoTxt);
                 setTimeout(()=> this.hideDisplay(session, sessionId), 2200);
