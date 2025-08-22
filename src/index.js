@@ -43,14 +43,6 @@ try {
       AppSessionClass = require("@mentra/sdk/app/session").AppSession;
 const express = require('express');
 
-// --- Pre-router: Express base app + shim de settings ---
-const baseApp = express();
-baseApp.use((req, res, next) => {
-  try {
-    const sess = req?.mentra?.session;
-    if (sess && typeof sess.updateSettingsForTesting !== "function") {
-      sess.updateSettingsForTesting = async function () {
-        sess.logger?.debug?.("Shim (request): updateSettingsForTesting noop");
         return;
       };
     }
@@ -1087,6 +1079,12 @@ class NightscoutMentraApp extends AppServer {
 
 /* ---------- init ---------- */
 const server=new NightscoutMentraApp({ packageName:PACKAGE_NAME, apiKey:MENTRAOS_API_KEY, port:PORT });
+
+// Lifecycle logs for clarity
+server.on?.('stop', (info) => { console.log('[LIFECYCLE] STOP', info); });
+server.on?.('start', (info) => { console.log('[LIFECYCLE] START', info); });
+server.on?.('sessionClosed', (info) => { console.log('[LIFECYCLE] sessionClosed', info); });
+
 server.start().catch(err=>{ console.error("⛔ Error iniciando servidor:", err); process.exit(1); });
 console.log("🚀 Nightscout MentraOS — build retro (text-only alerts)");
 server.app.use((req, res, next) => {
