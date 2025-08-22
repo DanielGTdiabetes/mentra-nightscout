@@ -33,21 +33,6 @@ const path = require("path");
 const fs = require("fs");
 
 
-next();
-});
-
-    } catch (e2) {}
-  }
-  if (AppSessionClass && !AppSessionClass.prototype.updateSettingsForTesting) {
-    AppSessionClass.prototype.updateSettingsForTesting = async function () {
-      return;
-    };
-    console.log("ℹ️ Polyfill aplicado en AppSession.prototype.updateSettingsForTesting");
-  }
-} catch (e) {
-  // ignorar si no se encuentra la clase interna del SDK
-}
-
 /* ---------- Bitmaps ---------- */
 const BITMAPS_DIR = path.join(process.cwd(), "assets", "bitmaps");
 const BMP_ALIAS_TO_FILE = {
@@ -969,8 +954,7 @@ class NightscoutMentraApp extends AppServer {
   }
 
   async startNormalOperation(session, sessionId, userId, initialSettings){
-    const mins = Math.max(1, Number(initialSettings.updateInterval || 5));
-    const ms = mins * 60 * 1000;
+    const mins=Math.max(1, Number(initialSettings.updateInterval||5)); const ms=mins*60*1000;
     const iv=setInterval(async ()=>{
       if (!this.activeSessions.has(sessionId)) return clearInterval(iv);
       try{
@@ -1064,12 +1048,12 @@ class NightscoutMentraApp extends AppServer {
 
 /* ---------- init ---------- */
 const server=new NightscoutMentraApp({ packageName:PACKAGE_NAME, apiKey:MENTRAOS_API_KEY, port:PORT });
-server.start().catch(err=>{ console.error("⛔ Error iniciando servidor:", err); 
+server.start().catch(err=>{ console.error("⛔ Error iniciando servidor:", err); process.exit(1); });
+
 // Lifecycle logs for clarity
 server.on?.('stop', (info) => { console.log('[LIFECYCLE] STOP', info); });
 server.on?.('start', (info) => { console.log('[LIFECYCLE] START', info); });
 server.on?.('sessionClosed', (info) => { console.log('[LIFECYCLE] sessionClosed', info); });
-process.exit(1); });
 console.log("🚀 Nightscout MentraOS — build retro (text-only alerts)");
 server.app.use((req, res, next) => {
   try {
