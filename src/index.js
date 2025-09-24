@@ -1192,17 +1192,41 @@ const resolveLogger = () => {
   return fallbackLogger;
 };
 
+const buildAppSessionConfig = (opts, logger, appRef) => ({
+  packageName: PACKAGE_NAME,
+  apiKey: MENTRAOS_API_KEY,
+  app: appRef,
+  logger,
+  ...opts,
+});
+
+const instantiateAppSession = (config, appRef) => {
+  if (typeof AppSession !== "function") {
+    throw new Error("AppSession constructor unavailable");
+  }
+
+  // Prefer the legacy two-arg signature when the constructor explicitly declares it.
+  if (AppSession.length >= 2) {
+    return new AppSession(appRef, config);
+  }
+
+  try {
+    return new AppSession(config);
+  } catch (err) {
+    // Some SDK builds still expect the legacy signature but do not expose the arity.
+    if (/(logger|app\.?logger)/i.test(err?.message || "")) {
+      return new AppSession(appRef, config);
+    }
+    throw err;
+  }
+};
+
 let activeAppSession=null;
 const createAppSession=(opts={})=> {
   const logger = resolveLogger();
   const appRef = server && typeof server === "object" ? server : { logger };
-  return new AppSession({
-    packageName:PACKAGE_NAME,
-    apiKey:MENTRAOS_API_KEY,
-    app: appRef,
-    logger,
-    ...opts,
-  });
+  const config = buildAppSessionConfig(opts, logger, appRef);
+  return instantiateAppSession(config, appRef);
 };
 
 if (AppSession && typeof AppSession === "function") {
