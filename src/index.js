@@ -14,11 +14,91 @@
  */
 
 require("dotenv").config();
-const { AppServer } = require("@mentra/sdk");
+const { AppServer, AppSession } = require("@mentra/sdk");
 const axios = require("axios");
+
+// Configuración de conexión robusta
+const TIMEOUT_MS = Number(process.env.MENTRA_TIMEOUT_MS || 30000); // 30s
+const MAX_ATTEMPTS = Number(process.env.MENTRA_MAX_ATTEMPTS || 10);
+const BASE_DELAY_MS = Number(process.env.MENTRA_BASE_DELAY_MS || 1000); // 1s
+const PING_INTERVAL_MS = Number(process.env.MENTRA_PING_INTERVAL_MS || 10000); // 10s
+
+function backoff(attempt) {
+  const exp = Math.min(30000, BASE_DELAY_MS * (2 ** attempt));
+  const jitter = Math.floor(Math.random() * 250);
+  return exp + jitter;
+}
+
+let lastErrorMsg = null;
+let lastErrorAt = 0;
+
+async function connectWithRetry(createSession, onConnected, onDisconnected) {
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    const session = createSession({ timeoutMs: TIMEOUT_MS, pingIntervalMs: PING_INTERVAL_MS });
+
+    try {
+      await session.connect();
+      console.log("✅ WS conectado");
+
+      onConnected?.(session);
+
+      let reconnecting = false;
+      const scheduleReconnect = () => {
+        if (reconnecting) return;
+        reconnecting = true;
+        try {
+          onDisconnected?.(session);
+        } catch (disconnectErr) {
+          console.error("Error in onDisconnected handler", disconnectErr);
+        }
+        connectWithRetry(createSession, onConnected, onDisconnected)
+          .then(() => {
+            reconnecting = false;
+          })
+          .catch((err) => {
+            reconnecting = false;
+            console.error("Reconnect error", err);
+          });
+      };
+
+      session.on("close", () => {
+        console.warn("⚠️ WS cerrado, reintentando...");
+        scheduleReconnect();
+      });
+
+      session.on("error", (err) => {
+        const now = Date.now();
+        if (err?.message !== lastErrorMsg || now - lastErrorAt > 30000) {
+          console.error("❌ WS error:", err?.message || err);
+          lastErrorMsg = err?.message;
+          lastErrorAt = now;
+        }
+        scheduleReconnect();
+      });
+
+      return session;
+    } catch (err) {
+      const wait = backoff(attempt);
+      const message = err?.message || err;
+      const now = Date.now();
+      if (message !== lastErrorMsg || now - lastErrorAt > 30000) {
+        console.warn(`WS connect failed (attempt ${attempt + 1}/${MAX_ATTEMPTS}). Waiting ${wait}ms`, message);
+        lastErrorMsg = message;
+        lastErrorAt = now;
+      } else {
+        console.warn(`WS connect failed (attempt ${attempt + 1}/${MAX_ATTEMPTS}). Waiting ${wait}ms`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, wait));
+    }
+  }
+
+  throw new Error(`Unable to connect after ${MAX_ATTEMPTS} attempts`);
+}
+
 // --- parche directo al prototipo de AppSession ---
 try {
-  const { AppSession } = require("@mentra/sdk");
   if (AppSession && !AppSession.prototype.updateSettingsForTesting) {
     AppSession.prototype.updateSettingsForTesting = async function () {
       this.logger?.debug?.("Global shim(prototype): updateSettingsForTesting noop");
@@ -47,11 +127,13 @@ if (typeof Object.prototype.updateSettingsForTesting !== 'function') {
 /* --- Global shim #2: ensure session.disconnect exists (no-op on some builds) --- */
 try {
   const mentra = require("@mentra/sdk");
-  const AppSession =
-    (mentra && (mentra.AppSession || mentra.Session || (mentra.default && mentra.default.AppSession))) || null;
+  const SessionCtor =
+    AppSession ||
+    (mentra && (mentra.AppSession || mentra.Session || (mentra.default && mentra.default.AppSession))) ||
+    null;
 
-  if (AppSession && typeof AppSession.prototype.disconnect !== "function") {
-    AppSession.prototype.disconnect = async function (code = 1000, reason = "noop") {
+  if (SessionCtor && typeof SessionCtor.prototype.disconnect !== "function") {
+    SessionCtor.prototype.disconnect = async function (code = 1000, reason = "noop") {
       this.logger?.debug?.("Global shim(prototype): session.disconnect noop", { code, reason });
       return;
     };
@@ -1082,6 +1164,35 @@ class NightscoutMentraApp extends AppServer {
 
 /* ---------- init ---------- */
 const server=new NightscoutMentraApp({ packageName:PACKAGE_NAME, apiKey:MENTRAOS_API_KEY, port:PORT });
+
+let activeAppSession=null;
+const createAppSession=(opts={})=> new AppSession({
+  packageName:PACKAGE_NAME,
+  apiKey:MENTRAOS_API_KEY,
+  ...opts,
+});
+
+if (AppSession && typeof AppSession === "function") {
+  connectWithRetry(
+    createAppSession,
+    (session)=>{
+      activeAppSession=session;
+      server.emit?.("mentraSessionReady", { session });
+    },
+    ()=>{
+      activeAppSession=null;
+      server.emit?.("mentraSessionLost");
+    }
+  ).catch(err=>{
+    console.error("Fallo al iniciar AppSession", err);
+    process.exit(1);
+  });
+} else {
+  console.warn("AppSession class unavailable; skipping WS bootstrap");
+}
+
+server.getRootSession=()=>activeAppSession;
+
 server.start().catch(err=>{ console.error("⛔ Error iniciando servidor:", err); process.exit(1); });
 
 // Lifecycle logs for clarity
