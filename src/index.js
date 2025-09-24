@@ -1165,12 +1165,45 @@ class NightscoutMentraApp extends AppServer {
 /* ---------- init ---------- */
 const server=new NightscoutMentraApp({ packageName:PACKAGE_NAME, apiKey:MENTRAOS_API_KEY, port:PORT });
 
+// El SDK moderno espera siempre un logger funcional dentro de la AppSession.
+// En Render el constructor de AppSession accedía a `config.app.logger` y
+// provocaba un TypeError cuando no existía. Generamos un logger básico y lo
+// propagamos explícitamente en la configuración para mantener compatibilidad
+// con builds antiguas.
+const fallbackLogger = (() => {
+  const base = {
+    debug: (...args) => console.debug(...args),
+    info: (...args) => console.info(...args),
+    warn: (...args) => console.warn(...args),
+    error: (...args) => console.error(...args),
+  };
+  base.child = () => base;
+  return base;
+})();
+
+const resolveLogger = () => {
+  const loggerCandidate = server?.logger;
+  if (loggerCandidate && typeof loggerCandidate === "object") {
+    if (typeof loggerCandidate.child !== "function") {
+      loggerCandidate.child = () => loggerCandidate;
+    }
+    return loggerCandidate;
+  }
+  return fallbackLogger;
+};
+
 let activeAppSession=null;
-const createAppSession=(opts={})=> new AppSession({
-  packageName:PACKAGE_NAME,
-  apiKey:MENTRAOS_API_KEY,
-  ...opts,
-});
+const createAppSession=(opts={})=> {
+  const logger = resolveLogger();
+  const appRef = server && typeof server === "object" ? server : { logger };
+  return new AppSession({
+    packageName:PACKAGE_NAME,
+    apiKey:MENTRAOS_API_KEY,
+    app: appRef,
+    logger,
+    ...opts,
+  });
+};
 
 if (AppSession && typeof AppSession === "function") {
   connectWithRetry(
