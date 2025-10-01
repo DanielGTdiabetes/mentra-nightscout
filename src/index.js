@@ -1,14 +1,11 @@
 "use strict";
 /**
  * Nightscout ↔ MentraOS (Even Realities G1) — stable-v2
- * Objetivos clave del refactor:
- * - 0 polyfills/parches de prototipos.
- * - Timers centralizados por sesión (display/update/animation/settings).
- * - Limpieza completa en disconnect/shutdown.
- * - Display optimizado: una sola llamada a showTextWall("") para limpiar.
- * - Health endpoint con timestamp/version y métricas.
- * - Boot logo opcional (BMP) que no se tapa con el HUD.
- * - Re-render inmediato cuando cambian ajustes (modo avanzado, idioma, unidades, etc.).
+ * Cambios de esta versión:
+ * - Soporte separado de barras: show_tir_bar y show_range_bar (prioridad range).
+ * - Re-render inmediato tras cambios de ajustes.
+ * - Boot logo opcional con retraso del HUD para no taparlo.
+ * - Timers centralizados y cleanup completo.
  */
 require("dotenv").config();
 
@@ -35,6 +32,8 @@ const barFromRatio = (r, slots=20) => {
   const n = Math.round(clamp01(r) * slots);
   return `[${"¦".repeat(n)}${"·".repeat(Math.max(0, slots-n))}]`;
 };
+
+function mmString(mg){ return (mg/18).toFixed(1); }
 
 function readBootBitmapB64() {
   try {
@@ -130,7 +129,9 @@ class NightscoutMentraStableV2 extends AppServer {
       const displayMs = Number.isFinite(this.parseNum(o.display_duration_s,NaN))? Math.min(15,Math.max(1,this.parseNum(o.display_duration_s)))*1000:5000;
       const alertMs = Number.isFinite(this.parseNum(o.alert_duration_s,NaN))? Math.min(60,Math.max(2,this.parseNum(o.alert_duration_s)))*1000:15000;
       const cooldownMs = Number.isFinite(this.parseNum(o.alert_cooldown_min,NaN))? Math.min(60,Math.max(1,this.parseNum(o.alert_cooldown_min)))*60000:600000;
-      const showTir = (o.show_tir_bar==null && o.show_range_bar==null)? true : (this.toBool(o.show_tir_bar)||this.toBool(o.show_range_bar));
+
+      const showTirBar = (o.show_tir_bar==null && o.show_range_bar==null) ? true : this.toBool(o.show_tir_bar);
+      const showRangeBar = this.toBool(o.show_range_bar);
 
       return {
         nightscoutUrl: String(o.nightscout_url||"").trim(),
@@ -148,7 +149,8 @@ class NightscoutMentraStableV2 extends AppServer {
         display_duration_ms: displayMs,
         alert_duration_ms: alertMs,
         alert_cooldown_ms: cooldownMs,
-        show_tir_bar: showTir,
+        show_tir_bar: showTirBar,
+        show_range_bar: showRangeBar,
         enable_advanced_mode: this.toBool(o.enable_advanced_mode) || this.toBool(o.advanced_mode_enabled),
         alert_present_mode: "text",
         alert_hysteresis_mg: this.validateNum(o.alert_hysteresis_mg,0,50,5),
@@ -172,7 +174,7 @@ class NightscoutMentraStableV2 extends AppServer {
         low_alert_mg:70, high_alert_mg:250, low_alert_mmol:3.9, high_alert_mmol:13.9,
         alertsEnabled:true, language:"en", timezone:null, units:UNITS.MGDL,
         enable_head_up_display:false, display_duration_ms:5000, alert_duration_ms:15000, alert_cooldown_ms:600000,
-        show_tir_bar:true, enable_advanced_mode:false, alert_present_mode:"text",
+        show_tir_bar:true, show_range_bar:false, enable_advanced_mode:false, alert_present_mode:"text",
         alert_hysteresis_mg:5, alert_hysteresis_mmol:0.3, prediction_horizon_min:30, debug_force_alert:null,
         animation_type:"cubic", enable_animations:true,
       };
@@ -185,7 +187,10 @@ class NightscoutMentraStableV2 extends AppServer {
     const displayMs = Number.isFinite(this.parseNum(o.display_duration_s,NaN))? Math.min(15,Math.max(1,this.parseNum(o.display_duration_s)))*1000:5000;
     const alertMs = Number.isFinite(this.parseNum(o.alert_duration_s,NaN))? Math.min(60,Math.max(2,this.parseNum(o.alert_duration_s)))*1000:15000;
     const cooldownMs = Number.isFinite(this.parseNum(o.alert_cooldown_min,NaN))? Math.min(60,Math.max(1,this.parseNum(o.alert_cooldown_min)))*60000:600000;
-    const showTir = (o.show_tir_bar==null && o.show_range_bar==null)? true : (this.toBool(o.show_tir_bar)||this.toBool(o.show_range_bar));
+
+    const showTirBar = (o.show_tir_bar==null && o.show_range_bar==null) ? true : this.toBool(o.show_tir_bar);
+    const showRangeBar = this.toBool(o.show_range_bar);
+
     return {
       nightscoutUrl: String(o.nightscout_url||"").trim(),
       nightscoutToken: String(o.nightscout_token||"").trim(),
@@ -202,7 +207,8 @@ class NightscoutMentraStableV2 extends AppServer {
       display_duration_ms: displayMs,
       alert_duration_ms: alertMs,
       alert_cooldown_ms: cooldownMs,
-      show_tir_bar: showTir,
+      show_tir_bar: showTirBar,
+      show_range_bar: showRangeBar,
       enable_advanced_mode: this.toBool(o.enable_advanced_mode) || this.toBool(o.advanced_mode_enabled),
       alert_present_mode: "text",
       alert_hysteresis_mg: this.validateNum(o.alert_hysteresis_mg,0,50,5),
@@ -320,6 +326,22 @@ class NightscoutMentraStableV2 extends AppServer {
     this.showText(session, sessionId, text);
   }
 
+  // Nueva: barra de rango
+  buildRangeBar(mgdl, settings){
+    const lim = this.getAlertLimits(settings);
+    const low = lim.low, high = lim.high;
+    if (!Number.isFinite(mgdl) || high<=low) return "";
+    const slots = 20;
+    const pos = Math.max(0, Math.min(1, (mgdl - low) / (high - low)));
+    const idx = Math.round(pos * slots);
+    const left = "═".repeat(Math.max(0, idx));
+    const right = "═".repeat(Math.max(0, slots - idx));
+    const unitsIsMmol = String(settings.units||"").toLowerCase().includes("mmol");
+    const lowTxt = unitsIsMmol ? mmString(low) : String(low);
+    const highTxt = unitsIsMmol ? mmString(high) : String(high);
+    const unit = settings.units || UNITS.MGDL;
+    return `L ${lowTxt}-${highTxt} ${unit}\n|${left}*${right}|`;
+  }
   // ───────────────────────────── Timers centralizados ────────────────────────
   setDisplayTimeout(sessionId, ms, fn){
     const sd = this.sessions.get(sessionId); if (!sd) return;
@@ -400,7 +422,6 @@ class NightscoutMentraStableV2 extends AppServer {
       return { label, totalCarbs, totalInsulin, last };
     }catch{ return null; }
   }
-
   formatTreatmentsLine(summary, settings, sessionId="default"){
     if (!summary) return "";
     const { label, totalCarbs, totalInsulin, last } = summary;
@@ -418,7 +439,6 @@ class NightscoutMentraStableV2 extends AppServer {
                        : (label==="today"? `Carbs/Ins today: ${c}g / ${i}U${lastStr}`: `Carbs/Ins ${label}: ${c}g / ${i}U${lastStr}`);
   }
 
-  // ───────────────────────────── Nightscout data ─────────────────────────────
   async getTodayEntries(settings, sessionId="default"){
     const http = this.ensureHttp(sessionId, settings);
     if (!http) throw new Error("URL not set");
@@ -452,7 +472,6 @@ class NightscoutMentraStableV2 extends AppServer {
     throw new Error(`All endpoints failed: ${lastError?.message||"unknown"}`);
   }
 
-  // ─────────────────────────────── Alertas ───────────────────────────────────
   alertLimitsChanged(oldS, newS){
     if (!oldS) return false;
     return (
@@ -464,15 +483,6 @@ class NightscoutMentraStableV2 extends AppServer {
       oldS.alert_hysteresis_mg!==newS.alert_hysteresis_mg ||
       oldS.alert_hysteresis_mmol!==newS.alert_hysteresis_mmol
     );
-  }
-  getAlarmEchoState(sessionId, mgdl, settings){
-    const lim = this.getAlertLimits(settings);
-    const latched = this.alertLatch.get(sessionId)||null;
-    if (latched==="low"||latched==="high") return latched;
-    if (!Number.isFinite(mgdl)) return "none";
-    if (mgdl<=lim.low) return "low";
-    if (mgdl>=lim.high) return "high";
-    return "none";
   }
   async triggerTextAlert(session, sessionId, data, settings, type){
     const displayValue = this.convertToDisplay(data.sgv, settings.units||UNITS.MGDL);
@@ -486,7 +496,7 @@ class NightscoutMentraStableV2 extends AppServer {
     const blink = 650, start = Date.now();
     this.setAnimationInterval(sessionId, blink, () => {
       if (Date.now()-start>alertDuration){
-        this.clearAllTimers(sessionId); // corta animación y display timers si estaban programados
+        this.clearAllTimers(sessionId);
         this.endOverlay(session, sessionId);
         return;
       }
@@ -522,8 +532,6 @@ class NightscoutMentraStableV2 extends AppServer {
       await this.triggerTextAlert(session, sessionId, data, settings, alertType);
     }
   }
-
-  // ───────────────────────────── Animación TIR/HUD ───────────────────────────
   async animateTIRFill(session, sessionId, s, headerText, tirPct, tLine="", extraLine=""){
     try{
       const showBar = !!s.show_tir_bar;
@@ -555,23 +563,31 @@ class NightscoutMentraStableV2 extends AppServer {
       this.showText(session, sessionId, `${headerText}\n${s.language==="es"?"TIR hoy: n/d":"TIR: n/a"}` + (tLine?`\n${tLine}`:"") + (extraLine?`\n${extraLine}`:""));
     }
   }
-
-  // ───────────────────────────── HUD puntual ─────────────────────────────────
   async showGlucoseTemporarily(session, sessionId, ms, providedSettings){
     try{
       const sd = this.sessions.get(sessionId); if (!sd) return;
       const s = providedSettings || sd.settings || await this.getUserSettings(sd.session);
       const d = await this.getGlucoseData(s, sessionId);
       this.lastGoodEntry.set(sessionId, d);
-      const { tirPct } = this.updateDailyTirState(sessionId, d.sgv, d.date, s);
       const header = await this.formatBase(d, s, sessionId);
 
       if (s.enable_advanced_mode){
         let tLine=""; try{ const sum = await this.getRecentTreatments(s,"day",sessionId); tLine = this.formatTreatmentsLine(sum, s, sessionId); }catch{}
-        await this.animateTIRFill(session, sessionId, s, header, tirPct, tLine);
+
+        if (s.show_range_bar) {
+          const rangeBar = this.buildRangeBar(d.sgv, s);
+          const txt = rangeBar ? `${header}\n${rangeBar}${tLine?`\n${tLine}`:""}` : `${header}${tLine?`\n${tLine}`:""}`;
+          this.showText(session, sessionId, txt);
+        } else if (s.show_tir_bar) {
+          const { tirPct } = this.updateDailyTirState(sessionId, d.sgv, d.date, s);
+          await this.animateTIRFill(session, sessionId, s, header, tirPct, tLine);
+        } else {
+          this.showText(session, sessionId, [header,tLine].filter(Boolean).join("\n"));
+        }
       }else{
         this.showText(session, sessionId, header);
       }
+
       this.setDisplayTimeout(sessionId, ms, ()=> this.clearDisplay(session, sessionId));
     }catch(_){
       try{
@@ -586,8 +602,6 @@ class NightscoutMentraStableV2 extends AppServer {
       }catch{}
     }
   }
-
-  // ───────────────────────────── Boot bitmap opcional ────────────────────────
   showBootBitmap(session, sessionId, durationMs = 3000) {
     try {
       const b64 = readBootBitmapB64();
@@ -628,8 +642,6 @@ class NightscoutMentraStableV2 extends AppServer {
       return false;
     }
   }
-
-  // ───────────────────────────── Operación periódica ─────────────────────────
   startNormalOperation(session, sessionId, userId, initialSettings){
     const mins = Math.max(1, Number(initialSettings.updateInterval||5));
     const ms = mins*60000;
@@ -642,11 +654,9 @@ class NightscoutMentraStableV2 extends AppServer {
         this.lastGoodEntry.set(sessionId, d);
         this.updateDailyTirState(sessionId, d.sgv, d.date, s);
         if (s.alertsEnabled) await this.checkAlerts(session, sessionId, d, s);
-      }catch(_){ /* silencio intencional */ }
+      }catch(_){}
     });
   }
-
-  // ───────────────────────────── Limpieza de sesión ──────────────────────────
   cleanupSession(sessionId){
     try{
       this.clearAllTimers(sessionId);
@@ -666,8 +676,6 @@ class NightscoutMentraStableV2 extends AppServer {
       this.settingsDebounce.delete(sessionId);
     }catch{}
   }
-
-  // ───────────────────────────── Eventos de sesión ───────────────────────────
   setupEventHandlers(session, sessionId, userId){
     session?.events?.onButtonPress?.(async()=>{
       const sd = this.sessions.get(sessionId);
@@ -686,24 +694,21 @@ class NightscoutMentraStableV2 extends AppServer {
 
         sd.settings = settings; this.sessions.set(sessionId, sd);
 
-        // invalidar cachés sensibles a ajustes y cortar animaciones/debounce
         this.locales.delete(sessionId);
         this.renderTokens.delete(sessionId);
         this.clearTransientTimers(sessionId);
 
-        // eco de ajustes y re-render inmediato del HUD con nuevos ajustes
         const isEs = (settings.language||"en")==="es";
         const limits = this.getAlertLimits(settings);
-        const hystMg = this.getHysteresisMg(settings);
-        const hystMmol = (hystMg/18).toFixed(1);
         const unitIsMmol = String(settings.units||"").toLowerCase().includes("mmol");
-        const limitsEcho = unitIsMmol? `${(limits.low/18).toFixed(1)}-${(limits.high/18).toFixed(1)} mmol/L`
+        const limitsEcho = unitIsMmol? `${mmString(limits.low)}-${mmString(limits.high)} mmol/L`
                                      : `${limits.low}-${limits.high} mg/dL`;
         const line1 = isEs? "Ajustes guardados":"Settings saved";
         const line2 = `Units: ${settings.units} · HeadUp: ${settings.enable_head_up_display?"ON":"OFF"}`;
         const line3 = `${isEs?"Rango":"Range"}: ${limitsEcho}`;
         const line4 = `${isEs?"Avanzado":"Advanced"}: ${settings.enable_advanced_mode?"ON":"OFF"}`;
-        const ecoTxt = [line1,line2,line3,line4].join("\n");
+        const line5 = `${isEs?"Barras":"Bars"}: ${settings.show_range_bar?"RANGE":(settings.show_tir_bar?"TIR":"OFF")}`;
+        const ecoTxt = [line1,line2,line3,line4,line5].join("\n");
 
         if (this.canRender(sessionId, LAYERS.ECO)){
           this.showTextForce(session, sessionId, ecoTxt);
@@ -711,7 +716,6 @@ class NightscoutMentraStableV2 extends AppServer {
             try{ await this.showGlucoseTemporarily(session, sessionId, settings.display_duration_ms||4000, settings); }catch{}
           });
         }else{
-          // si no se puede ECO, HUD directo
           try{ await this.showGlucoseTemporarily(session, sessionId, settings.display_duration_ms||4000, settings); }catch{}
         }
 
@@ -738,7 +742,12 @@ class NightscoutMentraStableV2 extends AppServer {
         const now = Date.now(), last = this.headUpLastShown.get(sessionId)||0; if (now-last<10000) return; this.headUpLastShown.set(sessionId, now);
         const reading = await this.getGlucoseData(s, sessionId);
         const header = await this.formatBase(reading, s, sessionId);
-        if (!s.enable_advanced_mode){ this.showText(session, sessionId, header); this.setDisplayTimeout(sessionId, s.display_duration_ms||4000, ()=> this.clearDisplay(session, sessionId)); return; }
+        if (!s.enable_advanced_mode){
+          this.showText(session, sessionId, header);
+          this.setDisplayTimeout(sessionId, s.display_duration_ms||4000, ()=> this.clearDisplay(session, sessionId));
+          return;
+        }
+
         const { tirPct } = this.updateDailyTirState(sessionId, reading.sgv, reading.date, s);
         let minMaxLine=""; try{
           const entries = await this.getTodayEntries(s, sessionId);
@@ -750,7 +759,18 @@ class NightscoutMentraStableV2 extends AppServer {
           }
         }catch{}
         let tLine=""; try{ const sum = await this.getRecentTreatments(s,"day",sessionId); tLine = this.formatTreatmentsLine(sum, s, sessionId); }catch{}
-        await this.animateTIRFill(session, sessionId, s, header, tirPct, tLine, minMaxLine);
+
+        if (s.show_range_bar) {
+          const rangeBar = this.buildRangeBar(reading.sgv, s);
+          const txt = [header, rangeBar, tLine, minMaxLine].filter(Boolean).join("\n");
+          this.showText(session, sessionId, txt);
+        } else if (s.show_tir_bar) {
+          await this.animateTIRFill(session, sessionId, s, header, tirPct, tLine, minMaxLine);
+        } else {
+          const txt = [header, tLine, minMaxLine].filter(Boolean).join("\n");
+          this.showText(session, sessionId, txt);
+        }
+
         this.setDisplayTimeout(sessionId, s.display_duration_ms||4000, ()=> this.clearDisplay(session, sessionId));
       }catch{}
     });
@@ -760,8 +780,6 @@ class NightscoutMentraStableV2 extends AppServer {
       session?.logger?.info?.("Session disconnected");
     });
   }
-
-  // ───────────────────────────── Entrypoint de sesión ────────────────────────
   async onSession(session, sessionId, userId){
     try{
       const settings = await this.getUserSettings(session);
@@ -774,13 +792,11 @@ class NightscoutMentraStableV2 extends AppServer {
       this.sessions.set(sessionId, { session, userId, settings, timers:{ display:null, update:null, animation:null, settings:null } });
       this.setupEventHandlers(session, sessionId, userId);
 
-      // Mostrar logo; si se ve, esperar para no taparlo con el HUD
       let bootShown = false;
       try { bootShown = this.showBootBitmap(session, sessionId, 3000) === true; } catch {}
 
       const showFirstHud = () => {
-        this.showGlucoseTemporarily(session, sessionId, settings.display_duration_ms||5000, settings)
-          .catch(()=>{});
+        this.showGlucoseTemporarily(session, sessionId, settings.display_duration_ms||5000, settings).catch(()=>{});
         this.startNormalOperation(session, sessionId, userId, settings);
       };
 
